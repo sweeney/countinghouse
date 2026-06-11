@@ -19,6 +19,9 @@ Sibling/reference service: `../statehouse` (mirror its conventions).
 - **gofmt:** run `gofmt -w` on changed Go files before committing. CI enforces it.
 - **OpenAPI:** when adding/removing an HTTP endpoint, update `internal/httpapi/openapi.yaml`.
   A path-coverage test (`internal/httpapi/spec_test.go`) fails CI if routes and spec drift.
+- **Docs stay in sync:** any change to endpoints, request/response shapes, config, or behaviour
+  must update BOTH `internal/httpapi/openapi.yaml` AND `README.md` in the same change. Treat
+  out-of-date docs as a bug.
 - **TDD for bug fixes:** write a failing test reproducing the bug, confirm red, then fix to green.
 - **Tests matter here:** match statehouse's density. Use fake doubles (fake Influx query
   client) and an injected clock — never call `time.Now()` in logic. `make test` = `go test -race -count=1 ./...`.
