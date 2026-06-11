@@ -1,0 +1,27 @@
+# Countinghouse local configuration.
+# Device inventory and tariffs are fetched from the remote config service
+# (config.swee.net) and are NOT defined here.
+
+http:
+  listen: ":8080"
+  public_url: "https://countinghouse.swee.net"
+
+influx:
+  url: "http://garibaldi:8086"
+  org: "swee.net"
+  bucket: "statehouse"
+  # Supply the read token inline, or point token_file at a file containing
+  # it (token_file is read only when token is empty).
+  token: ""
+  token_file: "/etc/countinghouse/influx-token"
+
+identity:
+  base_url: "https://id.swee.net"
+  client_id: "countinghouse"
+  client_secret: "REPLACE_ME"
+
+remote_config:
+  base_url: "https://config.swee.net"
+
+house:
+  timezone: "Europe/London"

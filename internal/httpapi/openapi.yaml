@@ -1,0 +1,880 @@
+openapi: 3.0.3
+info:
+  title: Countinghouse API
+  description: >
+    Read-side energy cost/accounting HTTP API. Turns per-device telemetry into
+    windowed kWh and cost. All endpoints except /healthz and /openapi.json
+    require a Bearer JWT (user or service token) issued by the configured
+    identity service.
+  version: "0.1.0"
+servers:
+  - url: __PUBLIC_URL__
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: system
+    description: Health and API spec endpoints.
+  - name: data
+    description: Energy, cost, bill and metrics endpoints (require a Bearer JWT).
+
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      description: Returns server health, Influx reachability, and (later) remote config fetch status. No auth required.
+      operationId: getHealth
+      security: []
+      tags: [system]
+      responses:
+        "200":
+          description: Server is running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /openapi.json:
+    get:
+      summary: OpenAPI spec
+      description: This spec document, as JSON. No auth required.
+      operationId: getOpenAPISpec
+      security: []
+      tags: [system]
+      responses:
+        "200":
+          description: OpenAPI 3.0 spec
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /devices/{id}/energy:
+    get:
+      summary: Device energy
+      description: >
+        Windowed kWh consumed by one device. Routing is class-derived: plug
+        classes use the reset-safe counter path (source "counter"); ups_sensor
+        uses the power integral (source "integral"). Non-metered classes return
+        400.
+      operationId: getDeviceEnergy
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/DeviceID"
+        - $ref: "#/components/parameters/Window"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Windowed energy for the device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceEnergyResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /devices/{id}/cost:
+    get:
+      summary: Device cost
+      description: >
+        Windowed kWh and VAT-inclusive GBP cost for one device, at the tariff
+        effective at the window start.
+      operationId: getDeviceCost
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/DeviceID"
+        - $ref: "#/components/parameters/Window"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Windowed cost for the device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceCostResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /series:
+    get:
+      summary: Energy time-series
+      description: >
+        Multi-series, columnar energy time-series over the window: a shared
+        bucket time axis plus per-series kWh, cost and avg_w arrays aligned to
+        it. group_by selects device (default, one series per metered device,
+        excluding the whole-house meter), location, class, or house (two series:
+        "monitored" = sum of devices, "meter" = the whole-house meter).
+      operationId: getSeries
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/Window"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Interval"
+        - $ref: "#/components/parameters/GroupBy"
+      responses:
+        "200":
+          description: Columnar energy time-series
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeriesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /devices/{id}/series:
+    get:
+      summary: Device energy time-series
+      description: >
+        Single-device convenience form of /series: the same columnar
+        SeriesResponse shape carrying exactly one series for the device.
+        Non-metered classes return 400.
+      operationId: getDeviceSeries
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/DeviceID"
+        - $ref: "#/components/parameters/Window"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - $ref: "#/components/parameters/Interval"
+      responses:
+        "200":
+          description: Columnar energy time-series for the device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SeriesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /bill:
+    get:
+      summary: Electricity bill
+      description: >
+        Per-device cost breakdown plus standing charge, total, and
+        reconciliation against the whole-house meter for the window.
+      operationId: getBill
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/Window"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Assembled bill
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /tariffs:
+    get:
+      summary: Current tariffs by fuel
+      description: >
+        All configured tariffs keyed by fuel (electricity, gas, ...). Rates are
+        ex-VAT; vat_rate gives the gross-up. Countinghouse bills electricity
+        today; gas is exposed for forward-compatibility with gas devices.
+      operationId: getTariffs
+      tags: [data]
+      responses:
+        "200":
+          description: Tariffs keyed by fuel
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TariffsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /metrics:
+    get:
+      summary: Service metrics
+      description: Influx query counters and basic runtime info.
+      operationId: getMetrics
+      tags: [data]
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /devices:
+    get:
+      summary: Device catalog
+      description: >
+        Discovery catalog: a pass-through of the statehouse_devices namespace
+        enriched with a derived capabilities hint ("energy" when the class is
+        metered, "events" for binary_state_device). Lets a UI build a device
+        picker without knowing Influx. Sorted by id.
+      operationId: getDevices
+      tags: [data]
+      responses:
+        "200":
+          description: Device catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DevicesCatalog"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /devices/{id}/events:
+    get:
+      summary: Device event timeline
+      description: >
+        Ordered state-transition edges for one device over the window
+        (vertical-line overlays). Each event carries the raw from/to labels and
+        a normalized on flag (omitted for momentary/unknown labels).
+      operationId: getDeviceEvents
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/DeviceID"
+        - $ref: "#/components/parameters/Window"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Transition events for the device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceEventsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /devices/{id}/intervals:
+    get:
+      summary: Device on/off intervals
+      description: >
+        Sustained ON spans for one device over the window (shaded bands), with
+        the carry-in opening state (state_at_start), per-interval durations, an
+        open flag for an in-progress span at the window end, and summary stats
+        (on_count, total_on_seconds, duty).
+      operationId: getDeviceIntervals
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/DeviceID"
+        - $ref: "#/components/parameters/Window"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Intervals and stats for the device
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceIntervalsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /events:
+    get:
+      summary: Multi-device event overlay
+      description: >
+        Categorical timeline overlay across a device set. The set comes from
+        devices= (csv of ids; an unknown id is a 400), class= (all devices of a
+        class), or the default (all binary_state_device devices). group_by=device
+        (default) yields one series per device; group_by=class merges every
+        member device's events under each class key, time-ordered.
+      operationId: getEvents
+      tags: [data]
+      parameters:
+        - name: devices
+          in: query
+          required: false
+          description: Comma-separated device ids to overlay. An unknown id is a 400.
+          schema:
+            type: string
+        - name: class
+          in: query
+          required: false
+          description: Restrict the set to devices of this class (ignored when devices= is given).
+          schema:
+            type: string
+        - $ref: "#/components/parameters/Window"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - name: group_by
+          in: query
+          required: false
+          description: How to group series. Defaults to "device".
+          schema:
+            type: string
+            enum: [device, class]
+            default: device
+      responses:
+        "200":
+          description: Columnar multi-device event overlay
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+components:
+  parameters:
+    DeviceID:
+      name: id
+      in: path
+      required: true
+      description: Device id (key in the statehouse_devices namespace).
+      schema:
+        type: string
+    Window:
+      name: window
+      in: query
+      required: false
+      description: Window spec. Defaults to "today".
+      schema:
+        type: string
+        enum: [today, week, month, custom]
+        default: today
+    From:
+      name: from
+      in: query
+      required: false
+      description: Custom window start (RFC3339). Required when window=custom.
+      schema:
+        type: string
+        format: date-time
+    To:
+      name: to
+      in: query
+      required: false
+      description: Custom window end (RFC3339). Required when window=custom.
+      schema:
+        type: string
+        format: date-time
+    Interval:
+      name: interval
+      in: query
+      required: false
+      description: >
+        Bucket granularity. Defaults smartly to the window (today→1h,
+        week/month→1d, custom→by span). An interval whose bucket count over the
+        window exceeds the ~1000 cap returns 400 asking for a coarser interval.
+      schema:
+        type: string
+        enum: [5m, 15m, 30m, 1h, 6h, 1d]
+    GroupBy:
+      name: group_by
+      in: query
+      required: false
+      description: How to group series. Defaults to "device".
+      schema:
+        type: string
+        enum: [device, location, class, house]
+        default: device
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid Bearer JWT
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    BadRequest:
+      description: Invalid or missing query parameters, or device has no energy series
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Unknown device or absent tariff
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unavailable:
+      description: No tariff configured
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    BadGateway:
+      description: Upstream Influx query failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+
+    Tariff:
+      type: object
+      properties:
+        unit_rate:
+          type: number
+          description: GBP per kWh, ex-VAT.
+        daily_standing_charge:
+          type: number
+          description: GBP per day, ex-VAT.
+        unit:
+          type: string
+        vat_rate:
+          type: number
+
+    TariffsResponse:
+      type: object
+      properties:
+        currency:
+          type: string
+          example: GBP
+        tariffs:
+          type: object
+          description: Tariffs keyed by fuel (e.g. electricity, gas).
+          additionalProperties:
+            $ref: "#/components/schemas/Tariff"
+
+    DeviceEnergyResponse:
+      type: object
+      properties:
+        device_id:
+          type: string
+        kwh:
+          type: number
+        source:
+          type: string
+          enum: [counter, integral]
+        window:
+          type: string
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+      required: [device_id, kwh, source, window, from, to]
+
+    DeviceCostResponse:
+      type: object
+      properties:
+        device_id:
+          type: string
+        kwh:
+          type: number
+        cost:
+          type: number
+        currency:
+          type: string
+          example: GBP
+        window:
+          type: string
+        tariff:
+          type: object
+          properties:
+            unit_rate:
+              type: number
+            vat_rate:
+              type: number
+      required: [device_id, kwh, cost, currency, window]
+
+    DeviceCostBreakdown:
+      type: object
+      properties:
+        device_id:
+          type: string
+        display_name:
+          type: string
+        location:
+          type: string
+        class:
+          type: string
+        kwh:
+          type: number
+        cost:
+          type: number
+
+    Reconciliation:
+      type: object
+      properties:
+        monitored_kwh:
+          type: number
+        meter_kwh:
+          type: number
+        unmonitored_kwh:
+          type: number
+        coverage:
+          type: number
+          description: Monitored fraction of meter; not clamped to [0,1].
+
+    BillResponse:
+      type: object
+      properties:
+        window:
+          type: string
+        currency:
+          type: string
+          example: GBP
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeviceCostBreakdown"
+        energy_cost:
+          type: number
+        standing_charge:
+          type: number
+        total:
+          type: number
+        reconciliation:
+          $ref: "#/components/schemas/Reconciliation"
+
+    MetricsResponse:
+      type: object
+      properties:
+        query_count:
+          type: integer
+        query_errors:
+          type: integer
+        influx_avg_latency_ms:
+          type: number
+        version:
+          type: string
+        uptime_seconds:
+          type: integer
+        goroutines:
+          type: integer
+
+    Series:
+      type: object
+      description: >
+        One line/bar: a labelled, location/class-tagged set of per-bucket arrays
+        (each of length len(buckets)) plus window totals.
+      properties:
+        key:
+          type: string
+          description: Series identity (device id, location, class, or "monitored"/"meter").
+        label:
+          type: string
+        location:
+          type: string
+        class:
+          type: string
+        kwh:
+          type: array
+          items:
+            type: number
+          description: Per-bucket energy (kWh), aligned to buckets.
+        cost:
+          type: array
+          items:
+            type: number
+          description: Per-bucket VAT-inclusive GBP cost, aligned to buckets.
+        avg_w:
+          type: array
+          items:
+            type: number
+          description: Per-bucket mean power (W); summed across members for aggregated groups.
+        total_kwh:
+          type: number
+        total_cost:
+          type: number
+      required: [key, label, kwh, cost, avg_w, total_kwh, total_cost]
+
+    SeriesResponse:
+      type: object
+      description: >
+        Columnar energy time-series: a shared bucket time axis plus per-series
+        value arrays that all align to it.
+      properties:
+        window:
+          type: string
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        interval:
+          type: string
+          enum: [5m, 15m, 30m, 1h, 6h, 1d]
+        group_by:
+          type: string
+          enum: [device, location, class, house]
+        buckets:
+          type: array
+          items:
+            type: string
+            format: date-time
+          description: Local-timezone bucket-start axis every series aligns to.
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/Series"
+      required: [window, from, to, interval, group_by, buckets, series]
+
+    Event:
+      type: object
+      description: A single state transition at a point in time.
+      properties:
+        time:
+          type: string
+          format: date-time
+        from:
+          type: string
+          description: Raw device_activity from-label (e.g. "idle").
+        to:
+          type: string
+          description: Raw device_activity to-label (e.g. "active").
+        on:
+          type: boolean
+          description: >
+            Normalized on/off state derived from the to-label. Omitted when the
+            label is not a known on/off state (a momentary/unknown event).
+      required: [time, from, to]
+
+    Interval:
+      type: object
+      description: A sustained ON span over the window.
+      properties:
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+          nullable: true
+          description: End of the span, or null when still open at the window end.
+        state:
+          type: string
+          description: Raw label of the span.
+        on:
+          type: boolean
+        duration_s:
+          type: number
+          description: Window-clamped span length in seconds.
+        open:
+          type: boolean
+          description: True when the span is still in progress at the window end.
+      required: [start, state, duration_s]
+
+    Stats:
+      type: object
+      description: Summary of ON intervals over the window.
+      properties:
+        on_count:
+          type: integer
+        total_on_seconds:
+          type: number
+        duty:
+          type: number
+          description: total_on_seconds divided by the window length in seconds.
+      required: [on_count, total_on_seconds, duty]
+
+    DeviceEventsResponse:
+      type: object
+      properties:
+        device_id:
+          type: string
+        window:
+          type: string
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+      required: [device_id, window, from, to, events]
+
+    DeviceIntervalsResponse:
+      type: object
+      properties:
+        device_id:
+          type: string
+        window:
+          type: string
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        state_at_start:
+          type: string
+          description: Raw carry-in state the device was in as the window opened.
+        intervals:
+          type: array
+          items:
+            $ref: "#/components/schemas/Interval"
+        stats:
+          $ref: "#/components/schemas/Stats"
+      required: [device_id, window, from, to, state_at_start, intervals, stats]
+
+    EventSeries:
+      type: object
+      description: One multi-device /events series (per device or per class).
+      properties:
+        key:
+          type: string
+          description: Series identity (device id or class).
+        label:
+          type: string
+        class:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+      required: [key, label, class, events]
+
+    EventsResponse:
+      type: object
+      description: Columnar multi-device event overlay.
+      properties:
+        window:
+          type: string
+        from:
+          type: string
+          format: date-time
+        to:
+          type: string
+          format: date-time
+        group_by:
+          type: string
+          enum: [device, class]
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/EventSeries"
+      required: [window, from, to, group_by, series]
+
+    DeviceCatalogEntry:
+      type: object
+      description: One device catalog row.
+      properties:
+        id:
+          type: string
+        display_name:
+          type: string
+        location:
+          type: string
+        class:
+          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [energy, events]
+          description: Derived capability hints ("energy" for metered classes, "events" for binary_state_device).
+      required: [id, display_name, location, class, capabilities]
+
+    DevicesCatalog:
+      type: object
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeviceCatalogEntry"
+      required: [devices]
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        started_ago:
+          type: integer
+          description: Seconds since the server started.
+        goroutines:
+          type: integer
+        influx_reachable:
+          type: boolean
+        remote_config:
+          type: object
+          description: >-
+            Per-namespace status of the most recent remote-config fetch, keyed
+            by namespace (statehouse_devices, energy_tariffs). Omitted when no
+            remote-config fetcher is wired.
+          additionalProperties:
+            type: object
+            properties:
+              ok:
+                type: boolean
+              fetched_at:
+                type: string
+                format: date-time
+              error:
+                type: string
+      required: [status, started_at, started_ago, goroutines, influx_reachable]

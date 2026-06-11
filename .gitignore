@@ -1,0 +1,9 @@
+# Build output
+/bin/
+*.test
+
+# Local Claude settings
+.claude/settings.local.json
+
+# Editor / OS
+.DS_Store
