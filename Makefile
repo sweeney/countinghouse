@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt clean deploy
+.PHONY: build test lint lint-spec fmt clean deploy
 
 BINARY := countinghouse
 MAIN   := ./cmd/countinghouse
@@ -11,6 +11,9 @@ test:
 
 lint:
 	go vet ./...
+
+lint-spec:
+	npx --yes @stoplight/spectral-cli@latest lint internal/httpapi/openapi.yaml
 
 fmt:
 	gofmt -w .
