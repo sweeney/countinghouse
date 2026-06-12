@@ -75,7 +75,7 @@ from(bucket: %q)
   |> filter(fn: (r) => r._measurement == "device_power" and r._field == "energy_kwh")
   |> filter(fn: (r) => contains(value: r.device_id, set: %s))
   |> increase()
-  |> aggregateWindow(every: %s, fn: last, location: timezone.location(name: %q), createEmpty: true)
+  |> aggregateWindow(every: %s, fn: last, timeSrc: "_start", location: timezone.location(name: %q), createEmpty: true)
   |> difference()`,
 		bucket,
 		fluxTime(padStart(start, interval)),
@@ -103,7 +103,7 @@ from(bucket: %q)
   |> range(start: %s, stop: %s)
   |> filter(fn: (r) => r._measurement == "device_power" and r._field == "power_w")
   |> filter(fn: (r) => contains(value: r.device_id, set: %s))
-  |> aggregateWindow(every: %s, fn: mean, location: timezone.location(name: %q), createEmpty: true)`,
+  |> aggregateWindow(every: %s, fn: mean, timeSrc: "_start", location: timezone.location(name: %q), createEmpty: true)`,
 		bucket,
 		fluxTime(start),
 		fluxTime(stop),

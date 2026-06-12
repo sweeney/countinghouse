@@ -222,6 +222,11 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want one of device, location, class, house)")
 		return
 	}
+	shape := r.URL.Query().Get("shape")
+	if !energy.ValidShape(shape) {
+		writeError(w, http.StatusBadRequest, "invalid 'shape' (want columns or rows)")
+		return
+	}
 
 	win, iv, ok := s.resolveSeriesParams(w, r)
 	if !ok {
@@ -239,6 +244,16 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
 	}
+	writeSeriesShaped(w, shape, resp)
+}
+
+// writeSeriesShaped writes a series response in the requested shape: the columnar
+// SeriesResponse (default) or, for shape=rows, the row-oriented RowsResponse.
+func writeSeriesShaped(w http.ResponseWriter, shape string, resp energy.SeriesResponse) {
+	if shape == energy.ShapeRows {
+		writeJSON(w, http.StatusOK, resp.Rows())
+		return
+	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -254,6 +269,11 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, metered := energy.PathForClass(dev.Class); !metered {
 		writeError(w, http.StatusBadRequest, "device has no energy series")
+		return
+	}
+	shape := r.URL.Query().Get("shape")
+	if !energy.ValidShape(shape) {
+		writeError(w, http.StatusBadRequest, "invalid 'shape' (want columns or rows)")
 		return
 	}
 
@@ -276,7 +296,7 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeSeriesShaped(w, shape, resp)
 }
 
 // handleBill serves GET /bill. It queries every billable device (metered,

@@ -46,15 +46,17 @@ type Series struct {
 	TotalCost float64 `json:"total_cost"`
 }
 
-// SeriesResponse is the columnar time-series payload (PLAN §A): a single shared
-// time axis (Buckets) plus per-series value arrays that all align to it. This
-// maps directly onto charting libraries and is JSON-friendly.
+// SeriesResponse is the columnar ("wide") time-series payload (PLAN §A): a single
+// shared time axis (Buckets) plus per-series value arrays that all align to it.
+// This maps directly onto web charting libraries (one array per dataset) and is
+// the default. For the row-oriented ("tidy"/long) alternative, see Rows().
 type SeriesResponse struct {
 	Window   string      `json:"window"`
 	From     string      `json:"from"`
 	To       string      `json:"to"`
 	Interval string      `json:"interval"`
 	GroupBy  string      `json:"group_by"`
+	Shape    string      `json:"shape"` // "columns"
 	Buckets  []time.Time `json:"buckets"`
 	Series   []Series    `json:"series"`
 }
@@ -445,6 +447,7 @@ func BuildSeries(
 		To:       win.Stop.In(loc).Format(time.RFC3339),
 		Interval: iv.Token,
 		GroupBy:  resolveGroupBy(groupBy),
+		Shape:    ShapeColumns,
 		Buckets:  buckets,
 		Series:   series,
 	}, nil

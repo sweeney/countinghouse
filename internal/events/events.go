@@ -41,6 +41,21 @@ var onStates = map[string]bool{
 	"idle":   false,
 }
 
+// eventClasses are the device classes whose state transitions are exposed as
+// on/off / state-change events (the device_activity series). Extend this set as
+// new event-bearing classes appear (e.g. "doorbell"). Energy/sensor classes are
+// deliberately excluded: their incidental active/idle activity is not a binary
+// state worth overlaying.
+var eventClasses = map[string]bool{
+	"binary_state_device": true, // hot_water, central_heating
+	"fire_alarm":          true, // firealarm_*
+}
+
+// IsEventClass reports whether a device class produces on/off / state-transition
+// events surfaced by the events endpoints. Drives the "events" capability in the
+// /devices catalog and the default device set for /events.
+func IsEventClass(class string) bool { return eventClasses[class] }
+
 // normalizeOn returns the normalized on/off state for a raw label: a pointer to
 // true for an "on" label, to false for an "off" label, and nil when the label
 // is not a known on/off state (a momentary/unknown event).

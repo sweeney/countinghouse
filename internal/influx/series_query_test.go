@@ -11,6 +11,21 @@ var (
 	seriesStop  = time.Date(2026, 6, 12, 0, 0, 0, 0, time.UTC)
 )
 
+// Both series builders MUST stamp buckets at their LEFT edge (timeSrc:"_start").
+// Influx's aggregateWindow defaults to the right edge (_stop); with the canonical
+// axis keyed on left edges, the default shifts every value one bucket late (the
+// first bucket reads 0 and the last bucket's data is lost). This is invisible at
+// fine intervals but glaring at coarse ones — caught via the breakdown demo.
+func TestSeriesBuilders_StampLeftEdge(t *testing.T) {
+	counter := BuildCounterSeriesFlux("b", []string{"d"}, seriesStart, seriesStop, "6h", "Europe/London")
+	power := BuildPowerMeanSeriesFlux("b", []string{"d"}, seriesStart, seriesStop, "6h", "Europe/London")
+	for name, flux := range map[string]string{"counter": counter, "power": power} {
+		if !strings.Contains(flux, `timeSrc: "_start"`) {
+			t.Errorf("%s builder must set timeSrc:\"_start\" (left-edge buckets); flux:\n%s", name, flux)
+		}
+	}
+}
+
 func TestBuildCounterSeriesFlux(t *testing.T) {
 	flux := BuildCounterSeriesFlux("statehouse", []string{"winefridge", "freezer"}, seriesStart, seriesStop, "1h", "Europe/London")
 
@@ -21,7 +36,7 @@ func TestBuildCounterSeriesFlux(t *testing.T) {
 		`r._field == "energy_kwh"`,
 		`contains(value: r.device_id, set: ["winefridge", "freezer"])`,
 		`increase()`,
-		`aggregateWindow(every: 1h, fn: last, location: timezone.location(name: "Europe/London"), createEmpty: true)`,
+		`aggregateWindow(every: 1h, fn: last, timeSrc: "_start", location: timezone.location(name: "Europe/London"), createEmpty: true)`,
 		`difference()`,
 		`stop: 2026-06-12T00:00:00Z`,
 	}
@@ -84,7 +99,7 @@ func TestBuildPowerMeanSeriesFlux(t *testing.T) {
 		`r._measurement == "device_power"`,
 		`r._field == "power_w"`,
 		`contains(value: r.device_id, set: ["network-ups", "office-ups"])`,
-		`aggregateWindow(every: 15m, fn: mean, location: timezone.location(name: "Europe/London"), createEmpty: true)`,
+		`aggregateWindow(every: 15m, fn: mean, timeSrc: "_start", location: timezone.location(name: "Europe/London"), createEmpty: true)`,
 		// No pad for the mean series: range starts AT the window start.
 		`start: 2026-06-11T00:00:00Z`,
 		`stop: 2026-06-12T00:00:00Z`,

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/influx"
 )
 
@@ -529,6 +530,43 @@ func TestDevicesCatalog(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), `"capabilities":null`) {
 		t.Errorf("capabilities serialised as null: %s", w.Body.String())
+	}
+}
+
+// Regression: fire_alarm devices emit device_activity events but were not flagged
+// events-capable (only binary_state_device was), making them undiscoverable to a
+// consumer picking overlay devices by capability.
+func TestDevicesCatalog_FireAlarmIsEventsCapable(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{
+		devices: map[string]config.DeviceConfig{
+			"firealarm_office": {Class: "fire_alarm", Location: "office", DisplayName: "Office Fire Alarm"},
+			"climate_x":        {Class: "environmental_sensor", Location: "hall", DisplayName: "Sensor"},
+		},
+		tariffs: testTariffs(),
+	}
+	w := doGET(t, s, "/devices")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var doc struct {
+		Devices []struct {
+			ID           string   `json:"id"`
+			Capabilities []string `json:"capabilities"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	caps := map[string][]string{}
+	for _, d := range doc.Devices {
+		caps[d.ID] = d.Capabilities
+	}
+	if got := caps["firealarm_office"]; len(got) != 1 || got[0] != "events" {
+		t.Errorf("fire_alarm caps = %v, want [events]", got)
+	}
+	if got := caps["climate_x"]; len(got) != 0 {
+		t.Errorf("environmental_sensor caps = %v, want []", got)
 	}
 }
 

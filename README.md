@@ -36,10 +36,10 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /devices` | Device catalog (id, display_name, location, class, `capabilities`: `energy`/`events`). |
 | `GET /devices/{id}/energy?window=&from=&to=` | Windowed kWh for one device (`source`: counter/integral). |
 | `GET /devices/{id}/cost?window=…` | Windowed kWh + VAT-inclusive cost at the effective tariff. |
-| `GET /devices/{id}/series?window=&interval=` | Single-device columnar time-series (kWh / cost / avg W per bucket). |
+| `GET /devices/{id}/series?window=&interval=&shape=` | Single-device time-series (kWh / cost / avg W per bucket). |
 | `GET /devices/{id}/events?window=` | State-transition events (for vertical-line overlays). |
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
-| `GET /series?window=&interval=&group_by=` | Multi-series time-series. `group_by`: `device` (default), `location`, `class`, `house` (monitored + meter). |
+| `GET /series?window=&interval=&group_by=&shape=` | Multi-series time-series. `group_by`: `device` (default), `location`, `class`, `house` (monitored + meter). |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
 | `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. |
 | `GET /tariffs` | Current tariffs keyed by fuel (electricity, gas). |
@@ -48,6 +48,51 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 **Windows:** `today`, `week` (starts Monday), `month` — all period-to-date — and `custom`
 (requires RFC3339 `from` & `to`). **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default
 per window and a ~1000-bucket cap.
+
+### Series response shapes (`shape=columns|rows`)
+
+The series endpoints return one of two layouts, selected by `shape` (default `columns`).
+Both carry the same numbers; pick whichever maps cleanly onto your consumer.
+
+**`shape=columns`** (default) — a shared `buckets` time axis plus per-series value arrays.
+Each array drops straight into a web charting library dataset:
+
+```json
+{ "window": "today", "interval": "1h", "group_by": "device", "shape": "columns",
+  "buckets": ["2026-06-11T00:00:00+01:00", "2026-06-11T01:00:00+01:00"],
+  "series": [
+    { "key": "winefridge", "label": "Wine Fridge", "location": "kitchen",
+      "class": "continuous_power_device",
+      "kwh": [0.05, 0.04], "cost": [0.011, 0.009], "avg_w": [52.1, 41.8],
+      "total_kwh": 1.30, "total_cost": 0.28 }
+  ] }
+```
+```js
+// Chart.js
+{ labels: data.buckets, datasets: data.series.map(s => ({ label: s.label, data: s.kwh })) }
+```
+
+**`shape=rows`** — the "tidy"/long form: a flat `rows` list of one object per
+(series, bucket), plus lightweight per-series `series` metadata (labels + totals for
+legends). Rows are ordered by series then bucket time. Idiomatic for `Codable`
+consumers (decode `rows` into a struct array) and grouped native charts:
+
+```json
+{ "window": "today", "interval": "1h", "group_by": "device", "shape": "rows",
+  "series": [ { "key": "winefridge", "label": "Wine Fridge", "total_kwh": 1.30, "total_cost": 0.28 } ],
+  "rows": [
+    { "key": "winefridge", "time": "2026-06-11T00:00:00+01:00", "kwh": 0.05, "cost": 0.011, "avg_w": 52.1 },
+    { "key": "winefridge", "time": "2026-06-11T01:00:00+01:00", "kwh": 0.04, "cost": 0.009, "avg_w": 41.8 }
+  ] }
+```
+```swift
+// Swift Charts — decode rows into [Point], group by key
+struct Point: Codable, Identifiable { let id = UUID(); let key: String; let time: Date; let kwh, cost, avg_w: Double }
+Chart(points) { p in LineMark(x: .value("t", p.time), y: .value("W", p.avg_w)).foregroundStyle(by: .value("series", p.key)) }
+```
+
+Timestamps are RFC3339 with the local offset (parse with JS `new Date(...)` / Swift
+`ISO8601`/`Date`). Values are pre-rounded (kWh 3dp, cost 4dp GBP, avg_w 1dp W).
 
 The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth for request
 and response schemas; a path-coverage test fails CI if routes and spec drift.

@@ -279,6 +279,19 @@ func TestBuildIntervals_StateIsOnLabel(t *testing.T) {
 	}
 }
 
+func TestIsEventClass(t *testing.T) {
+	for _, c := range []string{"binary_state_device", "fire_alarm"} {
+		if !IsEventClass(c) {
+			t.Errorf("IsEventClass(%q) = false, want true", c)
+		}
+	}
+	for _, c := range []string{"continuous_power_device", "ups_sensor", "energy_meter", "environmental_sensor", "", "doorbell"} {
+		if IsEventClass(c) {
+			t.Errorf("IsEventClass(%q) = true, want false (not yet an event class)", c)
+		}
+	}
+}
+
 func TestComputeStats(t *testing.T) {
 	loc := london(t)
 	start := time.Date(2026, 6, 11, 0, 0, 0, 0, loc)

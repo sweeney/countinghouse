@@ -11,10 +11,6 @@ import (
 	"github.com/sweeney/countinghouse/internal/events"
 )
 
-// binaryStateClass is the device class whose state transitions populate the
-// device_activity measurement; it is the typical /events overlay set.
-const binaryStateClass = "binary_state_device"
-
 // buildTimeline runs events.BuildTimeline for a device set, bumping the query
 // counters (and latency) for /metrics. BuildTimeline issues two Influx queries
 // (activity + carry-in); we count the whole build as one logical query so the
@@ -155,9 +151,10 @@ func (s *Server) resolveEventDevices(w http.ResponseWriter, r *http.Request) ([]
 			}
 		}
 	default:
-		// Default overlay set: all binary_state_device devices.
+		// Default overlay set: all event-bearing devices (binary_state_device,
+		// fire_alarm, ...) — see events.IsEventClass.
 		for id, dev := range devices {
-			if dev.Class == binaryStateClass {
+			if events.IsEventClass(dev.Class) {
 				ids = append(ids, id)
 			}
 		}
@@ -169,7 +166,7 @@ func (s *Server) resolveEventDevices(w http.ResponseWriter, r *http.Request) ([]
 
 // handleEvents serves GET /events: a multi-device categorical timeline overlay.
 // The device set comes from devices= (csv), class= (all of a class), or the
-// default (all binary_state_device devices). group_by=device (default) yields
+// default (all event-bearing devices). group_by=device (default) yields
 // one series per device; group_by=class merges every member device's events
 // under each class key.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -276,9 +273,9 @@ type catalogEntry struct {
 
 // handleDevices serves GET /devices: the discovery catalog. It is a pass-through
 // of the statehouse_devices snapshot enriched with a derived capabilities hint
-// (energy when the class is metered, events for binary_state_device), so a UI
-// can build a device picker without knowing Influx. Sorted by id for stable
-// output.
+// (energy when the class is metered, events for event-bearing classes —
+// binary_state_device, fire_alarm), so a UI can build a device picker without
+// knowing Influx. Sorted by id for stable output.
 func (s *Server) handleDevices(w http.ResponseWriter, _ *http.Request) {
 	devices := s.Config.Devices()
 
@@ -295,7 +292,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, _ *http.Request) {
 		if _, metered := energy.PathForClass(dev.Class); metered {
 			caps = append(caps, "energy")
 		}
-		if dev.Class == binaryStateClass {
+		if events.IsEventClass(dev.Class) {
 			caps = append(caps, "events")
 		}
 		out = append(out, catalogEntry{
