@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Countinghouse — consumption breakdown</title>
+<!-- Chart.js from CDN (no build step). Everything else is vanilla. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#0f1220; --panel:#191d2e; --ink:#e7e9f3; --muted:#9aa0b8; --line:#2a3050; --accent:#5b8cff; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:20px 24px; border-bottom:1px solid var(--line); }
+  h1 { margin:0 0 4px; font-size:20px; }
+  .sub { color:var(--muted); font-size:13px; }
+  main { max-width:1000px; margin:0 auto; padding:24px; }
+  .controls { display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-bottom:18px; }
+  .field { display:flex; flex-direction:column; gap:4px; }
+  .field label { font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  select, input, button { background:var(--panel); color:var(--ink); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; font-size:14px; }
+  button { background:var(--accent); border-color:var(--accent); color:#fff; cursor:pointer; font-weight:600; }
+  button.ghost { background:var(--panel); color:var(--ink); border-color:var(--line); font-weight:400; }
+  button:hover { filter:brightness(1.08); }
+  button:disabled { opacity:.7; cursor:default; }
+  .refresh-wrap { display:flex; align-items:center; gap:10px; }
+  .spinner { width:16px; height:16px; border:2px solid var(--line); border-top-color:var(--accent);
+             border-radius:50%; animation:spin .7s linear infinite; }
+  .spinner[hidden] { display:none; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px 20px; }
+  .chartwrap { position:relative; height:420px; }
+  /* multi-select tick dropdown */
+  .dd { position:relative; }
+  .dd-panel { position:absolute; z-index:10; top:calc(100% + 4px); left:0; min-width:230px; max-height:280px; overflow:auto;
+              background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:8px; display:none; box-shadow:0 8px 30px rgba(0,0,0,.4); }
+  .dd-panel.open { display:block; }
+  .dd-row { display:flex; align-items:center; gap:8px; padding:5px 6px; border-radius:6px; }
+  .dd-row:hover { background:#0c0f1a; }
+  .dd-row .tot { margin-left:auto; color:var(--muted); font-size:12px; }
+  .dd-actions { display:flex; gap:10px; padding:4px 6px 8px; border-bottom:1px solid var(--line); margin-bottom:6px; }
+  .dd-actions a { color:var(--accent); cursor:pointer; font-size:12px; }
+  .sw { width:12px; height:12px; border-radius:3px; flex:0 0 auto; }
+  #err { color:#ff7a90; margin-top:12px; min-height:18px; font-size:13px; }
+  .src { color:var(--muted); font-size:12px; margin-top:14px; }
+  code { background:#0c0f1a; padding:1px 6px; border-radius:5px; }
+  details { margin-top:16px; color:var(--muted); }
+  summary { cursor:pointer; }
+  details .field { margin-top:10px; max-width:680px; } details input { width:100%; }
+</style>
+  <!-- optional local dev token (gitignored): sets window.CH_DEV_TOKEN -->
+  <script src="token.local.js"></script>
+</head>
+<body>
+<header>
+  <h1>Countinghouse — consumption breakdown</h1>
+  <div class="sub">Stacked energy/cost by device, room, or class — consuming the API's
+    row-oriented <code>shape=rows</code> series. Tick which series to stack.</div>
+</header>
+
+<main>
+  <div class="controls">
+    <div class="field">
+      <label for="groupBy">Group by</label>
+      <select id="groupBy">
+        <option value="device">Device</option>
+        <option value="location" selected>Room</option>
+        <option value="class">Class</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Series</label>
+      <div class="dd">
+        <button class="ghost" id="ddBtn" type="button">Series ▾</button>
+        <div class="dd-panel" id="ddPanel">
+          <div class="dd-actions"><a id="ddAll">All</a><a id="ddNone">None</a></div>
+          <div id="ddList"></div>
+        </div>
+      </div>
+    </div>
+    <div class="field">
+      <label for="metric">Metric</label>
+      <select id="metric">
+        <option value="kwh" selected>Energy (kWh)</option>
+        <option value="cost">Cost (£)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="ctype">Chart</label>
+      <select id="ctype">
+        <option value="bar-stacked" selected>Stacked bars</option>
+        <option value="bar-grouped">Grouped bars</option>
+        <option value="line">Lines</option>
+        <option value="area">Stacked area</option>
+        <option value="pie">Pie (totals)</option>
+        <option value="doughnut">Doughnut (totals)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="window">Window</label>
+      <select id="window">
+        <option value="today" selected>Today</option>
+        <option value="week">This week</option>
+        <option value="month">This month</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="interval">Interval</label>
+      <select id="interval">
+        <option value="">auto</option>
+        <option value="5m">5m</option>
+        <option value="15m">15m</option>
+        <option value="30m">30m</option>
+        <option value="1h">1h</option>
+        <option value="6h" selected>6h</option>
+        <option value="1d">1d</option>
+      </select>
+    </div>
+    <div class="refresh-wrap">
+      <button id="reload">Refresh</button>
+      <span class="spinner" id="spin" hidden aria-hidden="true"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="chartwrap"><canvas id="chart"></canvas></div>
+    <div id="err"></div>
+    <div class="src" id="src"></div>
+  </div>
+
+  <details>
+    <summary>Connection settings</summary>
+    <div class="field"><label for="base">API base URL</label><input id="base" value="http://localhost:8081"></div>
+    <div class="field">
+      <label for="token">Bearer token (saved in this browser; expires ~15 min)</label>
+      <input id="token" value="" spellcheck="false" placeholder="paste id.swee.net token">
+    </div>
+  </details>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const PALETTE = ['#5b8cff','#3ad6a8','#ffb454','#ff7a90','#b18cff','#4cc9f0','#f15bb5','#9ad94b',
+                 '#ff9f1c','#48cae4','#e07a5f','#81b29a','#c77dff','#06d6a0'];
+
+let chart;
+let data = null;          // { buckets:[iso], keys:[{key,label}], vals:{key:{iso:{kwh,cost}}} }
+let selected = new Set(); // keys currently ticked
+
+function base()  { return $('base').value.replace(/\/+$/, ''); }
+function token() { return $('token').value.trim(); }
+
+async function api(path) {
+  const res = await fetch(base() + path, { headers: { Authorization: 'Bearer ' + token() } });
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' on ' + path + ' — ' + (await res.text()).slice(0, 200));
+  return res.json();
+}
+
+function colorFor(i) { return PALETTE[i % PALETTE.length]; }
+function hexA(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${(n>>16)&255},${(n>>8)&255},${n&255},${a})`; }
+
+function fmtLabels(buckets, interval) {
+  const daily = interval === '1d' || interval === '6h';
+  return buckets.map(iso => {
+    const d = new Date(iso);
+    return daily ? d.toLocaleDateString([], { month:'short', day:'numeric', hour: interval==='6h' ? '2-digit' : undefined })
+                 : d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  });
+}
+
+// setLoading toggles the in-flight UI: the Refresh button becomes a disabled
+// "Refreshing…" and the spinner beside it spins while a request is on the wire.
+function setLoading(on) {
+  const btn = $('reload');
+  btn.disabled = on;
+  btn.textContent = on ? 'Refreshing…' : 'Refresh';
+  $('spin').hidden = !on;
+}
+
+async function fetchData() {
+  $('err').textContent = '';
+  const groupBy = $('groupBy').value, win = $('window').value, iv = $('interval').value;
+  const path = '/series?window=' + win + '&group_by=' + groupBy + '&shape=rows' + (iv ? '&interval=' + iv : '');
+  $('src').textContent = 'source: GET ' + base() + path;
+
+  setLoading(true);
+  try {
+    const resp = await api(path);
+
+    // Pivot the tidy/long rows into { key: { time: {kwh,cost} } } + an ordered bucket axis.
+    const buckets = [], seen = new Set();
+    const vals = {};
+    for (const r of resp.rows) {
+      if (!seen.has(r.time)) { seen.add(r.time); buckets.push(r.time); }
+      (vals[r.key] ??= {})[r.time] = { kwh: r.kwh, cost: r.cost };
+    }
+    buckets.sort();
+    data = {
+      buckets,
+      interval: resp.interval,
+      keys: resp.series.map(s => ({ key: s.key, label: s.label || s.key, total_kwh: s.total_kwh, total_cost: s.total_cost })),
+      vals,
+    };
+    selected = new Set(data.keys.map(k => k.key)); // all on after a (re)fetch
+    renderTicks();
+    renderChart();
+  } catch (e) {
+    $('err').textContent = e.message;
+    data = null;
+    renderChart();
+  } finally {
+    setLoading(false);
+  }
+}
+
+function renderTicks() {
+  const list = $('ddList');
+  list.innerHTML = '';
+  const metric = $('metric').value;
+  data.keys.forEach((k, i) => {
+    const total = metric === 'cost' ? '£' + k.total_cost.toFixed(2) : k.total_kwh.toFixed(2) + ' kWh';
+    const row = document.createElement('label');
+    row.className = 'dd-row';
+    row.innerHTML = `<input type="checkbox" ${selected.has(k.key) ? 'checked' : ''}>
+      <span class="sw" style="background:${colorFor(i)}"></span>
+      <span>${k.label}</span><span class="tot">${total}</span>`;
+    row.querySelector('input').addEventListener('change', (e) => {
+      if (e.target.checked) selected.add(k.key); else selected.delete(k.key);
+      updateBtn(); renderChart();
+    });
+    list.appendChild(row);
+  });
+  updateBtn();
+}
+
+function updateBtn() {
+  $('ddBtn').textContent = `Series (${selected.size}/${data ? data.keys.length : 0}) ▾`;
+}
+
+// seriesTotal sums one series' chosen metric across all buckets (window total).
+function seriesTotal(k, metric) {
+  return data.buckets.reduce((a, t) => a + ((data.vals[k.key]?.[t]?.[metric]) ?? 0), 0);
+}
+
+function renderChart() {
+  if (!data) { if (chart) { chart.destroy(); chart = null; } return; }
+  const metric = $('metric').value;
+  const ctype = $('ctype').value;
+  const sel = data.keys.filter(k => selected.has(k.key));
+  const colorOf = (k) => colorFor(data.keys.findIndex(x => x.key === k.key));
+  const yTitle = metric === 'cost' ? 'Cost (£)' : 'Energy (kWh)';
+  const unit = (v) => metric === 'cost' ? '£' + v.toFixed(2) : v.toFixed(3) + ' kWh';
+
+  let cfg;
+  if (ctype === 'pie' || ctype === 'doughnut') {
+    // Aggregate view: one slice per series = its window total (time axis collapses).
+    cfg = {
+      type: ctype,
+      data: {
+        labels: sel.map(k => k.label),
+        datasets: [{
+          data: sel.map(k => +seriesTotal(k, metric).toFixed(metric === 'cost' ? 2 : 3)),
+          backgroundColor: sel.map(colorOf), borderColor: '#191d2e', borderWidth: 2,
+        }],
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { color: '#e7e9f3', boxWidth: 12 } },
+          tooltip: { callbacks: { label: (it) => it.label + ': ' + unit(it.parsed) } },
+        },
+      },
+    };
+  } else {
+    // Time-series view: bars (stacked/grouped), lines, or stacked area.
+    const isLine = ctype === 'line' || ctype === 'area';
+    const stacked = ctype === 'bar-stacked' || ctype === 'area';
+    const labels = fmtLabels(data.buckets, data.interval);
+    const datasets = sel.map(k => ({
+      label: k.label,
+      data: data.buckets.map(t => (data.vals[k.key]?.[t]?.[metric]) ?? 0),
+      backgroundColor: isLine ? hexA(colorOf(k), 0.18) : colorOf(k),
+      borderColor: colorOf(k),
+      borderWidth: isLine ? 2 : 0,
+      fill: ctype === 'area',
+      tension: 0.25, pointRadius: 0,
+      stack: stacked ? 'all' : undefined,
+    }));
+    cfg = {
+      type: isLine ? 'line' : 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { color: '#e7e9f3', boxWidth: 12 } },
+          tooltip: stacked
+            ? { callbacks: { footer: (items) => 'Total: ' + unit(items.reduce((a, it) => a + it.parsed.y, 0)) } }
+            : {},
+        },
+        scales: {
+          x: { stacked, ticks: { color: '#9aa0b8' }, grid: { color: '#222842' } },
+          y: { stacked, beginAtZero: true, title: { display: true, text: yTitle, color: '#9aa0b8' },
+               ticks: { color: '#9aa0b8' }, grid: { color: '#222842' } },
+        },
+      },
+    };
+  }
+  if (chart) chart.destroy();
+  chart = new Chart($('chart'), cfg);
+}
+
+// --- wiring ---
+$('ddBtn').addEventListener('click', () => $('ddPanel').classList.toggle('open'));
+document.addEventListener('click', (e) => { if (!e.target.closest('.dd')) $('ddPanel').classList.remove('open'); });
+$('ddAll').addEventListener('click', () => { selected = new Set(data.keys.map(k => k.key)); renderTicks(); renderChart(); });
+$('ddNone').addEventListener('click', () => { selected.clear(); renderTicks(); renderChart(); });
+['groupBy', 'window', 'interval'].forEach(id => $(id).addEventListener('change', fetchData));
+$('reload').addEventListener('click', fetchData);
+$('metric').addEventListener('change', () => { renderTicks(); renderChart(); }); // no refetch; rows carry both
+$('ctype').addEventListener('change', renderChart); // pure re-render, no refetch
+$('base').addEventListener('change', fetchData);
+$('token').addEventListener('change', () => { localStorage.setItem('ch_token', token()); fetchData(); });
+
+// Bearer token: never committed in source. Resolution order:
+//   ?token=...  (dev convenience: copied into localStorage, then stripped from the URL)
+//   then localStorage, then manual paste (persisted on change).
+function bootToken() {
+  // Token (never committed): a gitignored token.local.js may set window.CH_DEV_TOKEN
+  // for local dev; otherwise fall back to a previously pasted token in localStorage.
+  if (window.CH_DEV_TOKEN) { $('token').value = window.CH_DEV_TOKEN; return; }
+  const saved = localStorage.getItem('ch_token');
+  if (saved) $('token').value = saved;
+}
+bootToken();
+fetchData();
+</script>
+</body>
+</html>

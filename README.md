@@ -125,11 +125,24 @@ make build
 The binary boots even if Influx/identity are unreachable (`/healthz` still serves; data routes
 degrade gracefully). Logs are structured JSON on stderr.
 
-## Demo consumer app
+## Demo consumer apps
 
-`demo/index.html` — a zero-build browser app (Chart.js via CDN, otherwise vanilla) that lists
-devices from `/devices` and charts a device's power + cumulative energy from `/devices/{id}/series`.
-Open it from disk; it calls the live API directly (paste a Bearer token into Connection settings).
+Zero-build browser apps under `demo/` (Chart.js via CDN, otherwise vanilla) that call the live
+API directly — no Influx/Flux knowledge required. Open them from disk (`file://`):
+
+- **`index.html`** — single-device power line + cumulative energy/cost (`/devices/{id}/series`).
+- **`breakdown.html`** — stacked/grouped/line/area/pie breakdown by device, room, or class,
+  consuming the row-oriented `shape=rows` series.
+- **`overlay.html`** — a device's power on a time axis with on/off state devices (hot water,
+  heating, fire alarms) shaded as hatched bands from `/devices/{id}/intervals`.
+
+**Auth:** no token is committed in the demo source. Either paste a bearer token into a page's
+*Connection settings* (persisted in `localStorage`), or, for local dev, drop one into a gitignored
+`demo/token.local.js` (sets `window.CH_DEV_TOKEN`) so all three pages auto-authenticate:
+
+```sh
+cp demo/token.local.js.example demo/token.local.js   # then paste a token from id.swee.net
+```
 
 ## Development
 

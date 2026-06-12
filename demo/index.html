@@ -36,6 +36,8 @@
   code { background:#0c0f1a; padding:1px 6px; border-radius:5px; }
   .src { color:var(--muted); font-size:12px; margin-top:14px; }
 </style>
+  <!-- optional local dev token (gitignored): sets window.CH_DEV_TOKEN -->
+  <script src="token.local.js"></script>
 </head>
 <body>
 <header>
@@ -68,6 +70,13 @@
         <option value="1h">1h</option>
         <option value="6h">6h</option>
         <option value="1d">1d</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="unit">Cumulative</label>
+      <select id="unit">
+        <option value="kwh" selected>Energy (kWh)</option>
+        <option value="cost">Cost (£)</option>
       </select>
     </div>
     <button id="reload">Refresh</button>
@@ -163,8 +172,12 @@ async function loadChart() {
   // Per-bucket metered energy is quantised by the device's 0.1 kWh hardware
   // counter, so at fine intervals it reads 0/0.1 and looks like noise. Show the
   // running cumulative total instead — smooth, monotonic, ends at total_kwh.
-  let acc = 0;
+  const isCost = $('unit').value === 'cost';
+  let acc = 0, accC = 0;
   const cumKwh = s.kwh.map(v => +(acc += v).toFixed(3));
+  const cumCost = s.cost.map(v => +(accC += v).toFixed(4));
+  const cum = isCost ? cumCost : cumKwh;
+  const cumLabel = isCost ? 'Cumulative cost (£)' : 'Cumulative energy (kWh)';
 
   $('s-device').textContent = (s.label || id);
   $('s-kwh').textContent  = (s.total_kwh ?? 0).toFixed(2) + ' kWh';
@@ -178,7 +191,7 @@ async function loadChart() {
         { type: 'line', label: 'Power (avg W)', data: s.avg_w, yAxisID: 'yW',
           borderColor: '#5b8cff', backgroundColor: 'rgba(91,140,255,.15)',
           fill: true, tension: .25, pointRadius: 0, borderWidth: 2 },
-        { type: 'line', label: 'Cumulative energy (kWh)', data: cumKwh, yAxisID: 'yKwh',
+        { type: 'line', label: cumLabel, data: cum, yAxisID: 'yKwh',
           borderColor: '#3ad6a8', backgroundColor: 'rgba(58,214,168,.10)',
           fill: true, tension: .2, pointRadius: 0, borderWidth: 2, borderDash: [5, 3] }
       ]
@@ -189,7 +202,7 @@ async function loadChart() {
         x: { ticks: { color: '#9aa0b8', maxRotation: 0, autoSkipPadding: 18 }, grid: { color: '#222842' } },
         yW: { position: 'left', title: { display: true, text: 'Power (W)', color: '#9aa0b8' },
               ticks: { color: '#9aa0b8' }, grid: { color: '#222842' }, beginAtZero: true },
-        yKwh: { position: 'right', title: { display: true, text: 'Cumulative energy (kWh)', color: '#9aa0b8' },
+        yKwh: { position: 'right', title: { display: true, text: cumLabel, color: '#9aa0b8' },
                 ticks: { color: '#9aa0b8' }, grid: { drawOnChartArea: false }, beginAtZero: true }
       },
       plugins: { legend: { labels: { color: '#e7e9f3' } } }
@@ -207,8 +220,21 @@ async function init() {
 }
 
 ['reload'].forEach(id => $(id).addEventListener('click', loadChart));
-['device', 'window', 'interval'].forEach(id => $(id).addEventListener('change', loadChart));
-['base', 'token'].forEach(id => $(id).addEventListener('change', init));
+['device', 'window', 'interval', 'unit'].forEach(id => $(id).addEventListener('change', loadChart));
+// Bearer token: never committed in source. Resolution order:
+//   ?token=...  (dev convenience: copied into localStorage, then stripped from the URL)
+//   then localStorage, then manual paste (persisted on change).
+function bootToken() {
+  // Token (never committed): a gitignored token.local.js may set window.CH_DEV_TOKEN
+  // for local dev; otherwise fall back to a previously pasted token in localStorage.
+  if (window.CH_DEV_TOKEN) { $('token').value = window.CH_DEV_TOKEN; return; }
+  const saved = localStorage.getItem('ch_token');
+  if (saved) $('token').value = saved;
+}
+
+$('base').addEventListener('change', init);
+$('token').addEventListener('change', () => { localStorage.setItem('ch_token', token()); init(); });
+bootToken();
 init();
 </script>
 </body>
