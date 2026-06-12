@@ -18,9 +18,9 @@ import (
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/httpapi"
-	"github.com/sweeney/countinghouse/internal/identity"
 	"github.com/sweeney/countinghouse/internal/influx"
 	"github.com/sweeney/countinghouse/internal/testutil"
+	"github.com/sweeney/identity/common/auth"
 )
 
 // version is set via -ldflags "-X main.version=...". "dev" when built plainly.
@@ -45,7 +45,7 @@ func main() {
 	// is empty) to avoid a nil ConfigProvider in the handlers — it then serves
 	// empty snapshots. Refresh is fail-open: a config-service outage at startup
 	// leaves empty snapshots rather than aborting the process.
-	tokens := &identity.TokenSource{
+	tokens := &auth.TokenSource{
 		BaseURL:      cfg.Identity.BaseURL,
 		ClientID:     cfg.Identity.ClientID,
 		ClientSecret: cfg.Identity.ClientSecret,
