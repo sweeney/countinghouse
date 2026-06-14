@@ -434,6 +434,11 @@ components:
         Bucket granularity. Defaults smartly to the window (today→1h,
         week/month→1d, custom→by span). An interval whose bucket count over the
         window exceeds the ~1000 cap returns 400 asking for a coarser interval.
+        For window=custom whose from is not on an interval boundary, the bucket
+        axis snaps DOWN to the interval grid anchored at local midnight (so it
+        matches the aggregation boundaries); the first bucket is widened to that
+        boundary. Period-to-date windows already start at local midnight and are
+        unaffected.
       schema:
         type: string
         enum: [5m, 15m, 30m, 1h, 6h, 1d]

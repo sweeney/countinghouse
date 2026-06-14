@@ -75,8 +75,19 @@ type SeriesResponse struct {
 // For calendar intervals (1d) the axis steps by CALENDAR day in loc using
 // time.Date(year, month, day+1, ...), so a London day that is 23h (spring
 // forward) or 25h (autumn back) is still a single bucket starting at local
-// midnight — DST-correct. For fixed (sub-day) intervals the axis steps by
-// iv.Duration from the (local) window start.
+// midnight — DST-correct.
+//
+// For fixed (sub-day) intervals the axis is SNAPPED DOWN to the interval grid
+// anchored at the local midnight of the start date, then stepped by
+// iv.Duration. This matches Influx's aggregateWindow(every:, location:), whose
+// windows are aligned to the location's grid (local midnight), NOT to
+// range(start:). For today/week/month the window start is already local
+// midnight, which is on every sub-day grid, so this is a no-op; it only matters
+// for window=custom whose `from` is off the boundary (e.g. 14:23 with 1h snaps
+// to 14:00). Snapping makes every Influx row's _start stamp exact-match a
+// bucket, so the first partial window is no longer dropped and later buckets are
+// not shifted. The first bucket is therefore widened to its grid boundary (it
+// includes the pre-`from` slice, which carries no in-window data).
 //
 // The window start is normalised into loc first so boundaries are local.
 func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
@@ -97,7 +108,13 @@ func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 		return out
 	}
 
-	for cur := start; cur.Before(stop); cur = cur.Add(iv.Duration) {
+	// Snap start down to the interval grid anchored at the start date's local
+	// midnight (Flux aligns sub-day windows to the location's grid, not to the
+	// query range start).
+	anchor := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
+	off := start.Sub(anchor) % iv.Duration
+	first := start.Add(-off)
+	for cur := first; cur.Before(stop); cur = cur.Add(iv.Duration) {
 		out = append(out, cur)
 	}
 	return out

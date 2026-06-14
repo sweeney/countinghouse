@@ -96,6 +96,13 @@ Chart(points) { p in LineMark(x: .value("t", p.time), y: .value("W", p.avg_w)).f
 Timestamps are RFC3339 with the local offset (parse with JS `new Date(...)` / Swift
 `ISO8601`/`Date`). Values are pre-rounded (kWh 3dp, cost 4dp GBP, avg_w 1dp W).
 
+For a `window=custom` whose `from` is **not** on an interval boundary, the bucket axis
+snaps **down** to the interval grid (anchored at local midnight) so it matches Influx's
+aggregation boundaries — e.g. `from=14:23` with `interval=1h` yields buckets starting at
+`14:00, 15:00, …`. The first bucket is widened to its grid boundary (the pre-`from` slice
+carries no in-window data). Period-to-date windows (`today`/`week`/`month`) already start
+at local midnight, so they are unaffected.
+
 The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth for request
 and response schemas; a path-coverage test fails CI if routes and spec drift.
 

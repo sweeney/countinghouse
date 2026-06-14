@@ -38,6 +38,62 @@ func TestBucketStartsTodayHourly(t *testing.T) {
 	}
 }
 
+// TestBucketStartsCustomNonAlignedSnapsToGrid locks issue #1: a custom window
+// whose `from` is not on an interval boundary (14:23 with interval=1h) must
+// produce an axis SNAPPED DOWN to the interval grid anchored at local midnight
+// (14:00, 15:00, …), matching Influx's epoch/location-aligned aggregateWindow.
+// The old behaviour stepped from the raw 14:23 start, so the axis disagreed
+// with the aggregation boundaries and the first partial Influx window was
+// dropped / every later bucket shifted by one.
+func TestBucketStartsCustomNonAlignedSnapsToGrid(t *testing.T) {
+	loc := mustLondon(t)
+	start := time.Date(2026, 6, 11, 14, 23, 0, 0, loc)
+	stop := time.Date(2026, 6, 11, 17, 23, 0, 0, loc)
+	win := Window{Start: start, Stop: stop, Label: WindowCustom}
+	iv, _ := lookupInterval("1h")
+
+	got := BucketStarts(win, iv, loc)
+	want := []time.Time{
+		time.Date(2026, 6, 11, 14, 0, 0, 0, loc),
+		time.Date(2026, 6, 11, 15, 0, 0, 0, loc),
+		time.Date(2026, 6, 11, 16, 0, 0, 0, loc),
+		time.Date(2026, 6, 11, 17, 0, 0, 0, loc),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("buckets = %v (len %d), want len %d", got, len(got), len(want))
+	}
+	for i := range want {
+		if !got[i].Equal(want[i]) {
+			t.Errorf("bucket %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestBucketStartsCustomNonAlignedCoarse checks the snap with a 6h interval: a
+// 14:23 start snaps down to the 12:00 grid point (00,06,12,18 anchored at local
+// midnight).
+func TestBucketStartsCustomNonAlignedCoarse(t *testing.T) {
+	loc := mustLondon(t)
+	start := time.Date(2026, 6, 11, 14, 23, 0, 0, loc)
+	stop := time.Date(2026, 6, 11, 19, 0, 0, 0, loc)
+	win := Window{Start: start, Stop: stop, Label: WindowCustom}
+	iv, _ := lookupInterval("6h")
+
+	got := BucketStarts(win, iv, loc)
+	want := []time.Time{
+		time.Date(2026, 6, 11, 12, 0, 0, 0, loc),
+		time.Date(2026, 6, 11, 18, 0, 0, 0, loc),
+	}
+	if len(got) != len(want) {
+		t.Fatalf("buckets = %v (len %d), want len %d", got, len(got), len(want))
+	}
+	for i := range want {
+		if !got[i].Equal(want[i]) {
+			t.Errorf("bucket %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+}
+
 func TestBucketStartsWeekDaily(t *testing.T) {
 	loc := mustLondon(t)
 	// Monday → Monday, 7 calendar days.
@@ -461,6 +517,84 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 	}
 	if ups.AvgW[0] != 120 {
 		t.Errorf("ups avg_w[0] = %v, want 120", ups.AvgW[0])
+	}
+}
+
+// TestBuildSeriesNonAlignedCustomWindow is the issue #1 regression at the
+// orchestrator level: a custom window with a non-boundary `from` (14:23) must
+// return Buckets that match Influx's epoch/location-aligned aggregateWindow
+// boundaries, with every grid-stamped row landing on the exact-match path —
+// nothing dropped, nothing shifted. Mirrors TestBuildSeriesEndToEnd but with a
+// 14:23 start.
+func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
+	loc := mustLondon(t)
+	start := time.Date(2026, 6, 11, 14, 23, 0, 0, loc)
+	stop := time.Date(2026, 6, 11, 17, 23, 0, 0, loc)
+	win := Window{Start: start, Stop: stop, Label: WindowCustom}
+	iv, _ := lookupInterval("1h")
+
+	buckets := BucketStarts(win, iv, loc)
+	if len(buckets) != 4 {
+		t.Fatalf("expected 4 grid-aligned buckets, got %d: %v", len(buckets), buckets)
+	}
+	// The grid boundaries Influx would stamp (timeSrc:"_start").
+	grid := []time.Time{
+		time.Date(2026, 6, 11, 14, 0, 0, 0, loc),
+		time.Date(2026, 6, 11, 15, 0, 0, 0, loc),
+		time.Date(2026, 6, 11, 16, 0, 0, 0, loc),
+		time.Date(2026, 6, 11, 17, 0, 0, 0, loc),
+	}
+	for i := range grid {
+		if !buckets[i].Equal(grid[i]) {
+			t.Fatalf("bucket %d = %v, want grid %v", i, buckets[i], grid[i])
+		}
+	}
+
+	devices := map[string]config.DeviceConfig{
+		"winefridge": {Class: "continuous_power_device", DisplayName: "Wine Fridge", Location: "kitchen"},
+	}
+
+	// Counter rows stamped at the Influx grid boundaries — including the 14:00
+	// row that the old raw-start axis (14:23) would have dropped.
+	counterRows := []influx.Row{
+		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.05, Time: grid[0]},
+		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.04, Time: grid[1]},
+		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.06, Time: grid[2]},
+		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.03, Time: grid[3]},
+	}
+	allPowerRows := []influx.Row{
+		{DeviceID: "winefridge", Field: "power_w", Value: 50, Time: grid[0]},
+		{DeviceID: "winefridge", Field: "power_w", Value: 40, Time: grid[1]},
+		{DeviceID: "winefridge", Field: "power_w", Value: 60, Time: grid[2]},
+		{DeviceID: "winefridge", Field: "power_w", Value: 30, Time: grid[3]},
+	}
+
+	q := &influx.FakeQuerier{
+		QueryFunc: func(flux string) ([]influx.Row, error) {
+			switch {
+			case strings.Contains(flux, "energy_kwh"):
+				return counterRows, nil
+			case strings.Contains(flux, "power_w"):
+				return allPowerRows, nil
+			}
+			return nil, nil
+		},
+	}
+
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, devices, testTariff(), loc)
+	if err != nil {
+		t.Fatalf("BuildSeries: %v", err)
+	}
+	if len(resp.Series) != 1 {
+		t.Fatalf("series count = %d, want 1", len(resp.Series))
+	}
+	wine := resp.Series[0]
+	// Every grid row lands on its own bucket: no leading slice dropped, no shift.
+	want := []float64{0.05, 0.04, 0.06, 0.03}
+	for i, w := range want {
+		if wine.KWh[i] != w {
+			t.Errorf("winefridge kwh[%d] = %v, want %v (axis/aggregation misaligned?)", i, wine.KWh[i], w)
+		}
 	}
 }
 
