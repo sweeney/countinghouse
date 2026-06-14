@@ -61,6 +61,15 @@ func (s *Server) resolveWindowParams(w http.ResponseWriter, r *http.Request) (en
 		to = t
 	}
 
+	// from/to only apply to window=custom; today/week/month are period-to-date
+	// and ignore them. Rather than silently discarding a caller-supplied range
+	// (and confidently returning a different window's data), reject the
+	// contradiction so an intent mismatch surfaces as an actionable 400.
+	if spec != energy.WindowCustom && (!from.IsZero() || !to.IsZero()) {
+		writeError(w, http.StatusBadRequest, "'from'/'to' are only valid with window=custom")
+		return energy.Window{}, false
+	}
+
 	win, err := energy.ResolveWindow(s.clock().Now(), s.loc(), spec, from, to)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())

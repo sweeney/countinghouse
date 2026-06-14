@@ -408,7 +408,10 @@ components:
       name: from
       in: query
       required: false
-      description: Custom window start (RFC3339). Required when window=custom.
+      description: >-
+        Custom window start (RFC3339). Required when window=custom, and ONLY
+        valid then — supplying from with window=today/week/month (which are
+        period-to-date and ignore it) is rejected with 400.
       schema:
         type: string
         format: date-time
@@ -416,7 +419,10 @@ components:
       name: to
       in: query
       required: false
-      description: Custom window end (RFC3339). Required when window=custom.
+      description: >-
+        Custom window end (RFC3339). Required when window=custom, and ONLY
+        valid then — supplying to with window=today/week/month (which are
+        period-to-date and ignore it) is rejected with 400.
       schema:
         type: string
         format: date-time

@@ -192,6 +192,38 @@ func TestDeviceEnergy_Custom(t *testing.T) {
 	}
 }
 
+// TestWindow_FromToOnlyValidWithCustom locks issue #9: supplying from/to with a
+// non-custom window (today/week/month) is a contradiction — those windows are
+// period-to-date and ignore from/to — so it must be a 400 with an explanatory
+// message rather than silently discarding the caller-supplied range and
+// returning a different window's data.
+func TestWindow_FromToOnlyValidWithCustom(t *testing.T) {
+	cases := []string{
+		"/devices/winefridge/energy?window=today&from=2026-01-01T00:00:00Z&to=2026-02-01T00:00:00Z",
+		"/devices/winefridge/energy?window=week&from=2026-01-01T00:00:00Z",
+		"/devices/winefridge/energy?window=month&to=2026-02-01T00:00:00Z",
+		// window omitted defaults to today, so a stray from is still contradictory.
+		"/devices/winefridge/energy?from=2026-01-01T00:00:00Z",
+	}
+	for _, path := range cases {
+		w := doGET(t, dataSetupT(t), path)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d: %s", path, w.Code, w.Body.String())
+			continue
+		}
+		if got := decode(t, w)["error"]; got != "'from'/'to' are only valid with window=custom" {
+			t.Errorf("%s: error = %v", path, got)
+		}
+	}
+}
+
+// dataSetupT is a one-value wrapper around dataSetup for table tests.
+func dataSetupT(t *testing.T) *Server {
+	t.Helper()
+	s, _ := dataSetup(t)
+	return s
+}
+
 func TestDeviceEnergy_CustomMissingTo(t *testing.T) {
 	s, _ := dataSetup(t)
 	w := doGET(t, s, "/devices/winefridge/energy?window=custom&from=2026-06-01T00:00:00Z")

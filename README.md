@@ -46,8 +46,10 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /metrics` | Query counters, Influx latency, uptime, goroutines. |
 
 **Windows:** `today`, `week` (starts Monday), `month` — all period-to-date — and `custom`
-(requires RFC3339 `from` & `to`). **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default
-per window and a ~1000-bucket cap.
+(requires RFC3339 `from` & `to`). `from`/`to` apply **only** to `window=custom`; passing
+them with any period-to-date window is a `400` (the range would otherwise be silently
+discarded). **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default per window and a
+~1000-bucket cap.
 
 ### Series response shapes (`shape=columns|rows`)
 
