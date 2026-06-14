@@ -599,16 +599,30 @@ components:
 
     Reconciliation:
       type: object
+      required: [meter_present, monitored_kwh]
       properties:
+        meter_present:
+          type: boolean
+          description: >-
+            Whether an energy_meter is configured. When false there is nothing
+            to reconcile against, so meter_kwh, unmonitored_kwh and coverage are
+            OMITTED (rather than reported as a misleading negative remainder /
+            zero coverage).
         monitored_kwh:
           type: number
         meter_kwh:
           type: number
+          description: >-
+            Whole-house meter total. Present only when meter_present is true.
         unmonitored_kwh:
           type: number
+          description: >-
+            meter_kwh − monitored_kwh. Present only when meter_present is true.
         coverage:
           type: number
-          description: Monitored fraction of meter; not clamped to [0,1].
+          description: >-
+            Monitored fraction of meter; not clamped to [0,1]. Present only when
+            meter_present is true.
 
     BillResponse:
       type: object

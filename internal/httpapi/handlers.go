@@ -335,10 +335,12 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		dc.KWh = kwh
 	}
 
-	// Whole-house meter total. If no electricity meter is configured, meterKWh
-	// stays 0 (reconciliation then shows coverage 0) — don't fail.
+	// Whole-house meter total. If no electricity meter is configured we pass
+	// meterPresent=false so the reconciliation omits the meter-derived fields
+	// rather than inventing a misleading negative remainder — don't fail.
+	meterPresent := meterID != ""
 	var meterKWh float64
-	if meterID != "" {
+	if meterPresent {
 		kwh, _, err := s.deviceWindowKWh(r, meterID, energy.EnergyMeterClass, win)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "influx query failed for meter "+meterID+": "+err.Error())
@@ -347,7 +349,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		meterKWh = kwh
 	}
 
-	bill := energy.AssembleBill(win, billable, meterKWh, tariff)
+	bill := energy.AssembleBill(win, billable, meterKWh, meterPresent, tariff)
 	writeJSON(w, http.StatusOK, roundBill(bill))
 }
 
@@ -362,10 +364,20 @@ func roundBill(b energy.Bill) energy.Bill {
 	b.StandingCharge = round.To(b.StandingCharge, round.MoneyDP)
 	b.Total = round.To(b.Total, round.MoneyDP)
 	b.Reconciliation.MonitoredKWh = round.To(b.Reconciliation.MonitoredKWh, round.KWhDP)
-	b.Reconciliation.MeterKWh = round.To(b.Reconciliation.MeterKWh, round.KWhDP)
-	b.Reconciliation.UnmonitoredKWh = round.To(b.Reconciliation.UnmonitoredKWh, round.KWhDP)
-	b.Reconciliation.Coverage = round.To(b.Reconciliation.Coverage, round.CovDP)
+	// The meter-derived fields are nil when no meter is configured; round in
+	// place only when present so the "omitted" signal is preserved.
+	roundPtr(b.Reconciliation.MeterKWh, round.KWhDP)
+	roundPtr(b.Reconciliation.UnmonitoredKWh, round.KWhDP)
+	roundPtr(b.Reconciliation.Coverage, round.CovDP)
 	return b
+}
+
+// roundPtr rounds the float a pointer addresses to dp places, in place. A nil
+// pointer (an omitted reconciliation field) is left untouched.
+func roundPtr(p *float64, dp int) {
+	if p != nil {
+		*p = round.To(*p, dp)
+	}
 }
 
 // handleTariffs serves GET /tariffs, returning all configured tariffs keyed by

@@ -77,10 +77,11 @@ func TestAssembleBill(t *testing.T) {
 	mul := realTariff.Multiplier()
 
 	tests := []struct {
-		name     string
-		window   Window
-		devices  []DeviceCost
-		meterKWh float64
+		name         string
+		window       Window
+		devices      []DeviceCost
+		meterKWh     float64
+		meterPresent bool
 
 		wantEnergy      float64
 		wantStanding    float64
@@ -97,6 +98,7 @@ func TestAssembleBill(t *testing.T) {
 				{DeviceID: "b", KWh: 3},
 			},
 			meterKWh:        20,
+			meterPresent:    true,
 			wantEnergy:      (5 + 3) * 0.2089 * mul,
 			wantStanding:    10 * 0.5294 * mul,
 			wantMonitored:   8,
@@ -110,6 +112,7 @@ func TestAssembleBill(t *testing.T) {
 				{DeviceID: "a", KWh: 10},
 			},
 			meterKWh:        4, // solar/battery export → meter < monitored
+			meterPresent:    true,
 			wantEnergy:      10 * 0.2089 * mul,
 			wantStanding:    7 * 0.5294 * mul,
 			wantMonitored:   10,
@@ -117,12 +120,13 @@ func TestAssembleBill(t *testing.T) {
 			wantCoverage:    10.0 / 4.0,
 		},
 		{
-			name:   "meter zero guard",
+			name:   "meter present but read zero",
 			window: dayWindow("today", 0.5),
 			devices: []DeviceCost{
 				{DeviceID: "a", KWh: 2},
 			},
 			meterKWh:        0,
+			meterPresent:    true, // genuine degenerate case: meter present, no data
 			wantEnergy:      2 * 0.2089 * mul,
 			wantStanding:    0.5 * 0.5294 * mul,
 			wantMonitored:   2,
@@ -134,6 +138,7 @@ func TestAssembleBill(t *testing.T) {
 			window:          dayWindow("month", 3),
 			devices:         nil,
 			meterKWh:        15,
+			meterPresent:    true,
 			wantEnergy:      0,
 			wantStanding:    3 * 0.5294 * mul,
 			wantMonitored:   0,
@@ -144,7 +149,7 @@ func TestAssembleBill(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			bill := AssembleBill(tc.window, tc.devices, tc.meterKWh, realTariff)
+			bill := AssembleBill(tc.window, tc.devices, tc.meterKWh, tc.meterPresent, realTariff)
 
 			if bill.Currency != "GBP" {
 				t.Errorf("Currency = %q, want GBP", bill.Currency)
@@ -164,20 +169,26 @@ func TestAssembleBill(t *testing.T) {
 			}
 
 			r := bill.Reconciliation
+			if !r.MeterPresent {
+				t.Errorf("MeterPresent = false, want true")
+			}
 			if math.Abs(r.MonitoredKWh-tc.wantMonitored) > eps {
 				t.Errorf("MonitoredKWh = %v, want %v", r.MonitoredKWh, tc.wantMonitored)
 			}
-			if math.Abs(r.MeterKWh-tc.meterKWh) > eps {
-				t.Errorf("MeterKWh = %v, want %v", r.MeterKWh, tc.meterKWh)
+			if r.MeterKWh == nil || r.UnmonitoredKWh == nil || r.Coverage == nil {
+				t.Fatalf("meter-present reconciliation must have non-nil pointers: %+v", r)
 			}
-			if math.Abs(r.UnmonitoredKWh-tc.wantUnmonitored) > eps {
-				t.Errorf("UnmonitoredKWh = %v, want %v", r.UnmonitoredKWh, tc.wantUnmonitored)
+			if math.Abs(*r.MeterKWh-tc.meterKWh) > eps {
+				t.Errorf("MeterKWh = %v, want %v", *r.MeterKWh, tc.meterKWh)
 			}
-			if math.IsNaN(r.Coverage) || math.IsInf(r.Coverage, 0) {
-				t.Fatalf("Coverage is non-finite: %v", r.Coverage)
+			if math.Abs(*r.UnmonitoredKWh-tc.wantUnmonitored) > eps {
+				t.Errorf("UnmonitoredKWh = %v, want %v", *r.UnmonitoredKWh, tc.wantUnmonitored)
 			}
-			if math.Abs(r.Coverage-tc.wantCoverage) > eps {
-				t.Errorf("Coverage = %v, want %v", r.Coverage, tc.wantCoverage)
+			if math.IsNaN(*r.Coverage) || math.IsInf(*r.Coverage, 0) {
+				t.Fatalf("Coverage is non-finite: %v", *r.Coverage)
+			}
+			if math.Abs(*r.Coverage-tc.wantCoverage) > eps {
+				t.Errorf("Coverage = %v, want %v", *r.Coverage, tc.wantCoverage)
 			}
 
 			// Per-device costs filled in.
@@ -188,5 +199,26 @@ func TestAssembleBill(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAssembleBill_NoMeter locks the no-meter case: meterPresent=false yields a
+// reconciliation that reports monitored kWh and meter_present=false, but leaves
+// the meter-derived fields nil (omitted) rather than emitting a misleading
+// negative unmonitored remainder.
+func TestAssembleBill_NoMeter(t *testing.T) {
+	bill := AssembleBill(dayWindow("month", 10), []DeviceCost{
+		{DeviceID: "a", KWh: 4.2},
+	}, 0, false, realTariff)
+
+	r := bill.Reconciliation
+	if r.MeterPresent {
+		t.Errorf("MeterPresent = true, want false")
+	}
+	if math.Abs(r.MonitoredKWh-4.2) > eps {
+		t.Errorf("MonitoredKWh = %v, want 4.2", r.MonitoredKWh)
+	}
+	if r.MeterKWh != nil || r.UnmonitoredKWh != nil || r.Coverage != nil {
+		t.Errorf("meter-derived fields must be nil with no meter, got %+v", r)
 	}
 }

@@ -41,7 +41,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
 | `GET /series?window=&interval=&group_by=&shape=` | Multi-series time-series. `group_by`: `device` (default), `location`, `class`, `house` (monitored + meter). |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
-| `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. |
+| `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Current tariffs keyed by fuel (electricity, gas). |
 | `GET /metrics` | Query counters, Influx latency, uptime, goroutines. |
 

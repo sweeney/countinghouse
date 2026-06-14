@@ -351,6 +351,11 @@ func TestBill(t *testing.T) {
 	}
 }
 
+// TestBill_NoMeter locks issue #3: with no energy_meter configured, the
+// reconciliation must distinguish "no meter present" from "meter read zero". It
+// reports meter_present:false and OMITS meter_kwh/unmonitored_kwh/coverage,
+// rather than emitting a misleading NEGATIVE unmonitored_kwh (0 - monitored)
+// and coverage:0 despite full monitoring.
 func TestBill_NoMeter(t *testing.T) {
 	s, _ := dataSetup(t)
 	devs := testDevices()
@@ -360,17 +365,42 @@ func TestBill_NoMeter(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var bill struct {
-		Reconciliation struct {
-			MeterKWh float64 `json:"meter_kwh"`
-			Coverage float64 `json:"coverage"`
-		} `json:"reconciliation"`
+	m := decode(t, w)
+	rec, ok := m["reconciliation"].(map[string]any)
+	if !ok {
+		t.Fatalf("no reconciliation object: %v", m)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &bill); err != nil {
-		t.Fatalf("decode: %v", err)
+	if mp, _ := rec["meter_present"].(bool); mp {
+		t.Errorf("meter_present = true, want false")
 	}
-	if bill.Reconciliation.MeterKWh != 0 || bill.Reconciliation.Coverage != 0 {
-		t.Errorf("want meter 0 / coverage 0, got %+v", bill.Reconciliation)
+	for _, field := range []string{"meter_kwh", "unmonitored_kwh", "coverage"} {
+		if _, present := rec[field]; present {
+			t.Errorf("%s should be omitted when no meter is configured, got %v", field, rec[field])
+		}
+	}
+	// monitored_kwh is still reported (full monitoring, just no meter to
+	// reconcile against): winefridge 3.0 + network-ups 1.5.
+	if mon, _ := rec["monitored_kwh"].(float64); !approx(mon, 4.5) {
+		t.Errorf("monitored_kwh = %v want 4.5", mon)
+	}
+}
+
+// TestBill_MeterPresent proves the meter-present path still surfaces the
+// reconciliation fields (and the new meter_present:true flag).
+func TestBill_MeterPresent(t *testing.T) {
+	s, _ := dataSetup(t)
+	w := doGET(t, s, "/bill?window=month")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	rec := decode(t, w)["reconciliation"].(map[string]any)
+	if mp, _ := rec["meter_present"].(bool); !mp {
+		t.Errorf("meter_present = false, want true")
+	}
+	for _, field := range []string{"meter_kwh", "unmonitored_kwh", "coverage"} {
+		if _, present := rec[field]; !present {
+			t.Errorf("%s should be present when a meter is configured", field)
+		}
 	}
 }
 

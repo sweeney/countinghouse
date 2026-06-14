@@ -19,15 +19,25 @@ type DeviceCost struct {
 // meter for the same window. UnmonitoredKWh is the remainder the meter saw that
 // no monitored device accounts for; Coverage is the monitored fraction.
 //
-// Coverage is intentionally NOT clamped to [0,1]: with solar/battery the meter
-// can read less than monitored consumption (export) or even net-negative, which
-// legitimately pushes coverage above 1 or below 0 (PLAN §5 watch-outs). The
-// number is surfaced as-is rather than hidden.
+// MeterPresent records whether an energy_meter is configured at all. When it is
+// false the meter-derived fields (MeterKWh, UnmonitoredKWh, Coverage) are nil
+// and omitted from the wire: with no meter there is nothing to reconcile
+// against, so inventing an "unmonitored" remainder (which would be a misleading
+// NEGATIVE 0-monitored) or a coverage of 0 (despite full monitoring) would
+// actively mislead consumers. The "no meter configured" case and the genuine
+// "meter present but read 0" case (a degenerate window with no data, surfaced
+// as-is) are thus distinguishable.
+//
+// Coverage, when present, is intentionally NOT clamped to [0,1]: with
+// solar/battery the meter can read less than monitored consumption (export) or
+// even net-negative, which legitimately pushes coverage above 1 or below 0
+// (PLAN §5 watch-outs). The number is surfaced as-is rather than hidden.
 type Reconciliation struct {
-	MonitoredKWh   float64 `json:"monitored_kwh"`
-	MeterKWh       float64 `json:"meter_kwh"`
-	UnmonitoredKWh float64 `json:"unmonitored_kwh"`
-	Coverage       float64 `json:"coverage"`
+	MeterPresent   bool     `json:"meter_present"`
+	MonitoredKWh   float64  `json:"monitored_kwh"`
+	MeterKWh       *float64 `json:"meter_kwh,omitempty"`
+	UnmonitoredKWh *float64 `json:"unmonitored_kwh,omitempty"`
+	Coverage       *float64 `json:"coverage,omitempty"`
 }
 
 // Bill is the assembled /bill response for one window: per-device breakdown,
@@ -67,9 +77,14 @@ func StandingChargeFor(days float64, t config.Tariff) float64 {
 //
 // devices are the BILLABLE devices (plug + UPS) with .KWh already filled in;
 // the meter is NOT one of them. meterKWh is the whole-house total (from the
-// electricity_meter counter / house_electricity), passed separately. Each
-// device's .Cost is computed here from its .KWh.
-func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, t config.Tariff) Bill {
+// electricity_meter counter / house_electricity), passed separately, and
+// meterPresent reports whether such a meter is configured at all. Each device's
+// .Cost is computed here from its .KWh.
+//
+// When meterPresent is false the meter-derived reconciliation fields are left
+// nil (omitted from the wire) instead of being computed from a phantom meterKWh
+// of 0 — see Reconciliation for why that distinction matters.
+func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, meterPresent bool, t config.Tariff) Bill {
 	var energyCost, monitoredKWh float64
 	for i := range devices {
 		devices[i].Cost = DeviceCostFor(devices[i].KWh, t)
@@ -79,9 +94,17 @@ func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, t confi
 
 	standing := StandingChargeFor(window.Days(), t)
 
-	coverage := 0.0
-	if meterKWh != 0 {
-		coverage = monitoredKWh / meterKWh
+	rec := Reconciliation{MeterPresent: meterPresent, MonitoredKWh: monitoredKWh}
+	if meterPresent {
+		unmonitored := meterKWh - monitoredKWh
+		coverage := 0.0
+		if meterKWh != 0 {
+			coverage = monitoredKWh / meterKWh
+		}
+		mk := meterKWh
+		rec.MeterKWh = &mk
+		rec.UnmonitoredKWh = &unmonitored
+		rec.Coverage = &coverage
 	}
 
 	return Bill{
@@ -91,11 +114,6 @@ func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, t confi
 		EnergyCost:     energyCost,
 		StandingCharge: standing,
 		Total:          energyCost + standing,
-		Reconciliation: Reconciliation{
-			MonitoredKWh:   monitoredKWh,
-			MeterKWh:       meterKWh,
-			UnmonitoredKWh: meterKWh - monitoredKWh,
-			Coverage:       coverage,
-		},
+		Reconciliation: rec,
 	}
 }
