@@ -2,12 +2,12 @@ package energy
 
 import (
 	"context"
-	"math"
 	"sort"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/influx"
+	"github.com/sweeney/countinghouse/internal/round"
 )
 
 // group_by modes for BuildSeries / AssembleSeries.
@@ -126,23 +126,6 @@ func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 	}
 	return hrs
 }
-
-// roundTo rounds x to n decimal places (half away from zero). Negative inputs
-// (e.g. a tiny negative counter delta from a noisy reset) round symmetrically.
-func roundTo(x float64, n int) float64 {
-	if math.IsNaN(x) || math.IsInf(x, 0) {
-		return 0
-	}
-	p := math.Pow10(n)
-	return math.Round(x*p) / p
-}
-
-// rounding precisions (PLAN §A: kWh 3dp, cost 4dp, W 1dp).
-const (
-	kwhDP  = 3
-	costDP = 4
-	wDP    = 1
-)
 
 // AssembleSeries is the PURE assembly step: given the canonical bucket axis, the
 // device inventory, per-device per-bucket energy (kWh, already aligned to
@@ -336,15 +319,15 @@ func buildSeries(key, label, location, class string, buckets []time.Time, energy
 		}
 		cost := kwh * tariff.UnitRate * mult
 
-		s.KWh[i] = roundTo(kwh, kwhDP)
-		s.Cost[i] = roundTo(cost, costDP)
-		s.AvgW[i] = roundTo(w, wDP)
+		s.KWh[i] = round.To(kwh, round.KWhDP)
+		s.Cost[i] = round.To(cost, round.MoneyDP)
+		s.AvgW[i] = round.To(w, round.WDP)
 
 		s.TotalKWh += s.KWh[i]
 		s.TotalCost += s.Cost[i]
 	}
-	s.TotalKWh = roundTo(s.TotalKWh, kwhDP)
-	s.TotalCost = roundTo(s.TotalCost, costDP)
+	s.TotalKWh = round.To(s.TotalKWh, round.KWhDP)
+	s.TotalCost = round.To(s.TotalCost, round.MoneyDP)
 	return s
 }
 

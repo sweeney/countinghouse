@@ -10,6 +10,7 @@ import (
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/influx"
+	"github.com/sweeney/countinghouse/internal/round"
 	"github.com/sweeney/countinghouse/internal/testutil"
 )
 
@@ -249,7 +250,7 @@ func TestDeviceCost(t *testing.T) {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
 	m := decode(t, w)
-	want := roundTo(3.0*testUnitRate*(1+testVAT), moneyDP)
+	want := round.To(3.0*testUnitRate*(1+testVAT), round.MoneyDP)
 	if !approx(m["cost"].(float64), want) {
 		t.Errorf("cost = %v want %v", m["cost"], want)
 	}
@@ -330,8 +331,8 @@ func TestBill(t *testing.T) {
 	}
 
 	rawEnergy := monitored * testUnitRate * (1 + testVAT)
-	if !approx(bill.EnergyCost, roundTo(rawEnergy, moneyDP)) {
-		t.Errorf("energy_cost = %v want %v", bill.EnergyCost, roundTo(rawEnergy, moneyDP))
+	if !approx(bill.EnergyCost, round.To(rawEnergy, round.MoneyDP)) {
+		t.Errorf("energy_cost = %v want %v", bill.EnergyCost, round.To(rawEnergy, round.MoneyDP))
 	}
 
 	// Standing charge: window.Days() for month-to-date. now=2026-06-11 13:00 UTC,
@@ -341,12 +342,12 @@ func TestBill(t *testing.T) {
 	stop := time.Date(2026, 6, 11, 13, 0, 0, 0, time.UTC)
 	wantDays := stop.Sub(start).Hours() / 24
 	rawStanding := wantDays * testStanding * (1 + testVAT)
-	if !approx(bill.StandingCharge, roundTo(rawStanding, moneyDP)) {
-		t.Errorf("standing_charge = %v want %v", bill.StandingCharge, roundTo(rawStanding, moneyDP))
+	if !approx(bill.StandingCharge, round.To(rawStanding, round.MoneyDP)) {
+		t.Errorf("standing_charge = %v want %v", bill.StandingCharge, round.To(rawStanding, round.MoneyDP))
 	}
 	// Total is rounded from the full-precision sum, not the rounded parts.
-	if !approx(bill.Total, roundTo(rawEnergy+rawStanding, moneyDP)) {
-		t.Errorf("total = %v want %v", bill.Total, roundTo(rawEnergy+rawStanding, moneyDP))
+	if !approx(bill.Total, round.To(rawEnergy+rawStanding, round.MoneyDP)) {
+		t.Errorf("total = %v want %v", bill.Total, round.To(rawEnergy+rawStanding, round.MoneyDP))
 	}
 }
 

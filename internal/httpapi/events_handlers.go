@@ -9,6 +9,7 @@ import (
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/energy"
 	"github.com/sweeney/countinghouse/internal/events"
+	"github.com/sweeney/countinghouse/internal/round"
 )
 
 // buildTimeline runs events.BuildTimeline for a device set, bumping the query
@@ -97,7 +98,7 @@ func (s *Server) handleDeviceIntervals(w http.ResponseWriter, r *http.Request) {
 func roundIntervals(in []events.Interval) []events.Interval {
 	out := make([]events.Interval, len(in))
 	for i, iv := range in {
-		iv.DurationS = roundTo(iv.DurationS, 1)
+		iv.DurationS = round.To(iv.DurationS, round.WDP)
 		out[i] = iv
 	}
 	return out
@@ -105,8 +106,8 @@ func roundIntervals(in []events.Interval) []events.Interval {
 
 // roundStats rounds stats for presentation: seconds to 1 dp, duty to 4 dp.
 func roundStats(s events.Stats) events.Stats {
-	s.TotalOnSeconds = roundTo(s.TotalOnSeconds, 1)
-	s.Duty = roundTo(s.Duty, 4)
+	s.TotalOnSeconds = round.To(s.TotalOnSeconds, round.WDP)
+	s.Duty = round.To(s.Duty, round.CovDP)
 	return s
 }
 

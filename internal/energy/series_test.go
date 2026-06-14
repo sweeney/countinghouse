@@ -8,6 +8,7 @@ import (
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/influx"
+	"github.com/sweeney/countinghouse/internal/round"
 )
 
 // ---- BucketStarts -----------------------------------------------------------
@@ -176,7 +177,7 @@ func TestAssembleByDeviceZeroFillAndCost(t *testing.T) {
 	if s.TotalKWh != 0.09 {
 		t.Errorf("total kwh = %v, want 0.09", s.TotalKWh)
 	}
-	wantTotalCost := roundTo(0.011+0+roundTo(0.04*0.2089*1.05, 4), 4)
+	wantTotalCost := round.To(0.011+0+round.To(0.04*0.2089*1.05, 4), 4)
 	if s.TotalCost != wantTotalCost {
 		t.Errorf("total cost = %v, want %v", s.TotalCost, wantTotalCost)
 	}

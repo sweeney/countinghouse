@@ -1,34 +1,14 @@
 package httpapi
 
 import (
-	"math"
 	"net/http"
 	"runtime"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/energy"
+	"github.com/sweeney/countinghouse/internal/round"
 )
-
-// Decimal places for rounding numbers in API responses. Influx increase()/
-// integral() and the cost multiply produce long float tails (e.g.
-// 0.24127950000000187); we round at the response boundary so consumers see
-// tidy values. kWh to 3 dp (~Wh), money to 4 dp (sub-penny, keeps tiny
-// per-device costs meaningful), coverage to 4 dp.
-const (
-	kwhDP   = 3
-	moneyDP = 4
-	covDP   = 4
-)
-
-// roundTo rounds f to dp decimal places, passing NaN/Inf through untouched.
-func roundTo(f float64, dp int) float64 {
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return f
-	}
-	p := math.Pow(10, float64(dp))
-	return math.Round(f*p) / p
-}
 
 // resolveWindowParams parses the window/from/to query params and resolves them
 // to a concrete Window using the injected clock + location. It returns a 400
@@ -126,7 +106,7 @@ func (s *Server) handleDeviceEnergy(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device_id": id,
-		"kwh":       roundTo(kwh, kwhDP),
+		"kwh":       round.To(kwh, round.KWhDP),
 		"source":    source,
 		"window":    win.Label,
 		"from":      win.Start,
@@ -166,8 +146,8 @@ func (s *Server) handleDeviceCost(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device_id": id,
-		"kwh":       roundTo(kwh, kwhDP),
-		"cost":      roundTo(cost, moneyDP),
+		"kwh":       round.To(kwh, round.KWhDP),
+		"cost":      round.To(cost, round.MoneyDP),
 		"currency":  "GBP",
 		"window":    win.Label,
 		"tariff": map[string]any{
@@ -375,16 +355,16 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 // rounded from their full-precision values (not from the already-rounded parts).
 func roundBill(b energy.Bill) energy.Bill {
 	for i := range b.Devices {
-		b.Devices[i].KWh = roundTo(b.Devices[i].KWh, kwhDP)
-		b.Devices[i].Cost = roundTo(b.Devices[i].Cost, moneyDP)
+		b.Devices[i].KWh = round.To(b.Devices[i].KWh, round.KWhDP)
+		b.Devices[i].Cost = round.To(b.Devices[i].Cost, round.MoneyDP)
 	}
-	b.EnergyCost = roundTo(b.EnergyCost, moneyDP)
-	b.StandingCharge = roundTo(b.StandingCharge, moneyDP)
-	b.Total = roundTo(b.Total, moneyDP)
-	b.Reconciliation.MonitoredKWh = roundTo(b.Reconciliation.MonitoredKWh, kwhDP)
-	b.Reconciliation.MeterKWh = roundTo(b.Reconciliation.MeterKWh, kwhDP)
-	b.Reconciliation.UnmonitoredKWh = roundTo(b.Reconciliation.UnmonitoredKWh, kwhDP)
-	b.Reconciliation.Coverage = roundTo(b.Reconciliation.Coverage, covDP)
+	b.EnergyCost = round.To(b.EnergyCost, round.MoneyDP)
+	b.StandingCharge = round.To(b.StandingCharge, round.MoneyDP)
+	b.Total = round.To(b.Total, round.MoneyDP)
+	b.Reconciliation.MonitoredKWh = round.To(b.Reconciliation.MonitoredKWh, round.KWhDP)
+	b.Reconciliation.MeterKWh = round.To(b.Reconciliation.MeterKWh, round.KWhDP)
+	b.Reconciliation.UnmonitoredKWh = round.To(b.Reconciliation.UnmonitoredKWh, round.KWhDP)
+	b.Reconciliation.Coverage = round.To(b.Reconciliation.Coverage, round.CovDP)
 	return b
 }
 
@@ -413,7 +393,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query_count":           count,
 		"query_errors":          s.queryErrors.Load(),
-		"influx_avg_latency_ms": roundTo(avgMs, 2),
+		"influx_avg_latency_ms": round.To(avgMs, 2),
 		"version":               s.Version,
 		"uptime_seconds":        int(time.Since(s.started) / time.Second),
 		"goroutines":            runtime.NumGoroutine(),

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/influx"
+	"github.com/sweeney/countinghouse/internal/round"
 )
 
 // seriesResp mirrors the energy.SeriesResponse shape for decoding in tests
@@ -164,7 +165,7 @@ func TestSeries_Device(t *testing.T) {
 	if !approx(wf.TotalKWh, 0.7) {
 		t.Errorf("winefridge total_kwh = %v want 0.7", wf.TotalKWh)
 	}
-	wantCost0 := roundTo(0.05*testUnitRate*(1+testVAT), moneyDP)
+	wantCost0 := round.To(0.05*testUnitRate*(1+testVAT), round.MoneyDP)
 	if !approx(wf.Cost[0], wantCost0) {
 		t.Errorf("winefridge cost[0] = %v want %v", wf.Cost[0], wantCost0)
 	}
