@@ -9,6 +9,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -232,9 +233,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	// Encode into a buffer FIRST so a marshal failure (e.g. a non-finite
+	// float64 — encoding/json cannot marshal NaN/±Inf) becomes a real 500
+	// instead of a 200 with a truncated/empty body. Writing the status header
+	// before encoding would flush it irreversibly, leaving a broken response
+	// that looks successful.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		http.Error(w, `{"error":"internal: response encoding failed"}`, http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(v)
+	_, _ = w.Write(buf.Bytes())
 }

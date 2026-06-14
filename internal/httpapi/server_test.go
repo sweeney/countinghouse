@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,6 +10,49 @@ import (
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/influx"
 )
+
+// TestWriteJSON_NonFiniteYields500 locks issue #4: encoding/json cannot marshal
+// NaN/±Inf, so if a non-finite value reaches writeJSON it must surface as a
+// real 500 with a well-formed JSON error body — NOT a 200 with a
+// truncated/empty body that looks successful. writeJSON encodes to a buffer
+// first so the status can still be downgraded when Encode fails.
+func TestWriteJSON_NonFiniteYields500(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeJSON(w, http.StatusOK, map[string]any{"kwh": math.NaN()})
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500 on unmarshalable value, got %d (body=%q)", w.Code, w.Body.String())
+	}
+	var m map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+		t.Fatalf("response body is not well-formed JSON: %v (body=%q)", err, w.Body.String())
+	}
+	if m["error"] == nil {
+		t.Errorf("want an error field in the 500 body, got %v", m)
+	}
+}
+
+// TestWriteJSON_HappyPath proves the buffered path doesn't regress the normal
+// case: a marshalable value still yields the requested status, the JSON
+// content-type, and a complete body.
+func TestWriteJSON_HappyPath(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeJSON(w, http.StatusOK, map[string]any{"hello": "world"})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Errorf("content-type = %q", ct)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["hello"] != "world" {
+		t.Errorf("body = %v", m)
+	}
+}
 
 // fakeConfigStatus is a ConfigStatus test double.
 type fakeConfigStatus struct {
