@@ -7,6 +7,3 @@
 
 # Editor / OS
 .DS_Store
-
-# Local dev bearer token for the demo pages (never commit)
-demo/token.local.js

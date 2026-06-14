@@ -127,22 +127,11 @@ degrade gracefully). Logs are structured JSON on stderr.
 
 ## Demo consumer apps
 
-Zero-build browser apps under `demo/` (Chart.js via CDN, otherwise vanilla) that call the live
-API directly — no Influx/Flux knowledge required. Open them from disk (`file://`):
-
-- **`index.html`** — single-device power line + cumulative energy/cost (`/devices/{id}/series`).
-- **`breakdown.html`** — stacked/grouped/line/area/pie breakdown by device, room, or class,
-  consuming the row-oriented `shape=rows` series.
-- **`overlay.html`** — a device's power on a time axis with on/off state devices (hot water,
-  heating, fire alarms) shaded as hatched bands from `/devices/{id}/intervals`.
-
-**Auth:** no token is committed in the demo source. Either paste a bearer token into a page's
-*Connection settings* (persisted in `localStorage`), or, for local dev, drop one into a gitignored
-`demo/token.local.js` (sets `window.CH_DEV_TOKEN`) so all three pages auto-authenticate:
-
-```sh
-cp demo/token.local.js.example demo/token.local.js   # then paste a token from id.swee.net
-```
+Browser consumer demos for countinghouse (and the other swee.net read-side
+services) live in the sibling **`consumer-demos`** repo (`../consumer-demos`),
+alongside a shared dev token broker that handles id.swee.net auth. See its README
+to run them — countinghouse must be running locally (default base
+`http://localhost:8081`).
 
 ## Development
 
