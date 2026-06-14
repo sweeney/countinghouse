@@ -322,7 +322,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		if _, metered := energy.PathForClass(dev.Class); !metered {
 			continue
 		}
-		if dev.Class == "energy_meter" {
+		if dev.Class == energy.EnergyMeterClass {
 			// The whole-house meter is reconciled separately, not billed as a
 			// device. Record its id for the meterKWh query below.
 			meterID = id
@@ -350,7 +350,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 	// stays 0 (reconciliation then shows coverage 0) — don't fail.
 	var meterKWh float64
 	if meterID != "" {
-		kwh, _, err := s.deviceWindowKWh(r, meterID, "energy_meter", win)
+		kwh, _, err := s.deviceWindowKWh(r, meterID, energy.EnergyMeterClass, win)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "influx query failed for meter "+meterID+": "+err.Error())
 			return

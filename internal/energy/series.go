@@ -24,11 +24,17 @@ const (
 	houseMeterKey     = "meter"
 )
 
-// energyMeterClass is the device class of the whole-house electricity meter. It
+// EnergyMeterClass is the device class of the whole-house electricity meter. It
 // is metered via the counter path like a plug, but it is the AUTHORITATIVE
 // whole-house total, not one of the monitored devices — so it is EXCLUDED from
 // device/location/class groupings and surfaced separately only under group_by=house.
-const energyMeterClass = "energy_meter"
+//
+// It is the single source of truth for the meter class name, shared by the
+// energy package (grouping + routing) and the httpapi /bill handler (meter
+// detection), so the two can never drift. "energy_meter" is the canonical class
+// value the real statehouse_devices namespace emits (AGENT_BRIEF §3); the §1
+// device table's "electricity_meter" is descriptive prose, not the class tag.
+const EnergyMeterClass = "energy_meter"
 
 // Series is one line/bar in a SeriesResponse: a labelled, location/class-tagged
 // set of per-bucket arrays (all of length len(buckets)) plus window totals.
@@ -208,7 +214,7 @@ func assembleByDevice(
 	var out []Series
 	for _, id := range ids {
 		d := devices[id]
-		if !isMetered(d.Class) || d.Class == energyMeterClass {
+		if !isMetered(d.Class) || d.Class == EnergyMeterClass {
 			continue
 		}
 		label := d.DisplayName
@@ -237,7 +243,7 @@ func assembleGrouped(
 ) []Series {
 	members := map[string][]string{}
 	for id, d := range devices {
-		if !isMetered(d.Class) || d.Class == energyMeterClass {
+		if !isMetered(d.Class) || d.Class == EnergyMeterClass {
 			continue
 		}
 		k := keyOf(d)
@@ -281,7 +287,7 @@ func assembleHouse(
 	var meterID string
 	for _, id := range sortedDeviceIDs(devices) {
 		d := devices[id]
-		if d.Class == energyMeterClass {
+		if d.Class == EnergyMeterClass {
 			meterID = id
 			continue
 		}

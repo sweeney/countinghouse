@@ -187,7 +187,7 @@ func TestAssembleByDeviceExcludesMeter(t *testing.T) {
 	buckets := threeBuckets(loc)
 	devices := map[string]config.DeviceConfig{
 		"winefridge":        {Class: "continuous_power_device", DisplayName: "Wine Fridge"},
-		"electricity_meter": {Class: energyMeterClass, DisplayName: "Meter"},
+		"electricity_meter": {Class: EnergyMeterClass, DisplayName: "Meter"},
 	}
 	energy := map[string][]float64{
 		"winefridge":        {0.1, 0.1, 0.1},
@@ -259,7 +259,7 @@ func TestAssembleByLocationExcludesMeter(t *testing.T) {
 	buckets := threeBuckets(loc)
 	devices := map[string]config.DeviceConfig{
 		"winefridge":        {Class: "continuous_power_device", Location: "kitchen"},
-		"electricity_meter": {Class: energyMeterClass, Location: "utility"},
+		"electricity_meter": {Class: EnergyMeterClass, Location: "utility"},
 	}
 	energy := map[string][]float64{
 		"winefridge":        {1, 1, 1},
@@ -308,7 +308,7 @@ func TestAssembleHouseDualSeries(t *testing.T) {
 		"winefridge":        {Class: "continuous_power_device", Location: "kitchen"},
 		"office_pc":         {Class: "media_power_device", Location: "office"},
 		"network-ups":       {Class: "ups_sensor", Location: "office"},
-		"electricity_meter": {Class: energyMeterClass, Location: "utility"},
+		"electricity_meter": {Class: EnergyMeterClass, Location: "utility"},
 	}
 	energy := map[string][]float64{
 		"winefridge":        {0.1, 0.1, 0.1},
@@ -342,7 +342,7 @@ func TestAssembleHouseDualSeries(t *testing.T) {
 	if meter.KWh[0] != 1.0 || meter.AvgW[0] != 1000 {
 		t.Errorf("meter series wrong: kwh=%v w=%v", meter.KWh[0], meter.AvgW[0])
 	}
-	if meter.Class != energyMeterClass {
+	if meter.Class != EnergyMeterClass {
 		t.Errorf("meter class = %q", meter.Class)
 	}
 }

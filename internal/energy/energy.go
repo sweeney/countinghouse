@@ -25,7 +25,7 @@ var counterClasses = map[string]bool{
 	"cycle_power_device":       true,
 	"short_burst_power_device": true,
 	"media_power_device":       true,
-	"energy_meter":             true,
+	EnergyMeterClass:           true,
 }
 
 // PathForClass maps a device class to its query path. It returns ("counter",
