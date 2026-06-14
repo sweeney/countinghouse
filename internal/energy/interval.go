@@ -2,7 +2,6 @@ package energy
 
 import (
 	"fmt"
-	"sort"
 	"time"
 )
 
@@ -140,12 +139,4 @@ func suggestCoarser(win Window, loc *time.Location) string {
 // the axis can never disagree.
 func bucketCount(win Window, iv Interval, loc *time.Location) int {
 	return len(BucketStarts(win, iv, loc))
-}
-
-// sortedTokens is a stable helper for any caller that wants the allowed tokens
-// ordered; kept for symmetry with statehouse helpers.
-func sortedTokens() []string {
-	out := AllowedIntervals()
-	sort.Strings(out)
-	return out
 }

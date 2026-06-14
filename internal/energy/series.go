@@ -187,9 +187,9 @@ func AssembleSeries(
 
 	switch groupBy {
 	case GroupByLocation:
-		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Location }, false)
+		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Location })
 	case GroupByClass:
-		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Class }, false)
+		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Class })
 	case GroupByHouse:
 		return assembleHouse(buckets, devices, energyByDevice, powerByDevice, tariff, get)
 	case GroupByDevice, "":
@@ -239,7 +239,6 @@ func assembleGrouped(
 	tariff config.Tariff,
 	get getter,
 	keyOf func(config.DeviceConfig) string,
-	_ bool,
 ) []Series {
 	members := map[string][]string{}
 	for id, d := range devices {

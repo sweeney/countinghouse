@@ -143,9 +143,6 @@ func TestAllowedIntervals(t *testing.T) {
 			t.Errorf("AllowedIntervals[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
-	if len(sortedTokens()) != len(want) {
-		t.Errorf("sortedTokens len mismatch")
-	}
 }
 
 func TestResolveIntervalNilLocation(t *testing.T) {
