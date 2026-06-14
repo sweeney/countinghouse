@@ -11,9 +11,14 @@ import (
 // single query can fan out across a whole set of devices (keeping the query
 // count device-count-independent).
 func deviceSet(deviceIDs []string) string {
-	quoted := make([]string, len(deviceIDs))
-	for i, id := range deviceIDs {
-		quoted[i] = fmt.Sprintf("%q", id)
+	quoted := make([]string, 0, len(deviceIDs))
+	for _, id := range deviceIDs {
+		// Fail closed: drop any id that is not a safe identifier so it can
+		// never be interpolated into the Flux array literal (see validID).
+		if !validID(id) {
+			continue
+		}
+		quoted = append(quoted, fmt.Sprintf("%q", id))
 	}
 	return "[" + strings.Join(quoted, ", ") + "]"
 }
