@@ -23,6 +23,9 @@ func TestWriteJSON_NonFiniteYields500(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("want 500 on unmarshalable value, got %d (body=%q)", w.Code, w.Body.String())
 	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Errorf("500 content-type = %q, want application/json; charset=utf-8", ct)
+	}
 	var m map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &m); err != nil {
 		t.Fatalf("response body is not well-formed JSON: %v (body=%q)", err, w.Body.String())

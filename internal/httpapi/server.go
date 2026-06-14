@@ -260,11 +260,14 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err := enc.Encode(v); err != nil {
-		http.Error(w, `{"error":"internal: response encoding failed"}`, http.StatusInternalServerError)
+		// Keep the error body JSON-typed too (http.Error would force
+		// text/plain), matching the JSON error shape writeError uses.
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal: response encoding failed"}`))
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
 }

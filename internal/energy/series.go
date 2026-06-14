@@ -89,6 +89,21 @@ type SeriesResponse struct {
 // not shifted. The first bucket is therefore widened to its grid boundary (it
 // includes the pre-`from` slice, which carries no in-window data).
 //
+// Flux parity (anchoring): Influx's location-aware aggregateWindow anchors
+// windows to local midnight in the configured location and handles DST by
+// stretching/shrinking the single window that straddles the transition, NOT by
+// offsetting the whole grid by the zone offset (InfluxData, "Time Zones in
+// Flux": location-set results "always have time starting and stopping at
+// midnight in the specified time zone"). So a 6h grid is 00/06/12/18 LOCAL in
+// both GMT and BST (not 01/07/13/19), which is exactly what anchoring at local
+// midnight here produces — see TestBucketStartsCustomNonAlignedCoarse, which
+// exercises 6h on a BST date. (1h and finer always coincide regardless, because
+// London's offset is a whole number of hours.) Caveat: for a sub-day interval
+// over a custom window that CROSSES a DST transition, this fixed-duration
+// stepping drifts an hour off Flux's stretched grid after the change; that is a
+// pre-existing narrow edge (the 1d path has its own calendar branch) and worth
+// a one-off confirmation against the live instance.
+//
 // The window start is normalised into loc first so boundaries are local.
 func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 	if loc == nil {
