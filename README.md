@@ -31,7 +31,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 
 | Method & path | Description |
 |---|---|
-| `GET /healthz` | Health: status, version, uptime, Influx reachability, remote-config status. Public. |
+| `GET /healthz` | Health: aggregated `status` (`ok` / `degraded` = a remote-config fetch failing / `unavailable` = Influx unreachable), version, uptime, Influx reachability, remote-config status. Always HTTP 200. Public. |
 | `GET /openapi.json` | This API as JSON (served from `internal/httpapi/openapi.yaml`). Public. |
 | `GET /devices` | Device catalog (id, display_name, location, class, `capabilities`: `energy`/`events`). |
 | `GET /devices/{id}/energy?window=&from=&to=` | Windowed kWh for one device (`source`: counter/integral). |

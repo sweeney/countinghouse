@@ -215,7 +215,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		RemoteConfig    map[string]config.NamespaceStatus `json:"remote_config,omitempty"`
 	}
 	h := health{
-		Status:     "ok",
 		Version:    s.Version,
 		StartedAt:  s.started,
 		StartedAgo: int((time.Since(s.started) + 500*time.Millisecond) / time.Second),
@@ -229,6 +228,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.RemoteConfig != nil {
 		h.RemoteConfig = s.RemoteConfig.Statuses()
 	}
+
+	// Derive the aggregated verdict so a monitor watching the top-level status
+	// (the obvious thing to alert on) sees an outage. Influx is the hard
+	// dependency: without it no data route can answer, so an unreachable Influx
+	// is "unavailable". A failing config namespace is only "degraded" — we still
+	// serve the last-known-good snapshot. Otherwise "ok".
+	h.Status = "ok"
+	if s.Influx != nil && !h.InfluxReachable {
+		h.Status = "unavailable"
+	} else {
+		for _, ns := range h.RemoteConfig {
+			if !ns.OK {
+				h.Status = "degraded"
+				break
+			}
+		}
+	}
+
+	// The status code stays 200 for degraded/unavailable: /healthz is a
+	// liveness/readiness *report*, not itself failing.
 	writeJSON(w, http.StatusOK, h)
 }
 

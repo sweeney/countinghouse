@@ -968,6 +968,13 @@ components:
       properties:
         status:
           type: string
+          enum: [ok, degraded, unavailable]
+          description: >-
+            Aggregated downstream verdict. ok = all downstreams healthy;
+            degraded = serving last-known-good config because a remote-config
+            fetch is failing (remote_config.*.ok = false); unavailable = Influx
+            is unreachable (data routes will 502). The HTTP status is 200 in all
+            three cases — /healthz reports health, it does not itself fail.
           example: ok
         version:
           type: string

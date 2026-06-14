@@ -130,6 +130,61 @@ func TestHandleHealth_InfluxUnreachable(t *testing.T) {
 	}
 }
 
+// TestHandleHealth_StatusDerivation locks issue #2: the top-level status must
+// reflect downstream reachability, not be a hard-coded "ok". Influx is the hard
+// dependency (unreachable -> "unavailable"); a failing remote-config namespace
+// is "degraded" (we still serve last-known-good); all healthy -> "ok". Influx
+// takes precedence over a degraded namespace.
+func TestHandleHealth_StatusDerivation(t *testing.T) {
+	okNS := map[string]config.NamespaceStatus{
+		"statehouse_devices": {OK: true},
+		"energy_tariffs":     {OK: true},
+	}
+	degradedNS := map[string]config.NamespaceStatus{
+		"statehouse_devices": {OK: true},
+		"energy_tariffs":     {OK: false, Error: "boom"},
+	}
+	cases := []struct {
+		name   string
+		ping   bool
+		ns     map[string]config.NamespaceStatus
+		want   string
+		wantHC int
+	}{
+		{"all healthy", true, okNS, "ok", http.StatusOK},
+		{"all healthy, no fetcher", true, nil, "ok", http.StatusOK},
+		{"degraded namespace", true, degradedNS, "degraded", http.StatusOK},
+		{"influx down", false, okNS, "unavailable", http.StatusOK},
+		{"influx down beats degraded", false, degradedNS, "unavailable", http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := setup(t)
+			s.Influx = &influx.FakeQuerier{PingOK: c.ping}
+			if c.ns != nil {
+				s.RemoteConfig = fakeConfigStatus{statuses: c.ns}
+			}
+			mux := newMux(s)
+			r := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+
+			if w.Code != c.wantHC {
+				t.Fatalf("status code = %d, want %d", w.Code, c.wantHC)
+			}
+			var h struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if h.Status != c.want {
+				t.Errorf("status = %q, want %q (body=%s)", h.Status, c.want, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestHandleHealth_RemoteConfig(t *testing.T) {
 	s := setup(t)
 	s.RemoteConfig = fakeConfigStatus{statuses: map[string]config.NamespaceStatus{
