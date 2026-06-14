@@ -21,7 +21,7 @@ func TestTo(t *testing.T) {
 		{"watts", 52.149, WDP, 52.1},
 		{"half away from zero positive", 0.0625, KWhDP, 0.063},
 		{"half away from zero negative", -0.0625, KWhDP, -0.063},
-		{"negative tail", -0.0004999, KWhDP, -0.0},
+		{"negative tail", -0.0004999, KWhDP, 0},
 		{"nan to zero", math.NaN(), KWhDP, 0},
 		{"pos inf to zero", math.Inf(1), MoneyDP, 0},
 		{"neg inf to zero", math.Inf(-1), WDP, 0},
