@@ -47,9 +47,13 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 
 **Windows:** `today`, `week` (starts Monday), `month` — all period-to-date — and `custom`
 (requires RFC3339 `from` & `to`). `from`/`to` apply **only** to `window=custom`; passing
-them with any period-to-date window is a `400` (the range would otherwise be silently
-discarded). **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default per window and a
-~1000-bucket cap.
+them with any other window (period-to-date or rolling) is a `400` (the range would
+otherwise be silently discarded). **Rolling windows:** `<N>d` is a trailing N calendar days ending now,
+**day-aligned to local midnight** — `7d` = today + the previous 6 days, `1d` ≡ `today`;
+`<N>h` is an **exact** trailing N hours (e.g. `24h`), not midnight-aligned. Use these for
+"last 7 days" / "last 30 days" (`7d`/`30d`), as distinct from `week`/`month`, which reset
+on Monday / the 1st. **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default per window
+(rolling windows default by span) and a ~1000-bucket cap.
 
 ### Series response shapes (`shape=columns|rows`)
 

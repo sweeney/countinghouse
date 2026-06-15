@@ -2,6 +2,7 @@ package energy
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -42,6 +43,14 @@ type Window struct {
 //   - "month": Start = the 1st of now's month at 00:00 local; Stop = now.
 //   - "custom": requires both from and to non-zero; Start = from, Stop = to.
 //     Errors if either is missing or if to <= from.
+//   - "<N>d" (rolling days, e.g. "7d", "30d"): a trailing window of N calendar
+//     days ending now, DAY-ALIGNED to local midnight. Start = local midnight of
+//     N-1 days ago, Stop = now. So "7d" is today plus the previous 6 full days
+//     (7 day-buckets, today partial), and "1d" is equivalent to "today". Label
+//     echoes the spec token.
+//   - "<N>h" (rolling hours, e.g. "24h"): an EXACT trailing window of N hours.
+//     Start = now - N hours, Stop = now. Not midnight-aligned (unlike the day
+//     form) — intended for short spans where a fixed look-back is wanted.
 //   - any other spec is an error.
 //
 // Local midnights are built with time.Date(y, m, d, 0,0,0,0, loc) so DST is
@@ -82,7 +91,41 @@ func ResolveWindow(now time.Time, loc *time.Location, spec string, from, to time
 		return Window{Start: from, Stop: to, Label: WindowCustom}, nil
 
 	default:
+		if win, ok := resolveRolling(now, loc, spec); ok {
+			return win, nil
+		}
 		return Window{}, fmt.Errorf("energy: unknown window spec %q", spec)
+	}
+}
+
+// resolveRolling resolves a trailing-duration spec of the form "<N>d" or "<N>h"
+// (N a positive integer) into a Window, returning ok=false for anything that is
+// not such a spec so the caller can fall through to its unknown-spec error.
+//
+//   - "<N>d": day-aligned to local midnight. Start is the local midnight N-1 days
+//     before now's date, so the window spans N calendar-day buckets ending with
+//     today's partial day. Built with time.Date so DST and month/year rollover
+//     are handled correctly (a London day across a clock change is 23h/25h).
+//   - "<N>h": an exact trailing span, Start = now - N hours, not midnight-aligned.
+func resolveRolling(now time.Time, loc *time.Location, spec string) (Window, bool) {
+	if len(spec) < 2 {
+		return Window{}, false
+	}
+	unit := spec[len(spec)-1]
+	n, err := strconv.Atoi(spec[:len(spec)-1])
+	if err != nil || n < 1 {
+		return Window{}, false
+	}
+	switch unit {
+	case 'd':
+		ln := now.In(loc)
+		start := time.Date(ln.Year(), ln.Month(), ln.Day()-(n-1), 0, 0, 0, 0, loc)
+		return Window{Start: start, Stop: now, Label: spec}, true
+	case 'h':
+		start := now.Add(-time.Duration(n) * time.Hour)
+		return Window{Start: start, Stop: now, Label: spec}, true
+	default:
+		return Window{}, false
 	}
 }
 

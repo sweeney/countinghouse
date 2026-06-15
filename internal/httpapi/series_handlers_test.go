@@ -105,6 +105,35 @@ func seriesSetup(t *testing.T, energyPer, powerPer map[string]float64) *Server {
 	return s
 }
 
+// TestSeries_RollingWindow exercises the rolling "<N>d" window end-to-end through
+// the /series handler: the window label echoes the spec, the interval defaults by
+// span (7d → 6h), and From is day-aligned to local midnight 6 days before now
+// (clock = 2026-06-11 14:00 BST), distinct from window=today.
+func TestSeries_RollingWindow(t *testing.T) {
+	s, fake := dataSetup(t)
+	fake.PingOK = true // empty result set is fine; we assert on metadata, not values
+
+	w := doGET(t, s, "/series?window=7d&group_by=device")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	r := decodeSeries(t, w)
+
+	if r.Window != "7d" {
+		t.Errorf("window = %q want 7d", r.Window)
+	}
+	if r.Interval != "6h" {
+		t.Errorf("interval = %q want 6h (span default)", r.Interval)
+	}
+	if !strings.HasPrefix(r.From, "2026-06-05T00:00:00") {
+		t.Errorf("from = %q want day-aligned 2026-06-05 local midnight", r.From)
+	}
+	// 7d at 6h spans far more buckets than today's 14×1h — proof it is not today.
+	if len(r.Buckets) <= 14 {
+		t.Errorf("buckets = %d, want a full week of 6h buckets (>14)", len(r.Buckets))
+	}
+}
+
 // --- /series group_by=device ---
 
 func TestSeries_Device(t *testing.T) {

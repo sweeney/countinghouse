@@ -198,6 +198,103 @@ func TestWindow_Days(t *testing.T) {
 	})
 }
 
+func TestResolveWindow_RollingDays(t *testing.T) {
+	loc := mustLondon(t)
+	// Thursday 2026-06-11, 15:30 BST (14:30 UTC).
+	now := utc(2026, 6, 11, 14, 30)
+
+	tests := []struct {
+		spec  string
+		start time.Time // expected local Start
+	}{
+		// 1d rolling == today (midnight of today).
+		{"1d", time.Date(2026, 6, 11, 0, 0, 0, 0, loc)},
+		// 7d == today + previous 6 days -> midnight of the 5th.
+		{"7d", time.Date(2026, 6, 5, 0, 0, 0, 0, loc)},
+		// 30d -> midnight 29 days back, crossing the month boundary into May.
+		{"30d", time.Date(2026, 5, 13, 0, 0, 0, 0, loc)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.spec, func(t *testing.T) {
+			w := resolve(t, now, loc, tc.spec, time.Time{}, time.Time{})
+			if !w.Start.Equal(tc.start) {
+				t.Errorf("Start = %s, want %s", w.Start, tc.start)
+			}
+			if !w.Stop.Equal(now) {
+				t.Errorf("Stop = %s, want now %s", w.Stop, now)
+			}
+			if w.Label != tc.spec {
+				t.Errorf("Label = %q, want %q", w.Label, tc.spec)
+			}
+			// Start must be local midnight (day-aligned).
+			ls := w.Start.In(loc)
+			if ls.Hour() != 0 || ls.Minute() != 0 || ls.Second() != 0 {
+				t.Errorf("Start %s is not local midnight", w.Start)
+			}
+		})
+	}
+}
+
+// TestResolveWindow_RollingDayEqualsTodayOnAnyWeekday proves the rolling form is
+// weekday-independent: unlike week-to-date, "7d" looks back a fixed 7 days no
+// matter what day it is (the distinction that motivated the feature).
+func TestResolveWindow_RollingDayWeekdayIndependent(t *testing.T) {
+	loc := mustLondon(t)
+	// Monday 2026-06-15: week-to-date == today here, but 7d must not be.
+	now := utc(2026, 6, 15, 9, 0)
+
+	week := resolve(t, now, loc, WindowWeek, time.Time{}, time.Time{})
+	today := resolve(t, now, loc, WindowToday, time.Time{}, time.Time{})
+	if !week.Start.Equal(today.Start) {
+		t.Fatalf("precondition: on Monday week.Start (%s) should equal today.Start (%s)", week.Start, today.Start)
+	}
+
+	rolling := resolve(t, now, loc, "7d", time.Time{}, time.Time{})
+	if rolling.Start.Equal(today.Start) {
+		t.Errorf("7d.Start (%s) must differ from today.Start (%s)", rolling.Start, today.Start)
+	}
+	want := time.Date(2026, 6, 9, 0, 0, 0, 0, loc) // midnight 6 days back
+	if !rolling.Start.Equal(want) {
+		t.Errorf("7d.Start = %s, want %s", rolling.Start, want)
+	}
+}
+
+func TestResolveWindow_RollingHours(t *testing.T) {
+	loc := mustLondon(t)
+	now := utc(2026, 6, 11, 14, 30)
+
+	w := resolve(t, now, loc, "24h", time.Time{}, time.Time{})
+	// Exact trailing span: Start = now - 24h, NOT midnight-aligned.
+	wantStart := now.Add(-24 * time.Hour)
+	if !w.Start.Equal(wantStart) {
+		t.Errorf("Start = %s, want %s", w.Start, wantStart)
+	}
+	if !w.Stop.Equal(now) {
+		t.Errorf("Stop = %s, want %s", w.Stop, now)
+	}
+	if w.Label != "24h" {
+		t.Errorf("Label = %q, want %q", w.Label, "24h")
+	}
+}
+
+func TestResolveWindow_RollingDSTSpringForward(t *testing.T) {
+	loc := mustLondon(t)
+	// now just after the 2026-03-29 spring-forward (23h day). "2d" = today + the
+	// previous day, so Start is midnight of the 29th. The real elapsed span is one
+	// hour short of a flat 24h+11h because the 29th was only 23h long.
+	now := utc(2026, 3, 30, 10, 0) // 11:00 BST on the 30th
+	w := resolve(t, now, loc, "2d", time.Time{}, time.Time{})
+	wantStart := time.Date(2026, 3, 29, 0, 0, 0, 0, loc)
+	if !w.Start.Equal(wantStart) {
+		t.Errorf("Start = %s, want %s", w.Start, wantStart)
+	}
+	// 29th (23h, DST-shortened) + 11h into the 30th = 34h elapsed (not 35h).
+	if got := w.Stop.Sub(w.Start); got != 34*time.Hour {
+		t.Errorf("elapsed = %v, want 34h (DST-shortened)", got)
+	}
+}
+
 func TestResolveWindow_CustomErrors(t *testing.T) {
 	loc := mustLondon(t)
 	now := utc(2026, 6, 11, 12, 0)

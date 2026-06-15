@@ -67,26 +67,24 @@ func lookupInterval(token string) (Interval, bool) {
 //   - today → 1h (24-ish buckets)
 //   - week  → 1d (7 buckets)
 //   - month → 1d (~30 buckets)
-//   - custom → chosen by span so the bucket count stays modest (≲ ~300):
-//     ≤2d → 1h, ≤14d → 6h, otherwise 1d.
+//   - custom and rolling (<N>d/<N>h) → chosen by span so the bucket count stays
+//     modest (≲ ~300): ≤2d → 1h, ≤14d → 6h, otherwise 1d.
 func DefaultInterval(win Window) string {
 	switch win.Label {
 	case WindowToday:
 		return "1h"
 	case WindowWeek, WindowMonth:
 		return "1d"
-	case WindowCustom:
-		span := win.Stop.Sub(win.Start)
-		switch {
-		case span <= 2*24*time.Hour:
-			return "1h"
-		case span <= 14*24*time.Hour:
-			return "6h"
-		default:
-			return "1d"
-		}
-	default:
+	}
+	// custom + rolling windows: pick by elapsed span.
+	span := win.Stop.Sub(win.Start)
+	switch {
+	case span <= 2*24*time.Hour:
 		return "1h"
+	case span <= 14*24*time.Hour:
+		return "6h"
+	default:
+		return "1d"
 	}
 }
 

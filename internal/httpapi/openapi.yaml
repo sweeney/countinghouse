@@ -399,19 +399,27 @@ components:
       name: window
       in: query
       required: false
-      description: Window spec. Defaults to "today".
+      description: >-
+        Window spec. Defaults to "today". Period-to-date: today, week (from
+        Monday), month (from the 1st) — all ending now. custom: an explicit
+        from/to range. Rolling: "<N>d" is a trailing N calendar days ending now,
+        DAY-ALIGNED to local midnight (e.g. 7d = today + the previous 6 days;
+        1d == today); "<N>h" is an EXACT trailing N hours (e.g. 24h), not
+        midnight-aligned. N is a positive integer.
       schema:
         type: string
-        enum: [today, week, month, custom]
         default: today
+        pattern: '^(today|week|month|custom|[0-9]+[dh])$'
+        example: 7d
     From:
       name: from
       in: query
       required: false
       description: >-
         Custom window start (RFC3339). Required when window=custom, and ONLY
-        valid then — supplying from with window=today/week/month (which are
-        period-to-date and ignore it) is rejected with 400.
+        valid then — supplying from with any other window (period-to-date
+        today/week/month or rolling <N>d/<N>h, which derive their own range) is
+        rejected with 400.
       schema:
         type: string
         format: date-time
@@ -421,8 +429,9 @@ components:
       required: false
       description: >-
         Custom window end (RFC3339). Required when window=custom, and ONLY
-        valid then — supplying to with window=today/week/month (which are
-        period-to-date and ignore it) is rejected with 400.
+        valid then — supplying to with any other window (period-to-date
+        today/week/month or rolling <N>d/<N>h, which derive their own range) is
+        rejected with 400.
       schema:
         type: string
         format: date-time
@@ -432,7 +441,7 @@ components:
       required: false
       description: >
         Bucket granularity. Defaults smartly to the window (today→1h,
-        week/month→1d, custom→by span). An interval whose bucket count over the
+        week/month→1d, custom and rolling <N>d/<N>h→by span). An interval whose bucket count over the
         window exceeds the ~1000 cap returns 400 asking for a coarser interval.
         For window=custom whose from is not on an interval boundary, the bucket
         axis snaps DOWN to the interval grid anchored at local midnight (so it
