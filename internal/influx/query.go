@@ -64,9 +64,9 @@ func BuildCounterFlux(bucket, deviceID string, start, stop time.Time) string {
 	return fmt.Sprintf(`from(bucket: %q)
   |> range(start: %s, stop: %s)
   |> filter(fn: (r) => r._measurement == "device_power" and r._field == "energy_kwh")
-  |> filter(fn: (r) => r.device_id == %q)
+  |> filter(fn: (r) => %s)
   |> increase()
-  |> last()`, bucket, fluxTime(start), fluxTime(stop), deviceID)
+  |> last()`, bucket, fluxTime(start), fluxTime(stop), deviceIDPredicate(deviceID))
 }
 
 // BuildActivityFlux builds the binary/event-timeline query over the
@@ -119,8 +119,8 @@ func BuildIntegralFlux(bucket, deviceID string, start, stop time.Time) string {
 	return fmt.Sprintf(`from(bucket: %q)
   |> range(start: %s, stop: %s)
   |> filter(fn: (r) => r._measurement == "device_power" and r._field == "power_w")
-  |> filter(fn: (r) => r.device_id == %q)
+  |> filter(fn: (r) => %s)
   |> integral(unit: 1h, interpolate: "linear")
   |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))`,
-		bucket, fluxTime(start), fluxTime(stop), deviceID)
+		bucket, fluxTime(start), fluxTime(stop), deviceIDPredicate(deviceID))
 }

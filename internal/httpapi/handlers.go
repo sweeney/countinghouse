@@ -1,34 +1,14 @@
 package httpapi
 
 import (
-	"math"
 	"net/http"
 	"runtime"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/energy"
+	"github.com/sweeney/countinghouse/internal/round"
 )
-
-// Decimal places for rounding numbers in API responses. Influx increase()/
-// integral() and the cost multiply produce long float tails (e.g.
-// 0.24127950000000187); we round at the response boundary so consumers see
-// tidy values. kWh to 3 dp (~Wh), money to 4 dp (sub-penny, keeps tiny
-// per-device costs meaningful), coverage to 4 dp.
-const (
-	kwhDP   = 3
-	moneyDP = 4
-	covDP   = 4
-)
-
-// roundTo rounds f to dp decimal places, passing NaN/Inf through untouched.
-func roundTo(f float64, dp int) float64 {
-	if math.IsNaN(f) || math.IsInf(f, 0) {
-		return f
-	}
-	p := math.Pow(10, float64(dp))
-	return math.Round(f*p) / p
-}
 
 // resolveWindowParams parses the window/from/to query params and resolves them
 // to a concrete Window using the injected clock + location. It returns a 400
@@ -59,6 +39,15 @@ func (s *Server) resolveWindowParams(w http.ResponseWriter, r *http.Request) (en
 			return energy.Window{}, false
 		}
 		to = t
+	}
+
+	// from/to only apply to window=custom; today/week/month are period-to-date
+	// and ignore them. Rather than silently discarding a caller-supplied range
+	// (and confidently returning a different window's data), reject the
+	// contradiction so an intent mismatch surfaces as an actionable 400.
+	if spec != energy.WindowCustom && (!from.IsZero() || !to.IsZero()) {
+		writeError(w, http.StatusBadRequest, "'from'/'to' are only valid with window=custom")
+		return energy.Window{}, false
 	}
 
 	win, err := energy.ResolveWindow(s.clock().Now(), s.loc(), spec, from, to)
@@ -117,7 +106,7 @@ func (s *Server) handleDeviceEnergy(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device_id": id,
-		"kwh":       roundTo(kwh, kwhDP),
+		"kwh":       round.To(kwh, round.KWhDP),
 		"source":    source,
 		"window":    win.Label,
 		"from":      win.Start,
@@ -157,8 +146,8 @@ func (s *Server) handleDeviceCost(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device_id": id,
-		"kwh":       roundTo(kwh, kwhDP),
-		"cost":      roundTo(cost, moneyDP),
+		"kwh":       round.To(kwh, round.KWhDP),
+		"cost":      round.To(cost, round.MoneyDP),
 		"currency":  "GBP",
 		"window":    win.Label,
 		"tariff": map[string]any{
@@ -322,7 +311,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		if _, metered := energy.PathForClass(dev.Class); !metered {
 			continue
 		}
-		if dev.Class == "energy_meter" {
+		if dev.Class == energy.EnergyMeterClass {
 			// The whole-house meter is reconciled separately, not billed as a
 			// device. Record its id for the meterKWh query below.
 			meterID = id
@@ -346,11 +335,13 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		dc.KWh = kwh
 	}
 
-	// Whole-house meter total. If no electricity meter is configured, meterKWh
-	// stays 0 (reconciliation then shows coverage 0) — don't fail.
+	// Whole-house meter total. If no electricity meter is configured we pass
+	// meterPresent=false so the reconciliation omits the meter-derived fields
+	// rather than inventing a misleading negative remainder — don't fail.
+	meterPresent := meterID != ""
 	var meterKWh float64
-	if meterID != "" {
-		kwh, _, err := s.deviceWindowKWh(r, meterID, "energy_meter", win)
+	if meterPresent {
+		kwh, _, err := s.deviceWindowKWh(r, meterID, energy.EnergyMeterClass, win)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "influx query failed for meter "+meterID+": "+err.Error())
 			return
@@ -358,7 +349,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		meterKWh = kwh
 	}
 
-	bill := energy.AssembleBill(win, billable, meterKWh, tariff)
+	bill := energy.AssembleBill(win, billable, meterKWh, meterPresent, tariff)
 	writeJSON(w, http.StatusOK, roundBill(bill))
 }
 
@@ -366,17 +357,27 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 // rounded from their full-precision values (not from the already-rounded parts).
 func roundBill(b energy.Bill) energy.Bill {
 	for i := range b.Devices {
-		b.Devices[i].KWh = roundTo(b.Devices[i].KWh, kwhDP)
-		b.Devices[i].Cost = roundTo(b.Devices[i].Cost, moneyDP)
+		b.Devices[i].KWh = round.To(b.Devices[i].KWh, round.KWhDP)
+		b.Devices[i].Cost = round.To(b.Devices[i].Cost, round.MoneyDP)
 	}
-	b.EnergyCost = roundTo(b.EnergyCost, moneyDP)
-	b.StandingCharge = roundTo(b.StandingCharge, moneyDP)
-	b.Total = roundTo(b.Total, moneyDP)
-	b.Reconciliation.MonitoredKWh = roundTo(b.Reconciliation.MonitoredKWh, kwhDP)
-	b.Reconciliation.MeterKWh = roundTo(b.Reconciliation.MeterKWh, kwhDP)
-	b.Reconciliation.UnmonitoredKWh = roundTo(b.Reconciliation.UnmonitoredKWh, kwhDP)
-	b.Reconciliation.Coverage = roundTo(b.Reconciliation.Coverage, covDP)
+	b.EnergyCost = round.To(b.EnergyCost, round.MoneyDP)
+	b.StandingCharge = round.To(b.StandingCharge, round.MoneyDP)
+	b.Total = round.To(b.Total, round.MoneyDP)
+	b.Reconciliation.MonitoredKWh = round.To(b.Reconciliation.MonitoredKWh, round.KWhDP)
+	// The meter-derived fields are nil when no meter is configured; round in
+	// place only when present so the "omitted" signal is preserved.
+	roundPtr(b.Reconciliation.MeterKWh, round.KWhDP)
+	roundPtr(b.Reconciliation.UnmonitoredKWh, round.KWhDP)
+	roundPtr(b.Reconciliation.Coverage, round.CovDP)
 	return b
+}
+
+// roundPtr rounds the float a pointer addresses to dp places, in place. A nil
+// pointer (an omitted reconciliation field) is left untouched.
+func roundPtr(p *float64, dp int) {
+	if p != nil {
+		*p = round.To(*p, dp)
+	}
 }
 
 // handleTariffs serves GET /tariffs, returning all configured tariffs keyed by
@@ -404,7 +405,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query_count":           count,
 		"query_errors":          s.queryErrors.Load(),
-		"influx_avg_latency_ms": roundTo(avgMs, 2),
+		"influx_avg_latency_ms": round.To(avgMs, 2),
 		"version":               s.Version,
 		"uptime_seconds":        int(time.Since(s.started) / time.Second),
 		"goroutines":            runtime.NumGoroutine(),

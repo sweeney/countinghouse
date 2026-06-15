@@ -408,7 +408,10 @@ components:
       name: from
       in: query
       required: false
-      description: Custom window start (RFC3339). Required when window=custom.
+      description: >-
+        Custom window start (RFC3339). Required when window=custom, and ONLY
+        valid then — supplying from with window=today/week/month (which are
+        period-to-date and ignore it) is rejected with 400.
       schema:
         type: string
         format: date-time
@@ -416,7 +419,10 @@ components:
       name: to
       in: query
       required: false
-      description: Custom window end (RFC3339). Required when window=custom.
+      description: >-
+        Custom window end (RFC3339). Required when window=custom, and ONLY
+        valid then — supplying to with window=today/week/month (which are
+        period-to-date and ignore it) is rejected with 400.
       schema:
         type: string
         format: date-time
@@ -428,6 +434,11 @@ components:
         Bucket granularity. Defaults smartly to the window (today→1h,
         week/month→1d, custom→by span). An interval whose bucket count over the
         window exceeds the ~1000 cap returns 400 asking for a coarser interval.
+        For window=custom whose from is not on an interval boundary, the bucket
+        axis snaps DOWN to the interval grid anchored at local midnight (so it
+        matches the aggregation boundaries); the first bucket is widened to that
+        boundary. Period-to-date windows already start at local midnight and are
+        unaffected.
       schema:
         type: string
         enum: [5m, 15m, 30m, 1h, 6h, 1d]
@@ -593,16 +604,30 @@ components:
 
     Reconciliation:
       type: object
+      required: [meter_present, monitored_kwh]
       properties:
+        meter_present:
+          type: boolean
+          description: >-
+            Whether an energy_meter is configured. When false there is nothing
+            to reconcile against, so meter_kwh, unmonitored_kwh and coverage are
+            OMITTED (rather than reported as a misleading negative remainder /
+            zero coverage).
         monitored_kwh:
           type: number
         meter_kwh:
           type: number
+          description: >-
+            Whole-house meter total. Present only when meter_present is true.
         unmonitored_kwh:
           type: number
+          description: >-
+            meter_kwh − monitored_kwh. Present only when meter_present is true.
         coverage:
           type: number
-          description: Monitored fraction of meter; not clamped to [0,1].
+          description: >-
+            Monitored fraction of meter; not clamped to [0,1]. Present only when
+            meter_present is true.
 
     BillResponse:
       type: object
@@ -962,6 +987,13 @@ components:
       properties:
         status:
           type: string
+          enum: [ok, degraded, unavailable]
+          description: >-
+            Aggregated downstream verdict. ok = all downstreams healthy;
+            degraded = serving last-known-good config because a remote-config
+            fetch is failing (remote_config.*.ok = false); unavailable = Influx
+            is unreachable (data routes will 502). The HTTP status is 200 in all
+            three cases — /healthz reports health, it does not itself fail.
           example: ok
         version:
           type: string

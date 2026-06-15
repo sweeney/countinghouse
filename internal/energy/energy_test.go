@@ -15,6 +15,23 @@ var (
 	stop  = time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC)
 )
 
+// TestEnergyMeterClassConstant locks the exported single-source-of-truth meter
+// class constant: its value, and that the energy package routes it via the
+// counter path and includes it in counterClasses. Guards against the /bill
+// handler and the energy package drifting on the magic "energy_meter" string
+// (issue #7).
+func TestEnergyMeterClassConstant(t *testing.T) {
+	if EnergyMeterClass != "energy_meter" {
+		t.Fatalf("EnergyMeterClass = %q, want energy_meter", EnergyMeterClass)
+	}
+	if path, ok := PathForClass(EnergyMeterClass); !ok || path != PathCounter {
+		t.Fatalf("PathForClass(EnergyMeterClass) = (%q, %v), want (counter, true)", path, ok)
+	}
+	if !counterClasses[EnergyMeterClass] {
+		t.Fatal("counterClasses must include EnergyMeterClass")
+	}
+}
+
 func TestPathForClass(t *testing.T) {
 	cases := []struct {
 		class    string

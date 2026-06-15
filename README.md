@@ -31,7 +31,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 
 | Method & path | Description |
 |---|---|
-| `GET /healthz` | Health: status, version, uptime, Influx reachability, remote-config status. Public. |
+| `GET /healthz` | Health: aggregated `status` (`ok` / `degraded` = a remote-config fetch failing / `unavailable` = Influx unreachable), version, uptime, Influx reachability, remote-config status. Always HTTP 200. Public. |
 | `GET /openapi.json` | This API as JSON (served from `internal/httpapi/openapi.yaml`). Public. |
 | `GET /devices` | Device catalog (id, display_name, location, class, `capabilities`: `energy`/`events`). |
 | `GET /devices/{id}/energy?window=&from=&to=` | Windowed kWh for one device (`source`: counter/integral). |
@@ -41,13 +41,15 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
 | `GET /series?window=&interval=&group_by=&shape=` | Multi-series time-series. `group_by`: `device` (default), `location`, `class`, `house` (monitored + meter). |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
-| `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. |
+| `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Current tariffs keyed by fuel (electricity, gas). |
 | `GET /metrics` | Query counters, Influx latency, uptime, goroutines. |
 
 **Windows:** `today`, `week` (starts Monday), `month` — all period-to-date — and `custom`
-(requires RFC3339 `from` & `to`). **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default
-per window and a ~1000-bucket cap.
+(requires RFC3339 `from` & `to`). `from`/`to` apply **only** to `window=custom`; passing
+them with any period-to-date window is a `400` (the range would otherwise be silently
+discarded). **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default per window and a
+~1000-bucket cap.
 
 ### Series response shapes (`shape=columns|rows`)
 
@@ -93,6 +95,13 @@ Chart(points) { p in LineMark(x: .value("t", p.time), y: .value("W", p.avg_w)).f
 
 Timestamps are RFC3339 with the local offset (parse with JS `new Date(...)` / Swift
 `ISO8601`/`Date`). Values are pre-rounded (kWh 3dp, cost 4dp GBP, avg_w 1dp W).
+
+For a `window=custom` whose `from` is **not** on an interval boundary, the bucket axis
+snaps **down** to the interval grid (anchored at local midnight) so it matches Influx's
+aggregation boundaries — e.g. `from=14:23` with `interval=1h` yields buckets starting at
+`14:00, 15:00, …`. The first bucket is widened to its grid boundary (the pre-`from` slice
+carries no in-window data). Period-to-date windows (`today`/`week`/`month`) already start
+at local midnight, so they are unaffected.
 
 The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth for request
 and response schemas; a path-coverage test fails CI if routes and spec drift.

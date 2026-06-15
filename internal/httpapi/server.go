@@ -9,6 +9,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -214,7 +215,6 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		RemoteConfig    map[string]config.NamespaceStatus `json:"remote_config,omitempty"`
 	}
 	h := health{
-		Status:     "ok",
 		Version:    s.Version,
 		StartedAt:  s.started,
 		StartedAgo: int((time.Since(s.started) + 500*time.Millisecond) / time.Second),
@@ -228,13 +228,46 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.RemoteConfig != nil {
 		h.RemoteConfig = s.RemoteConfig.Statuses()
 	}
+
+	// Derive the aggregated verdict so a monitor watching the top-level status
+	// (the obvious thing to alert on) sees an outage. Influx is the hard
+	// dependency: without it no data route can answer, so an unreachable Influx
+	// is "unavailable". A failing config namespace is only "degraded" — we still
+	// serve the last-known-good snapshot. Otherwise "ok".
+	h.Status = "ok"
+	if s.Influx != nil && !h.InfluxReachable {
+		h.Status = "unavailable"
+	} else {
+		for _, ns := range h.RemoteConfig {
+			if !ns.OK {
+				h.Status = "degraded"
+				break
+			}
+		}
+	}
+
+	// The status code stays 200 for degraded/unavailable: /healthz is a
+	// liveness/readiness *report*, not itself failing.
 	writeJSON(w, http.StatusOK, h)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
+	// Encode into a buffer FIRST so a marshal failure (e.g. a non-finite
+	// float64 — encoding/json cannot marshal NaN/±Inf) becomes a real 500
+	// instead of a 200 with a truncated/empty body. Writing the status header
+	// before encoding would flush it irreversibly, leaving a broken response
+	// that looks successful.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	_ = enc.Encode(v)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := enc.Encode(v); err != nil {
+		// Keep the error body JSON-typed too (http.Error would force
+		// text/plain), matching the JSON error shape writeError uses.
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal: response encoding failed"}`))
+		return
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(buf.Bytes())
 }

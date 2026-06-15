@@ -2,12 +2,12 @@ package energy
 
 import (
 	"context"
-	"math"
 	"sort"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/influx"
+	"github.com/sweeney/countinghouse/internal/round"
 )
 
 // group_by modes for BuildSeries / AssembleSeries.
@@ -24,11 +24,17 @@ const (
 	houseMeterKey     = "meter"
 )
 
-// energyMeterClass is the device class of the whole-house electricity meter. It
+// EnergyMeterClass is the device class of the whole-house electricity meter. It
 // is metered via the counter path like a plug, but it is the AUTHORITATIVE
 // whole-house total, not one of the monitored devices — so it is EXCLUDED from
 // device/location/class groupings and surfaced separately only under group_by=house.
-const energyMeterClass = "energy_meter"
+//
+// It is the single source of truth for the meter class name, shared by the
+// energy package (grouping + routing) and the httpapi /bill handler (meter
+// detection), so the two can never drift. "energy_meter" is the canonical class
+// value the real statehouse_devices namespace emits (AGENT_BRIEF §3); the §1
+// device table's "electricity_meter" is descriptive prose, not the class tag.
+const EnergyMeterClass = "energy_meter"
 
 // Series is one line/bar in a SeriesResponse: a labelled, location/class-tagged
 // set of per-bucket arrays (all of length len(buckets)) plus window totals.
@@ -69,8 +75,34 @@ type SeriesResponse struct {
 // For calendar intervals (1d) the axis steps by CALENDAR day in loc using
 // time.Date(year, month, day+1, ...), so a London day that is 23h (spring
 // forward) or 25h (autumn back) is still a single bucket starting at local
-// midnight — DST-correct. For fixed (sub-day) intervals the axis steps by
-// iv.Duration from the (local) window start.
+// midnight — DST-correct.
+//
+// For fixed (sub-day) intervals the axis is SNAPPED DOWN to the interval grid
+// anchored at the local midnight of the start date, then stepped by
+// iv.Duration. This matches Influx's aggregateWindow(every:, location:), whose
+// windows are aligned to the location's grid (local midnight), NOT to
+// range(start:). For today/week/month the window start is already local
+// midnight, which is on every sub-day grid, so this is a no-op; it only matters
+// for window=custom whose `from` is off the boundary (e.g. 14:23 with 1h snaps
+// to 14:00). Snapping makes every Influx row's _start stamp exact-match a
+// bucket, so the first partial window is no longer dropped and later buckets are
+// not shifted. The first bucket is therefore widened to its grid boundary (it
+// includes the pre-`from` slice, which carries no in-window data).
+//
+// Flux parity (anchoring): Influx's location-aware aggregateWindow anchors
+// windows to local midnight in the configured location and handles DST by
+// stretching/shrinking the single window that straddles the transition, NOT by
+// offsetting the whole grid by the zone offset (InfluxData, "Time Zones in
+// Flux": location-set results "always have time starting and stopping at
+// midnight in the specified time zone"). So a 6h grid is 00/06/12/18 LOCAL in
+// both GMT and BST (not 01/07/13/19), which is exactly what anchoring at local
+// midnight here produces — see TestBucketStartsCustomNonAlignedCoarse, which
+// exercises 6h on a BST date. (1h and finer always coincide regardless, because
+// London's offset is a whole number of hours.) Caveat: for a sub-day interval
+// over a custom window that CROSSES a DST transition, this fixed-duration
+// stepping drifts an hour off Flux's stretched grid after the change; that is a
+// pre-existing narrow edge (the 1d path has its own calendar branch) and worth
+// a one-off confirmation against the live instance.
 //
 // The window start is normalised into loc first so boundaries are local.
 func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
@@ -91,7 +123,13 @@ func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 		return out
 	}
 
-	for cur := start; cur.Before(stop); cur = cur.Add(iv.Duration) {
+	// Snap start down to the interval grid anchored at the start date's local
+	// midnight (Flux aligns sub-day windows to the location's grid, not to the
+	// query range start).
+	anchor := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
+	off := start.Sub(anchor) % iv.Duration
+	first := start.Add(-off)
+	for cur := first; cur.Before(stop); cur = cur.Add(iv.Duration) {
 		out = append(out, cur)
 	}
 	return out
@@ -120,23 +158,6 @@ func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 	}
 	return hrs
 }
-
-// roundTo rounds x to n decimal places (half away from zero). Negative inputs
-// (e.g. a tiny negative counter delta from a noisy reset) round symmetrically.
-func roundTo(x float64, n int) float64 {
-	if math.IsNaN(x) || math.IsInf(x, 0) {
-		return 0
-	}
-	p := math.Pow10(n)
-	return math.Round(x*p) / p
-}
-
-// rounding precisions (PLAN §A: kWh 3dp, cost 4dp, W 1dp).
-const (
-	kwhDP  = 3
-	costDP = 4
-	wDP    = 1
-)
 
 // AssembleSeries is the PURE assembly step: given the canonical bucket axis, the
 // device inventory, per-device per-bucket energy (kWh, already aligned to
@@ -181,9 +202,9 @@ func AssembleSeries(
 
 	switch groupBy {
 	case GroupByLocation:
-		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Location }, false)
+		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Location })
 	case GroupByClass:
-		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Class }, false)
+		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Class })
 	case GroupByHouse:
 		return assembleHouse(buckets, devices, energyByDevice, powerByDevice, tariff, get)
 	case GroupByDevice, "":
@@ -208,7 +229,7 @@ func assembleByDevice(
 	var out []Series
 	for _, id := range ids {
 		d := devices[id]
-		if !isMetered(d.Class) || d.Class == energyMeterClass {
+		if !isMetered(d.Class) || d.Class == EnergyMeterClass {
 			continue
 		}
 		label := d.DisplayName
@@ -233,11 +254,10 @@ func assembleGrouped(
 	tariff config.Tariff,
 	get getter,
 	keyOf func(config.DeviceConfig) string,
-	_ bool,
 ) []Series {
 	members := map[string][]string{}
 	for id, d := range devices {
-		if !isMetered(d.Class) || d.Class == energyMeterClass {
+		if !isMetered(d.Class) || d.Class == EnergyMeterClass {
 			continue
 		}
 		k := keyOf(d)
@@ -281,7 +301,7 @@ func assembleHouse(
 	var meterID string
 	for _, id := range sortedDeviceIDs(devices) {
 		d := devices[id]
-		if d.Class == energyMeterClass {
+		if d.Class == EnergyMeterClass {
 			meterID = id
 			continue
 		}
@@ -331,15 +351,15 @@ func buildSeries(key, label, location, class string, buckets []time.Time, energy
 		}
 		cost := kwh * tariff.UnitRate * mult
 
-		s.KWh[i] = roundTo(kwh, kwhDP)
-		s.Cost[i] = roundTo(cost, costDP)
-		s.AvgW[i] = roundTo(w, wDP)
+		s.KWh[i] = round.To(kwh, round.KWhDP)
+		s.Cost[i] = round.To(cost, round.MoneyDP)
+		s.AvgW[i] = round.To(w, round.WDP)
 
 		s.TotalKWh += s.KWh[i]
 		s.TotalCost += s.Cost[i]
 	}
-	s.TotalKWh = roundTo(s.TotalKWh, kwhDP)
-	s.TotalCost = roundTo(s.TotalCost, costDP)
+	s.TotalKWh = round.To(s.TotalKWh, round.KWhDP)
+	s.TotalCost = round.To(s.TotalCost, round.MoneyDP)
 	return s
 }
 

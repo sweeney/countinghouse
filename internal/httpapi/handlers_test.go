@@ -10,6 +10,7 @@ import (
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/influx"
+	"github.com/sweeney/countinghouse/internal/round"
 	"github.com/sweeney/countinghouse/internal/testutil"
 )
 
@@ -192,6 +193,38 @@ func TestDeviceEnergy_Custom(t *testing.T) {
 	}
 }
 
+// TestWindow_FromToOnlyValidWithCustom locks issue #9: supplying from/to with a
+// non-custom window (today/week/month) is a contradiction — those windows are
+// period-to-date and ignore from/to — so it must be a 400 with an explanatory
+// message rather than silently discarding the caller-supplied range and
+// returning a different window's data.
+func TestWindow_FromToOnlyValidWithCustom(t *testing.T) {
+	cases := []string{
+		"/devices/winefridge/energy?window=today&from=2026-01-01T00:00:00Z&to=2026-02-01T00:00:00Z",
+		"/devices/winefridge/energy?window=week&from=2026-01-01T00:00:00Z",
+		"/devices/winefridge/energy?window=month&to=2026-02-01T00:00:00Z",
+		// window omitted defaults to today, so a stray from is still contradictory.
+		"/devices/winefridge/energy?from=2026-01-01T00:00:00Z",
+	}
+	for _, path := range cases {
+		w := doGET(t, dataSetupT(t), path)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d: %s", path, w.Code, w.Body.String())
+			continue
+		}
+		if got := decode(t, w)["error"]; got != "'from'/'to' are only valid with window=custom" {
+			t.Errorf("%s: error = %v", path, got)
+		}
+	}
+}
+
+// dataSetupT is a one-value wrapper around dataSetup for table tests.
+func dataSetupT(t *testing.T) *Server {
+	t.Helper()
+	s, _ := dataSetup(t)
+	return s
+}
+
 func TestDeviceEnergy_CustomMissingTo(t *testing.T) {
 	s, _ := dataSetup(t)
 	w := doGET(t, s, "/devices/winefridge/energy?window=custom&from=2026-06-01T00:00:00Z")
@@ -217,7 +250,7 @@ func TestDeviceCost(t *testing.T) {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
 	m := decode(t, w)
-	want := roundTo(3.0*testUnitRate*(1+testVAT), moneyDP)
+	want := round.To(3.0*testUnitRate*(1+testVAT), round.MoneyDP)
 	if !approx(m["cost"].(float64), want) {
 		t.Errorf("cost = %v want %v", m["cost"], want)
 	}
@@ -298,8 +331,8 @@ func TestBill(t *testing.T) {
 	}
 
 	rawEnergy := monitored * testUnitRate * (1 + testVAT)
-	if !approx(bill.EnergyCost, roundTo(rawEnergy, moneyDP)) {
-		t.Errorf("energy_cost = %v want %v", bill.EnergyCost, roundTo(rawEnergy, moneyDP))
+	if !approx(bill.EnergyCost, round.To(rawEnergy, round.MoneyDP)) {
+		t.Errorf("energy_cost = %v want %v", bill.EnergyCost, round.To(rawEnergy, round.MoneyDP))
 	}
 
 	// Standing charge: window.Days() for month-to-date. now=2026-06-11 13:00 UTC,
@@ -309,15 +342,20 @@ func TestBill(t *testing.T) {
 	stop := time.Date(2026, 6, 11, 13, 0, 0, 0, time.UTC)
 	wantDays := stop.Sub(start).Hours() / 24
 	rawStanding := wantDays * testStanding * (1 + testVAT)
-	if !approx(bill.StandingCharge, roundTo(rawStanding, moneyDP)) {
-		t.Errorf("standing_charge = %v want %v", bill.StandingCharge, roundTo(rawStanding, moneyDP))
+	if !approx(bill.StandingCharge, round.To(rawStanding, round.MoneyDP)) {
+		t.Errorf("standing_charge = %v want %v", bill.StandingCharge, round.To(rawStanding, round.MoneyDP))
 	}
 	// Total is rounded from the full-precision sum, not the rounded parts.
-	if !approx(bill.Total, roundTo(rawEnergy+rawStanding, moneyDP)) {
-		t.Errorf("total = %v want %v", bill.Total, roundTo(rawEnergy+rawStanding, moneyDP))
+	if !approx(bill.Total, round.To(rawEnergy+rawStanding, round.MoneyDP)) {
+		t.Errorf("total = %v want %v", bill.Total, round.To(rawEnergy+rawStanding, round.MoneyDP))
 	}
 }
 
+// TestBill_NoMeter locks issue #3: with no energy_meter configured, the
+// reconciliation must distinguish "no meter present" from "meter read zero". It
+// reports meter_present:false and OMITS meter_kwh/unmonitored_kwh/coverage,
+// rather than emitting a misleading NEGATIVE unmonitored_kwh (0 - monitored)
+// and coverage:0 despite full monitoring.
 func TestBill_NoMeter(t *testing.T) {
 	s, _ := dataSetup(t)
 	devs := testDevices()
@@ -327,17 +365,42 @@ func TestBill_NoMeter(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var bill struct {
-		Reconciliation struct {
-			MeterKWh float64 `json:"meter_kwh"`
-			Coverage float64 `json:"coverage"`
-		} `json:"reconciliation"`
+	m := decode(t, w)
+	rec, ok := m["reconciliation"].(map[string]any)
+	if !ok {
+		t.Fatalf("no reconciliation object: %v", m)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &bill); err != nil {
-		t.Fatalf("decode: %v", err)
+	if mp, _ := rec["meter_present"].(bool); mp {
+		t.Errorf("meter_present = true, want false")
 	}
-	if bill.Reconciliation.MeterKWh != 0 || bill.Reconciliation.Coverage != 0 {
-		t.Errorf("want meter 0 / coverage 0, got %+v", bill.Reconciliation)
+	for _, field := range []string{"meter_kwh", "unmonitored_kwh", "coverage"} {
+		if _, present := rec[field]; present {
+			t.Errorf("%s should be omitted when no meter is configured, got %v", field, rec[field])
+		}
+	}
+	// monitored_kwh is still reported (full monitoring, just no meter to
+	// reconcile against): winefridge 3.0 + network-ups 1.5.
+	if mon, _ := rec["monitored_kwh"].(float64); !approx(mon, 4.5) {
+		t.Errorf("monitored_kwh = %v want 4.5", mon)
+	}
+}
+
+// TestBill_MeterPresent proves the meter-present path still surfaces the
+// reconciliation fields (and the new meter_present:true flag).
+func TestBill_MeterPresent(t *testing.T) {
+	s, _ := dataSetup(t)
+	w := doGET(t, s, "/bill?window=month")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	rec := decode(t, w)["reconciliation"].(map[string]any)
+	if mp, _ := rec["meter_present"].(bool); !mp {
+		t.Errorf("meter_present = false, want true")
+	}
+	for _, field := range []string{"meter_kwh", "unmonitored_kwh", "coverage"} {
+		if _, present := rec[field]; !present {
+			t.Errorf("%s should be present when a meter is configured", field)
+		}
 	}
 }
 
