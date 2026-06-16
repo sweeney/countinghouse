@@ -3,7 +3,7 @@
 # (config.swee.net) and are NOT defined here.
 
 http:
-  listen: ":8080"
+  listen: ":8585"
   public_url: "https://countinghouse.swee.net"
 
 influx:

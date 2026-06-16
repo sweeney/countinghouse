@@ -80,7 +80,7 @@ func (h HouseConfig) Location() *time.Location {
 // override these.
 func Default() Config {
 	return Config{
-		HTTP: HTTPConfig{Listen: ":8080"},
+		HTTP: HTTPConfig{Listen: ":8585"},
 		Influx: InfluxConfig{
 			Org:    "swee.net",
 			Bucket: "statehouse",

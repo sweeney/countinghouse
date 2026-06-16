@@ -40,7 +40,7 @@ echo "=== Installing config ==="
 if [ ! -f /etc/$SERVICE/config.yaml ]; then
     cat > /etc/$SERVICE/config.yaml << 'CONFIG'
 http:
-  listen: ":8081"
+  listen: ":8585"
   public_url: "https://countinghouse.swee.net"
 
 influx:

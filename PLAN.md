@@ -139,7 +139,7 @@ Watch-outs (tested): counter resets (`increase()`), UPS offline gaps (integral t
 **Local YAML** (`/etc/countinghouse/config.yaml`) via `config.Load` (copy statehouse:
 `token_file` fallback, `time.LoadLocation` validation):
 ```yaml
-http:    { listen: ":8080", public_url: "https://countinghouse.swee.net" }
+http:    { listen: ":8585", public_url: "https://countinghouse.swee.net" }
 influx:  { url, org: "swee.net", bucket: "statehouse", token_file: /etc/countinghouse/influx-token }
 identity:{ base_url: "https://id.swee.net", client_id, client_secret }
 remote_config: { base_url: "https://config.swee.net" }

@@ -46,7 +46,7 @@ type ConfigStatus interface {
 
 // Server hosts the JSON HTTP API.
 type Server struct {
-	// Listen is the bind address, e.g. ":8080".
+	// Listen is the bind address, e.g. ":8585".
 	Listen string
 
 	// Influx is the read-side query client. Used by /healthz for a reachability

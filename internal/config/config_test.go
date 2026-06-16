@@ -13,7 +13,7 @@ func TestDefault(t *testing.T) {
 		got  string
 		want string
 	}{
-		{"http.listen", d.HTTP.Listen, ":8080"},
+		{"http.listen", d.HTTP.Listen, ":8585"},
 		{"influx.org", d.Influx.Org, "swee.net"},
 		{"influx.bucket", d.Influx.Bucket, "statehouse"},
 		{"house.timezone", d.House.Timezone, "Europe/London"},

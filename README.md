@@ -116,7 +116,7 @@ Local bootstrap YAML (default `/etc/countinghouse/config.yaml`; see `config/conf
 overlaid by remote config fetched from `config.swee.net`.
 
 ```yaml
-http:    { listen: ":8081", public_url: "https://countinghouse.swee.net" }
+http:    { listen: ":8585", public_url: "https://countinghouse.swee.net" }
 influx:  { url, org: "swee.net", bucket: "statehouse", token_file: /etc/countinghouse/influx-token }
 identity:{ base_url: "https://id.swee.net", client_id, client_secret }
 remote_config: { base_url: "https://config.swee.net" }
@@ -144,7 +144,7 @@ Browser consumer demos for countinghouse (and the other swee.net read-side
 services) live in the sibling **`consumer-demos`** repo (`../consumer-demos`),
 alongside a shared dev token broker that handles id.swee.net auth. See its README
 to run them — countinghouse must be running locally (default base
-`http://localhost:8081`).
+`http://localhost:8585`).
 
 ## Development
 
