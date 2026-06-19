@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
@@ -179,15 +180,36 @@ func (s *Server) resolveSeriesParams(w http.ResponseWriter, r *http.Request) (en
 // for /metrics. BuildSeries issues up to three Influx queries internally; we
 // count the whole series build as one logical query so the per-query latency
 // average stays comparable across endpoints.
-func (s *Server) buildSeries(r *http.Request, win energy.Window, iv energy.Interval, groupBy string, devices map[string]config.DeviceConfig, tariff config.Tariff) (energy.SeriesResponse, error) {
+func (s *Server) buildSeries(r *http.Request, win energy.Window, iv energy.Interval, groupBy string, includeUnmonitored, unclamped bool, devices map[string]config.DeviceConfig, tariff config.Tariff) (energy.SeriesResponse, error) {
 	start := time.Now()
-	resp, err := energy.BuildSeries(r.Context(), s.Influx, s.Bucket, win, iv, groupBy, devices, tariff, s.loc())
+	resp, err := energy.BuildSeries(r.Context(), s.Influx, s.Bucket, win, iv, groupBy, includeUnmonitored, unclamped, devices, tariff, s.loc())
 	s.queryCount.Add(1)
 	s.influxNanos.Add(int64(time.Since(start)))
 	if err != nil {
 		s.queryErrors.Add(1)
+		return resp, err
 	}
+	s.recordDrift(win, resp.Drift)
 	return resp, err
+}
+
+// recordDrift turns the operator-facing C3 drift signal into a /metrics counter
+// and a WARN log. The counter accumulates flagged buckets across all served
+// requests (stateless service: it counts observations, not distinct buckets); the
+// log carries the context — window, count, worst residual — for investigation.
+func (s *Server) recordDrift(win energy.Window, d energy.DriftStats) {
+	if !d.HasDrift() {
+		return
+	}
+	s.driftBuckets.Add(int64(d.ClampedBuckets))
+	if s.Logger != nil {
+		s.Logger.Warn("unmonitored drift: meter below monitored beyond quantisation",
+			"window", win.Label,
+			"clamped_buckets", d.ClampedBuckets,
+			"worst_residual_kwh", d.WorstResidualKWh,
+			"worst_at", d.WorstAt,
+		)
+	}
 }
 
 // validGroupBy reports whether g is an accepted group_by mode.
@@ -216,6 +238,14 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid 'shape' (want columns or rows)")
 		return
 	}
+	includeUnmonitored, ok := parseBoolParam(w, r, "include_unmonitored")
+	if !ok {
+		return
+	}
+	unclamped, ok := parseBoolParam(w, r, "unclamped")
+	if !ok {
+		return
+	}
 
 	win, iv, ok := s.resolveSeriesParams(w, r)
 	if !ok {
@@ -228,12 +258,29 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.buildSeries(r, win, iv, groupBy, s.Config.Devices(), tariff)
+	resp, err := s.buildSeries(r, win, iv, groupBy, includeUnmonitored, unclamped, s.Config.Devices(), tariff)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
 	}
 	writeSeriesShaped(w, shape, resp)
+}
+
+// parseBoolParam reads an optional boolean query param. Absent ⇒ (false, true):
+// the default-off behaviour, byte-for-byte the legacy response. A present value is
+// parsed with strconv.ParseBool (true/false/1/0/t/f); anything else writes a 400
+// and returns ok=false.
+func parseBoolParam(w http.ResponseWriter, r *http.Request, name string) (val bool, ok bool) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return false, true
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid '"+name+"' (want true or false)")
+		return false, false
+	}
+	return v, true
 }
 
 // writeSeriesShaped writes a series response in the requested shape: the columnar
@@ -252,6 +299,13 @@ func writeSeriesShaped(w http.ResponseWriter, shape string, resp energy.SeriesRe
 // requested device.
 func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// The reserved synthetic "unmonitored" device is not in the inventory; it is
+	// served by deriving the house unmonitored series. Handling it BEFORE
+	// lookupDevice also shadows any (disallowed) real device that claims the id.
+	if id == energy.UnmonitoredID {
+		s.handleUnmonitoredSeries(w, r)
+		return
+	}
 	dev, ok := s.lookupDevice(w, id)
 	if !ok {
 		return
@@ -280,11 +334,59 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 	// Build over a single-device inventory grouped by device, so the response
 	// carries exactly this device's series.
 	single := map[string]config.DeviceConfig{id: dev}
-	resp, err := s.buildSeries(r, win, iv, energy.GroupByDevice, single, tariff)
+	resp, err := s.buildSeries(r, win, iv, energy.GroupByDevice, false, false, single, tariff)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
 	}
+	writeSeriesShaped(w, shape, resp)
+}
+
+// handleUnmonitoredSeries serves GET /devices/unmonitored/series: the synthetic
+// rest-of-home device. It returns the SAME response schema as a real device's
+// /series (group_by=device, one series) so clients can plot it through their
+// existing single-device code path (R3). The values are exactly the house
+// grouping's "unmonitored" series (R3.2): we build group_by=house over the full
+// inventory and keep only that series. With no whole-house meter configured,
+// unmonitored is undefined, so we 404 rather than present monitored as the whole
+// home (C6).
+func (s *Server) handleUnmonitoredSeries(w http.ResponseWriter, r *http.Request) {
+	devices := s.Config.Devices()
+	if _, ok := energy.MeterID(devices); !ok {
+		writeError(w, http.StatusNotFound, "no whole-house meter configured; unmonitored consumption is undefined")
+		return
+	}
+
+	shape := r.URL.Query().Get("shape")
+	if !energy.ValidShape(shape) {
+		writeError(w, http.StatusBadRequest, "invalid 'shape' (want columns or rows)")
+		return
+	}
+	unclamped, ok := parseBoolParam(w, r, "unclamped")
+	if !ok {
+		return
+	}
+
+	win, iv, ok := s.resolveSeriesParams(w, r)
+	if !ok {
+		return
+	}
+
+	tariff, ok := s.Config.Tariffs().TariffFor(win.Start)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "no electricity tariff configured")
+		return
+	}
+
+	resp, err := s.buildSeries(r, win, iv, energy.GroupByHouse, false, unclamped, devices, tariff)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
+		return
+	}
+
+	// Keep only the unmonitored series and present it as a device-shaped response.
+	resp.Series = energy.OnlySeries(resp.Series, energy.UnmonitoredID)
+	resp.GroupBy = energy.GroupByDevice
 	writeSeriesShaped(w, shape, resp)
 }
 
@@ -406,6 +508,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		"query_count":           count,
 		"query_errors":          s.queryErrors.Load(),
 		"influx_avg_latency_ms": round.To(avgMs, 2),
+		"drift_buckets_total":   s.driftBuckets.Load(),
 		"version":               s.Version,
 		"uptime_seconds":        int(time.Since(s.started) / time.Second),
 		"goroutines":            runtime.NumGoroutine(),

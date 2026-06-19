@@ -20,8 +20,20 @@ const (
 
 // house series keys.
 const (
-	houseMonitoredKey = "monitored"
-	houseMeterKey     = "meter"
+	houseMonitoredKey   = "monitored"
+	houseMeterKey       = "meter"
+	houseUnmonitoredKey = "unmonitored"
+)
+
+// UnmonitoredID is the reserved device id / series key for the synthetic
+// "unmonitored" (rest-of-home) quantity: the whole-house meter minus the sum of
+// monitored devices. It is NOT a real device — no statehouse_devices entry may
+// claim it (the handlers shadow it, see Q3 in
+// docs/countinghouse-unmonitored-consumption.md). UnmonitoredClass is its class
+// tag, distinguishing the synthetic series/catalogue entry from a real device.
+const (
+	UnmonitoredID    = "unmonitored"
+	UnmonitoredClass = "unmonitored"
 )
 
 // EnergyMeterClass is the device class of the whole-house electricity meter. It
@@ -57,14 +69,67 @@ type Series struct {
 // This maps directly onto web charting libraries (one array per dataset) and is
 // the default. For the row-oriented ("tidy"/long) alternative, see Rows().
 type SeriesResponse struct {
-	Window   string      `json:"window"`
-	From     string      `json:"from"`
-	To       string      `json:"to"`
-	Interval string      `json:"interval"`
-	GroupBy  string      `json:"group_by"`
-	Shape    string      `json:"shape"` // "columns"
-	Buckets  []time.Time `json:"buckets"`
-	Series   []Series    `json:"series"`
+	Window   string `json:"window"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Interval string `json:"interval"`
+	GroupBy  string `json:"group_by"`
+	Shape    string `json:"shape"` // "columns"
+
+	// House decomposition confidence signals, populated only for group_by=house
+	// when a meter is configured (omitted otherwise — they are meaningless for
+	// device/location/class groupings). See HouseStats.
+	HouseStats
+
+	Buckets []time.Time `json:"buckets"`
+	Series  []Series    `json:"series"`
+
+	// Drift is operator-facing data-quality info (C3): the negative-residual
+	// (meter < monitored) drift detected while deriving unmonitored. It is NEVER
+	// serialised (json:"-") — the doc is explicit that this signal does not belong
+	// in a browser; the httpapi layer turns it into a /metrics counter + WARN log.
+	Drift DriftStats `json:"-"`
+}
+
+// DriftStats summarises negative-residual drift (C3): buckets where the raw
+// meter − monitored fell below one counter quantum (−0.1 kWh) — beyond what the
+// 0.1 kWh counter quantisation alone explains, so a real signal that a monitored
+// device is over-counting, the meter is mis-scaled, or clocks are skewed. Such
+// buckets are clamped to 0 in the unmonitored series, hiding the problem from the
+// response, so it is surfaced out-of-band instead.
+type DriftStats struct {
+	ClampedBuckets   int       // count of buckets with residual < −driftQuantumKWh
+	WorstResidualKWh float64   // most-negative residual seen (≤ 0; 0 when none)
+	WorstAt          time.Time // bucket start of the worst residual
+}
+
+// HasDrift reports whether any bucket breached the drift threshold.
+func (d DriftStats) HasDrift() bool { return d.ClampedBuckets > 0 }
+
+// driftQuantumKWh is the per-bucket negative-residual threshold for C3: one
+// device-counter quantum. Residuals between 0 and −0.1 kWh are routine
+// quantisation/sampling noise (clamped silently); only a residual MORE negative
+// than this is flagged as drift.
+const driftQuantumKWh = 0.1
+
+// HouseStats carries the group_by=house confidence signals so a consumer can tell
+// "this much of the home is genuinely unmonitored" from "monitored is
+// under-counted because a sensor dropped" without a second service call (C12/C13).
+//
+// Coverage is monitored ÷ meter energy for the window — a pointer so a genuine
+// zero (meter present, nothing monitored) is distinct from "not applicable" (nil,
+// no meter / not a house grouping), which is then omitted.
+//
+// StaleMonitoredCount/IDs flag monitored devices that produced NO power telemetry
+// in the window. A live plug/UPS reports power_w continuously even at standby, so
+// zero rows means dropped/offline — and unlike energy, power presence is not
+// confounded by the 0.1 kWh counter quantisation. A stale device's load silently
+// shifts into unmonitored (= meter − monitored), inflating it; this is the
+// monitored-side analogue of the negative-residual drift signal.
+type HouseStats struct {
+	Coverage            *float64 `json:"coverage,omitempty"`
+	StaleMonitoredCount *int     `json:"stale_monitored_count,omitempty"`
+	StaleMonitoredIDs   []string `json:"stale_monitored_ids,omitempty"`
 }
 
 // BucketStarts returns the canonical local-timezone bucket-start axis for win
@@ -174,31 +239,29 @@ func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 //     meter. key=id, label=DisplayName, location/class carried through.
 //   - location: device kWh/cost/avgW summed per Location (meter excluded).
 //   - class: summed per Class (meter excluded).
-//   - house: TWO series — "monitored" = sum of ALL non-meter devices; "meter" =
-//     the energy meter's own series (if present).
+//   - house: THREE series — "monitored" = sum of ALL non-meter devices;
+//     "unmonitored" = clamp(meter − monitored) per bucket; "meter" = the energy
+//     meter's own series (unmonitored/meter present only when a meter exists).
 //
-// Cost is derived per bucket as kWh × UnitRate × VAT multiplier. Aggregated
-// avg_w SUMS member means (power is additive). Totals are the summed rounded
-// per-bucket values. Rounding: kWh 3dp, cost 4dp, W 1dp.
+// The device/location/class unmonitored catch-all (R2) is applied by BuildSeries
+// AFTER this assembly, not here.
+//
+// Cost is derived per bucket as kWh × UnitRate × VAT multiplier. For real-device
+// series avg_w SUMS member telemetry means (power is additive); the synthetic
+// unmonitored series has no telemetry and energy-derives avg_w from bucketHours
+// (see deriveUnmonitored). Totals are the summed rounded per-bucket values.
+// Rounding: kWh 3dp, cost 4dp, W 1dp. bucketHours is the per-bucket wall-clock
+// length (only the house path consumes it; other groupings may pass nil).
 func AssembleSeries(
 	buckets []time.Time,
+	bucketHours []float64,
 	devices map[string]config.DeviceConfig,
 	energyByDevice map[string][]float64,
 	powerByDevice map[string][]float64,
 	tariff config.Tariff,
 	groupBy string,
 ) []Series {
-	n := len(buckets)
-	get := func(m map[string][]float64, id string) []float64 {
-		v := m[id]
-		if len(v) >= n {
-			return v[:n]
-		}
-		// pad short/missing to n with zeros.
-		out := make([]float64, n)
-		copy(out, v)
-		return out
-	}
+	get := paddedGetter(len(buckets))
 
 	switch groupBy {
 	case GroupByLocation:
@@ -206,7 +269,7 @@ func AssembleSeries(
 	case GroupByClass:
 		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Class })
 	case GroupByHouse:
-		return assembleHouse(buckets, devices, energyByDevice, powerByDevice, tariff, get)
+		return assembleHouse(buckets, bucketHours, devices, energyByDevice, powerByDevice, tariff, get)
 	case GroupByDevice, "":
 		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, tariff, get)
 	default:
@@ -216,6 +279,21 @@ func AssembleSeries(
 
 // getter pulls a per-bucket slice for a device id, padded to the axis length.
 type getter func(m map[string][]float64, id string) []float64
+
+// paddedGetter returns a getter that yields a device's per-bucket slice truncated
+// or zero-padded to exactly n buckets, so a missing/short device reads as all-zero
+// for the axis.
+func paddedGetter(n int) getter {
+	return func(m map[string][]float64, id string) []float64 {
+		v := m[id]
+		if len(v) >= n {
+			return v[:n]
+		}
+		out := make([]float64, n)
+		copy(out, v)
+		return out
+	}
+}
 
 // assembleByDevice yields one series per metered non-meter device.
 func assembleByDevice(
@@ -287,22 +365,52 @@ func assembleGrouped(
 	return out
 }
 
-// assembleHouse yields the dual house series: "monitored" (sum of all non-meter
-// devices) and "meter" (the energy meter's own series), in that order. Either
-// may be absent if it has no members.
+// assembleHouse yields the house series in order: "monitored" (sum of all
+// non-meter devices), "unmonitored" (the meter minus monitored — see
+// deriveUnmonitored), and "meter" (the energy meter's own series). monitored is
+// absent if there are no monitored devices; unmonitored and meter are absent if
+// no energy meter is configured (C6: with no meter, "unmonitored" is undefined —
+// we omit it rather than report monitored as if it were the whole home). The
+// ordering puts unmonitored between its two parents so a client stacking every
+// series except "meter" reconstructs the whole home (R1.4).
 func assembleHouse(
 	buckets []time.Time,
+	bucketHours []float64,
 	devices map[string]config.DeviceConfig,
 	energyByDevice, powerByDevice map[string][]float64,
 	tariff config.Tariff,
 	get getter,
 ) []Series {
+	monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, tariff, get)
+
+	var out []Series
+	if monitored != nil {
+		out = append(out, *monitored)
+	}
+	if meter != nil {
+		out = append(out, deriveUnmonitored(buckets, bucketHours, monitored, *meter, tariff, false))
+		out = append(out, *meter)
+	}
+	return out
+}
+
+// houseParts builds the two parents of the house decomposition: "monitored" (sum
+// of all metered non-meter devices) and "meter" (the energy meter's own series).
+// Either is nil when it has no members (no monitored devices / no meter). Shared
+// by the house grouping and the device/location/class unmonitored catch-all (R2),
+// so "unmonitored" means the identical quantity in both.
+func houseParts(
+	buckets []time.Time,
+	devices map[string]config.DeviceConfig,
+	energyByDevice, powerByDevice map[string][]float64,
+	tariff config.Tariff,
+	get getter,
+) (monitored, meter *Series) {
 	var monEnergy, monPower [][]float64
-	var meterID string
+	meterID, _ := MeterID(devices)
 	for _, id := range sortedDeviceIDs(devices) {
 		d := devices[id]
 		if d.Class == EnergyMeterClass {
-			meterID = id
 			continue
 		}
 		if !isMetered(d.Class) {
@@ -312,18 +420,224 @@ func assembleHouse(
 		monPower = append(monPower, get(powerByDevice, id))
 	}
 
-	var out []Series
 	if len(monEnergy) > 0 {
-		out = append(out, buildSeries(houseMonitoredKey, houseMonitoredKey, "", "", buckets, monEnergy, monPower, tariff))
+		s := buildSeries(houseMonitoredKey, houseMonitoredKey, "", "", buckets, monEnergy, monPower, tariff)
+		monitored = &s
 	}
 	if meterID != "" {
 		d := devices[meterID]
-		out = append(out, buildSeries(houseMeterKey, houseMeterKey, d.Location, d.Class, buckets,
+		s := buildSeries(houseMeterKey, houseMeterKey, d.Location, d.Class, buckets,
 			[][]float64{get(energyByDevice, meterID)},
 			[][]float64{get(powerByDevice, meterID)},
-			tariff))
+			tariff)
+		meter = &s
+	}
+	return monitored, meter
+}
+
+// withUnmonitoredCatchAll appends the single "unmonitored" catch-all series to a
+// device/location/class grouping (R2): clamp(meter − monitored) per bucket — the
+// SAME quantity as the house "unmonitored" series, since the grouped series
+// partition exactly the monitored devices. It is never subdivided: exactly one
+// series regardless of grouping (N1), so a stacked chart of the grouping plus
+// this catch-all sums to the whole-house meter (R2.4). A no-op when no meter is
+// configured (C6) — there is then nothing to attribute.
+func withUnmonitoredCatchAll(
+	grouped []Series,
+	buckets []time.Time,
+	bucketHours []float64,
+	devices map[string]config.DeviceConfig,
+	energyByDevice, powerByDevice map[string][]float64,
+	tariff config.Tariff,
+) []Series {
+	get := paddedGetter(len(buckets))
+	monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, tariff, get)
+	if meter == nil {
+		return grouped
+	}
+	return append(grouped, deriveUnmonitored(buckets, bucketHours, monitored, *meter, tariff, false))
+}
+
+// deriveUnmonitored builds the synthetic "unmonitored" (rest-of-home) series:
+// per bucket, clamp(meter − monitored). It is the energy the whole-house meter
+// saw that no monitored device accounts for. A slightly-negative residual
+// (device counters tick in 0.1 kWh quanta vs the meter's finer resolution, plus
+// sampling skew) clamps to 0 PER BUCKET before totals are summed (C1/C2), so the
+// total is Σ(clamped buckets), not a total-level subtraction. Cost is the tariff
+// applied to the clamped energy (C9 — never meter_cost − monitored_cost).
+//
+// avg_w is ENERGY-DERIVED (C8): kwh × 1000 / bucket_hours[i]. The unmonitored
+// series has NO power telemetry of its own, so its mean power must come from the
+// residual energy and the bucket duration. It must NOT be meter.AvgW −
+// monitored.AvgW: summed device power means are biased high vs the meter's own
+// mean (the counter-vs-∫power bias), so that difference is routinely negative and
+// would clamp to 0 — reporting "0 W" for a series consuming real energy (the
+// avg_w=0 bug, docs/bug-unmonitored-avg-w.md) — and would disagree with the
+// published kwh anyway, mirroring the C9 reasoning for cost. Using the actual
+// bucket_hours keeps a partial first/last bucket correctly scaled. monitored may
+// be nil (no monitored devices ⇒ the whole meter is unmonitored).
+//
+// Because meter and monitored carry already-rounded per-bucket values, the
+// visible invariant monitored.kwh + unmonitored.kwh == meter.kwh holds exactly at
+// display precision whenever the bucket is not clamped (R1.2).
+//
+// When unclamped is true (Q4 diagnostic mode) the per-bucket residual is left as
+// the raw meter − monitored, NEGATIVES PRESERVED, for data-quality investigation;
+// avg_w then follows the signed energy and can go negative too.
+func deriveUnmonitored(buckets []time.Time, bucketHours []float64, monitored *Series, meter Series, tariff config.Tariff, unclamped bool) Series {
+	n := len(buckets)
+	s := Series{
+		Key:   houseUnmonitoredKey,
+		Label: houseUnmonitoredKey,
+		Class: UnmonitoredClass,
+		KWh:   make([]float64, n),
+		Cost:  make([]float64, n),
+		AvgW:  make([]float64, n),
+	}
+	mult := tariff.Multiplier()
+	for i := 0; i < n; i++ {
+		var monKWh float64
+		if monitored != nil {
+			monKWh = monitored.KWh[i]
+		}
+		kwh := meter.KWh[i] - monKWh
+		if !unclamped && kwh < 0 {
+			kwh = 0
+		}
+		var w float64
+		if i < len(bucketHours) && bucketHours[i] > 0 {
+			w = kwh * 1000.0 / bucketHours[i]
+		}
+		s.KWh[i] = round.To(kwh, round.KWhDP)
+		s.Cost[i] = round.To(kwh*tariff.UnitRate*mult, round.MoneyDP)
+		s.AvgW[i] = round.To(w, round.WDP)
+
+		s.TotalKWh += s.KWh[i]
+		s.TotalCost += s.Cost[i]
+	}
+	s.TotalKWh = round.To(s.TotalKWh, round.KWhDP)
+	s.TotalCost = round.To(s.TotalCost, round.MoneyDP)
+	return s
+}
+
+// computeHouseStats derives the group_by=house confidence signals (C12 coverage,
+// C13 staleness) from the assembled series and the per-device power presence. It
+// returns the zero HouseStats (all nil ⇒ all omitted) when no meter series is
+// present: without the whole-house total the decomposition — and any coverage or
+// staleness reading over it — is undefined (C6).
+func computeHouseStats(series []Series, devices map[string]config.DeviceConfig, powerByDevice map[string][]float64) HouseStats {
+	var monTotal, meterTotal float64
+	var haveMeter bool
+	for _, s := range series {
+		switch s.Key {
+		case houseMonitoredKey:
+			monTotal = s.TotalKWh
+		case houseMeterKey:
+			meterTotal = s.TotalKWh
+			haveMeter = true
+		}
+	}
+	if !haveMeter {
+		return HouseStats{}
+	}
+
+	cov := 0.0
+	if meterTotal != 0 {
+		cov = round.To(monTotal/meterTotal, round.CovDP)
+	}
+
+	var stale []string
+	for _, id := range sortedDeviceIDs(devices) {
+		d := devices[id]
+		if d.Class == EnergyMeterClass || !isMetered(d.Class) {
+			continue
+		}
+		if _, ok := powerByDevice[id]; !ok {
+			stale = append(stale, id)
+		}
+	}
+	cnt := len(stale)
+
+	return HouseStats{Coverage: &cov, StaleMonitoredCount: &cnt, StaleMonitoredIDs: stale}
+}
+
+// computeDrift scans the pre-clamp per-bucket residual (meter − monitored) for
+// C3 drift: buckets more negative than one counter quantum. monitored may be nil
+// (treated as zero); meter must be non-nil (no meter ⇒ no decomposition ⇒ no
+// drift). Operates on the already-rounded part totals, which is ample resolution
+// for a 0.1 kWh threshold.
+func computeDrift(buckets []time.Time, monitored, meter *Series) DriftStats {
+	var d DriftStats
+	if meter == nil {
+		return d
+	}
+	for i := range buckets {
+		var mon float64
+		if monitored != nil {
+			mon = monitored.KWh[i]
+		}
+		resid := meter.KWh[i] - mon
+		if resid < -driftQuantumKWh {
+			d.ClampedBuckets++
+			if resid < d.WorstResidualKWh {
+				d.WorstResidualKWh = resid
+				d.WorstAt = buckets[i]
+			}
+		}
+	}
+	return d
+}
+
+// rebuildUnmonitoredUnclamped replaces the clamped "unmonitored" series in place
+// with its UNCLAMPED form (raw meter − monitored, negatives preserved) for the Q4
+// diagnostic mode. No-op when there is no unmonitored series or no meter. The
+// negative buckets deliberately break the monitored+unmonitored==meter
+// presentation — that is the point of the diagnostic.
+func rebuildUnmonitoredUnclamped(series []Series, buckets []time.Time, bucketHours []float64, devices map[string]config.DeviceConfig, energyByDevice, powerByDevice map[string][]float64, tariff config.Tariff) []Series {
+	idx := -1
+	for i, s := range series {
+		if s.Key == houseUnmonitoredKey {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return series
+	}
+	monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, tariff, paddedGetter(len(buckets)))
+	if meter == nil {
+		return series
+	}
+	series[idx] = deriveUnmonitored(buckets, bucketHours, monitored, *meter, tariff, true)
+	return series
+}
+
+// OnlySeries returns the sub-slice of series whose Key == key (preserving order),
+// or an empty slice if none match. Used to extract a single named series (e.g.
+// "unmonitored") from a grouped response for the single-device endpoint shape.
+func OnlySeries(series []Series, key string) []Series {
+	out := make([]Series, 0, 1)
+	for _, s := range series {
+		if s.Key == key {
+			out = append(out, s)
+		}
 	}
 	return out
+}
+
+// MeterID returns the id of the whole-house energy meter in the inventory (the
+// device whose class is EnergyMeterClass) and whether one exists. It is the
+// single place "is there a meter, and which device is it?" is answered, shared by
+// the house grouping, the bill reconciliation, the device catalogue, and the
+// synthetic unmonitored series. The first id in sorted order wins (there is only
+// ever one meter; sorting just makes the choice deterministic).
+func MeterID(devices map[string]config.DeviceConfig) (string, bool) {
+	for _, id := range sortedDeviceIDs(devices) {
+		if devices[id].Class == EnergyMeterClass {
+			return id, true
+		}
+	}
+	return "", false
 }
 
 // buildSeries sums member energy/power slices bucket-wise, derives cost, rounds
@@ -396,6 +710,8 @@ func BuildSeries(
 	win Window,
 	iv Interval,
 	groupBy string,
+	includeUnmonitored bool,
+	unclamped bool,
 	devices map[string]config.DeviceConfig,
 	tariff config.Tariff,
 	loc *time.Location,
@@ -459,9 +775,30 @@ func BuildSeries(
 		demux(rows, idx, powerByDevice, len(buckets), func(v float64, _ int) float64 { return v })
 	}
 
-	series := AssembleSeries(buckets, devices, energyByDevice, powerByDevice, tariff, groupBy)
+	series := AssembleSeries(buckets, hrs, devices, energyByDevice, powerByDevice, tariff, groupBy)
 
-	return SeriesResponse{
+	// R2: opt the single unmonitored catch-all into a device/location/class
+	// grouping so the parts sum to the whole house. group_by=house already carries
+	// it, so the flag is a no-op there (and on any future grouping it is ignored
+	// rather than double-adding).
+	if includeUnmonitored && resolveGroupBy(groupBy) != GroupByHouse {
+		series = withUnmonitoredCatchAll(series, buckets, hrs, devices, energyByDevice, powerByDevice, tariff)
+	}
+
+	// C3 drift detection runs whenever the decomposition is produced (house, or a
+	// catch-all was added) — before any unclamping, on the true residual.
+	var drift DriftStats
+	if resolveGroupBy(groupBy) == GroupByHouse || includeUnmonitored {
+		monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, tariff, paddedGetter(len(buckets)))
+		drift = computeDrift(buckets, monitored, meter)
+	}
+
+	// Q4: replace the clamped unmonitored series with its raw (signed) form.
+	if unclamped {
+		series = rebuildUnmonitoredUnclamped(series, buckets, hrs, devices, energyByDevice, powerByDevice, tariff)
+	}
+
+	resp := SeriesResponse{
 		Window:   win.Label,
 		From:     win.Start.In(loc).Format(time.RFC3339),
 		To:       win.Stop.In(loc).Format(time.RFC3339),
@@ -470,7 +807,13 @@ func BuildSeries(
 		Shape:    ShapeColumns,
 		Buckets:  buckets,
 		Series:   series,
-	}, nil
+	}
+	// Coverage + staleness are house-only confidence signals (C12/C13).
+	if resolveGroupBy(groupBy) == GroupByHouse {
+		resp.HouseStats = computeHouseStats(series, devices, powerByDevice)
+	}
+	resp.Drift = drift
+	return resp, nil
 }
 
 // resolveGroupBy normalises the reported group_by (empty → device).

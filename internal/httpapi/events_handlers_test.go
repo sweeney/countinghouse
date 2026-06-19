@@ -531,6 +531,31 @@ func TestDevicesCatalog(t *testing.T) {
 	if strings.Contains(w.Body.String(), `"capabilities":null`) {
 		t.Errorf("capabilities serialised as null: %s", w.Body.String())
 	}
+	// Synthetic unmonitored device present (meter configured) with energy cap (R3.3).
+	un, ok := byID["unmonitored"]
+	if !ok {
+		t.Fatalf("synthetic unmonitored device missing from catalogue: %v", ids)
+	}
+	if un.class != "unmonitored" || len(un.caps) != 1 || un.caps[0] != "energy" {
+		t.Errorf("unmonitored entry = class %q caps %v, want class=unmonitored caps=[energy]", un.class, un.caps)
+	}
+}
+
+// With no whole-house meter configured there is no rest-of-home to attribute, so
+// the synthetic unmonitored device is absent from the catalogue (C6).
+func TestDevicesCatalog_NoMeterNoSyntheticDevice(t *testing.T) {
+	s, _ := dataSetup(t)
+	devs := testDevices()
+	delete(devs, "electricity_meter")
+	s.Config = fakeConfig{devices: devs, tariffs: testTariffs()}
+
+	w := doGET(t, s, "/devices")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"id":"unmonitored"`) {
+		t.Errorf("unmonitored device should be absent without a meter: %s", w.Body.String())
+	}
 }
 
 // Regression: fire_alarm devices emit device_activity events but were not flagged

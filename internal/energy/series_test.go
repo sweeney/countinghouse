@@ -2,6 +2,7 @@ package energy
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -206,7 +207,7 @@ func TestAssembleByDeviceZeroFillAndCost(t *testing.T) {
 	energy := map[string][]float64{"winefridge": {0.05, 0, 0.04}}
 	power := map[string][]float64{"winefridge": {52.1, 0, 41.8}}
 
-	out := AssembleSeries(buckets, devices, energy, power, testTariff(), GroupByDevice)
+	out := AssembleSeries(buckets, nil, devices, energy, power, testTariff(), GroupByDevice)
 	if len(out) != 1 {
 		t.Fatalf("series count = %d, want 1", len(out))
 	}
@@ -250,7 +251,7 @@ func TestAssembleByDeviceExcludesMeter(t *testing.T) {
 		"winefridge":        {0.1, 0.1, 0.1},
 		"electricity_meter": {5, 5, 5},
 	}
-	out := AssembleSeries(buckets, devices, energy, nil, testTariff(), GroupByDevice)
+	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByDevice)
 	if len(out) != 1 || out[0].Key != "winefridge" {
 		t.Fatalf("meter not excluded from device grouping: %+v", out)
 	}
@@ -262,7 +263,7 @@ func TestAssembleByDeviceFallbackLabel(t *testing.T) {
 	devices := map[string]config.DeviceConfig{
 		"toaster": {Class: "short_burst_power_device"}, // no DisplayName
 	}
-	out := AssembleSeries(buckets, devices, nil, nil, testTariff(), GroupByDevice)
+	out := AssembleSeries(buckets, nil, devices, nil, nil, testTariff(), GroupByDevice)
 	if len(out) != 1 || out[0].Label != "toaster" {
 		t.Errorf("label fallback wrong: %+v", out)
 	}
@@ -292,7 +293,7 @@ func TestAssembleByLocationSumsKitchen(t *testing.T) {
 		"toaster":    {100, 0, 200},
 		"office_pc":  {300, 300, 300},
 	}
-	out := AssembleSeries(buckets, devices, energy, power, testTariff(), GroupByLocation)
+	out := AssembleSeries(buckets, nil, devices, energy, power, testTariff(), GroupByLocation)
 	if len(out) != 2 {
 		t.Fatalf("location series = %d, want 2 (kitchen, office)", len(out))
 	}
@@ -322,7 +323,7 @@ func TestAssembleByLocationExcludesMeter(t *testing.T) {
 		"winefridge":        {1, 1, 1},
 		"electricity_meter": {9, 9, 9},
 	}
-	out := AssembleSeries(buckets, devices, energy, nil, testTariff(), GroupByLocation)
+	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByLocation)
 	if len(out) != 1 || out[0].Key != "kitchen" {
 		t.Errorf("meter location leaked into grouping: %+v", out)
 	}
@@ -343,7 +344,7 @@ func TestAssembleByClass(t *testing.T) {
 		"b": {0.2, 0.2, 0.2},
 		"c": {0.5, 0.5, 0.5},
 	}
-	out := AssembleSeries(buckets, devices, energy, nil, testTariff(), GroupByClass)
+	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByClass)
 	if len(out) != 2 {
 		t.Fatalf("class series = %d, want 2", len(out))
 	}
@@ -379,13 +380,14 @@ func TestAssembleHouseDualSeries(t *testing.T) {
 		"network-ups":       {50, 50, 50},
 		"electricity_meter": {1000, 1000, 1000},
 	}
-	out := AssembleSeries(buckets, devices, energy, power, testTariff(), GroupByHouse)
-	if len(out) != 2 {
-		t.Fatalf("house series = %d, want 2 (monitored, meter)", len(out))
+	out := AssembleSeries(buckets, []float64{1, 1, 1}, devices, energy, power, testTariff(), GroupByHouse)
+	if len(out) != 3 {
+		t.Fatalf("house series = %d, want 3 (monitored, unmonitored, meter)", len(out))
 	}
-	mon, meter := out[0], out[1]
-	if mon.Key != houseMonitoredKey || meter.Key != houseMeterKey {
-		t.Fatalf("house keys = %q,%q", mon.Key, meter.Key)
+	mon, unmon, meter := out[0], out[1], out[2]
+	// Ordering R1.4: monitored, unmonitored, meter.
+	if mon.Key != houseMonitoredKey || unmon.Key != houseUnmonitoredKey || meter.Key != houseMeterKey {
+		t.Fatalf("house keys = %q,%q,%q", mon.Key, unmon.Key, meter.Key)
 	}
 	// monitored = sum of ALL non-meter devices incl. UPS: 0.1+0.2+0.05 = 0.35.
 	if mon.KWh[0] != 0.35 {
@@ -402,6 +404,126 @@ func TestAssembleHouseDualSeries(t *testing.T) {
 	if meter.Class != EnergyMeterClass {
 		t.Errorf("meter class = %q", meter.Class)
 	}
+	// unmonitored = meter − monitored = 1.0−0.35 = 0.65 kWh. avg_w is ENERGY-DERIVED
+	// (C8), NOT the power difference: 0.65 kWh / 1h × 1000 = 650 W.
+	if unmon.KWh[0] != 0.65 {
+		t.Errorf("unmonitored kwh[0] = %v, want 0.65", unmon.KWh[0])
+	}
+	if unmon.AvgW[0] != 650 {
+		t.Errorf("unmonitored avg_w[0] = %v, want 650 (kwh×1000/hours)", unmon.AvgW[0])
+	}
+	if unmon.Class != UnmonitoredClass {
+		t.Errorf("unmonitored class = %q, want %q", unmon.Class, UnmonitoredClass)
+	}
+	// Invariant (R1.2): monitored + unmonitored == meter, every bucket.
+	for i := range buckets {
+		if got := mon.KWh[i] + unmon.KWh[i]; got != meter.KWh[i] {
+			t.Errorf("bucket %d: monitored+unmonitored = %v, want meter %v", i, got, meter.KWh[i])
+		}
+	}
+	// Window totals (R1.3): cost reconciles within the C5 rounding tolerance.
+	// Each series is independently tariff×energy rounded per bucket (cost is NOT
+	// meter_cost−monitored_cost, per C9), so the sum can differ from meter by up
+	// to ~1 ulp (1e-4) per bucket — here 3 buckets ⇒ allow a few ulps.
+	if got := mon.TotalCost + unmon.TotalCost; math.Abs(got-meter.TotalCost) > 5e-4 {
+		t.Errorf("total cost: monitored+unmonitored = %v, want meter %v (within tol)", got, meter.TotalCost)
+	}
+}
+
+// TestAssembleHouseUnmonitoredClamp covers C1/C2: a bucket where monitored
+// exceeds the meter (counter-quantisation / sampling skew) clamps unmonitored to
+// 0 PER BUCKET, and the window total is the sum of clamped buckets — not the
+// (here negative) total-level meter−monitored difference.
+func TestAssembleHouseUnmonitoredClamp(t *testing.T) {
+	loc := mustLondon(t)
+	buckets := threeBuckets(loc)
+	devices := map[string]config.DeviceConfig{
+		"winefridge":        {Class: "continuous_power_device"},
+		"electricity_meter": {Class: EnergyMeterClass},
+	}
+	// Bucket 1: monitored 0.5 > meter 0.4 → residual −0.1 clamps to 0.
+	energy := map[string][]float64{
+		"winefridge":        {0.1, 0.5, 0.1},
+		"electricity_meter": {1.0, 0.4, 1.0},
+	}
+	power := map[string][]float64{
+		"winefridge":        {100, 100, 100},
+		"electricity_meter": {1000, 1000, 1000},
+	}
+	out := AssembleSeries(buckets, []float64{1, 1, 1}, devices, energy, power, testTariff(), GroupByHouse)
+	unmon := out[1]
+	if unmon.Key != houseUnmonitoredKey {
+		t.Fatalf("series[1] key = %q", unmon.Key)
+	}
+	// buckets: 0.9, clamp(−0.1)→0, 0.9.
+	want := []float64{0.9, 0, 0.9}
+	for i, w := range want {
+		if unmon.KWh[i] != w {
+			t.Errorf("unmonitored kwh[%d] = %v, want %v", i, unmon.KWh[i], w)
+		}
+	}
+	// Total = Σ clamped = 1.8, NOT total meter−monitored = 2.4−0.7 = 1.7.
+	if unmon.TotalKWh != 1.8 {
+		t.Errorf("unmonitored total = %v, want 1.8 (sum of clamped buckets)", unmon.TotalKWh)
+	}
+	if unmon.Cost[1] != 0 {
+		t.Errorf("clamped bucket cost = %v, want 0", unmon.Cost[1])
+	}
+}
+
+// TestComputeDrift covers C3: only residuals MORE negative than one counter
+// quantum (−0.1 kWh) are flagged; routine quantisation noise between 0 and −0.1
+// is not. WorstResidualKWh/WorstAt track the most-negative bucket.
+func TestComputeDrift(t *testing.T) {
+	loc := mustLondon(t)
+	buckets := threeBuckets(loc)
+	// Residuals: −0.05 (noise, ignored), −0.30 (drift), +0.40 (none).
+	monitored := &Series{KWh: []float64{0.55, 0.80, 0.10}}
+	meter := &Series{KWh: []float64{0.50, 0.50, 0.50}}
+
+	d := computeDrift(buckets, monitored, meter)
+	if d.ClampedBuckets != 1 {
+		t.Errorf("ClampedBuckets = %d, want 1 (only the −0.30 bucket)", d.ClampedBuckets)
+	}
+	if math.Abs(d.WorstResidualKWh-(-0.30)) > 1e-9 {
+		t.Errorf("WorstResidualKWh = %v, want -0.30", d.WorstResidualKWh)
+	}
+	if !d.WorstAt.Equal(buckets[1]) {
+		t.Errorf("WorstAt = %v, want bucket[1] %v", d.WorstAt, buckets[1])
+	}
+	if !d.HasDrift() {
+		t.Error("HasDrift() = false, want true")
+	}
+	// No meter ⇒ no drift.
+	if computeDrift(buckets, monitored, nil).HasDrift() {
+		t.Error("no-meter drift should be empty")
+	}
+}
+
+// TestDeriveUnmonitoredUnclamped covers Q4: with unclamped=true the raw signed
+// residual is preserved (negative buckets, negative cost), unlike the clamped
+// default.
+func TestDeriveUnmonitoredUnclamped(t *testing.T) {
+	loc := mustLondon(t)
+	buckets := threeBuckets(loc)
+	monitored := &Series{KWh: []float64{0.5, 0.5, 0.5}, AvgW: []float64{500, 500, 500}}
+	meter := Series{KWh: []float64{0.3, 0.3, 0.3}, AvgW: []float64{300, 300, 300}}
+
+	hrs := []float64{1, 1, 1}
+	clamped := deriveUnmonitored(buckets, hrs, monitored, meter, testTariff(), false)
+	if clamped.KWh[0] != 0 {
+		t.Errorf("clamped kwh[0] = %v, want 0", clamped.KWh[0])
+	}
+	unclamped := deriveUnmonitored(buckets, hrs, monitored, meter, testTariff(), true)
+	if unclamped.KWh[0] >= 0 {
+		t.Errorf("unclamped kwh[0] = %v, want negative (0.3−0.5)", unclamped.KWh[0])
+	}
+	if unclamped.Cost[0] >= 0 {
+		t.Errorf("unclamped cost[0] = %v, want negative", unclamped.Cost[0])
+	}
+	if unclamped.AvgW[0] >= 0 {
+		t.Errorf("unclamped avg_w[0] = %v, want negative", unclamped.AvgW[0])
+	}
 }
 
 func TestAssembleHouseNoMeter(t *testing.T) {
@@ -411,7 +533,7 @@ func TestAssembleHouseNoMeter(t *testing.T) {
 		"winefridge": {Class: "continuous_power_device"},
 	}
 	energy := map[string][]float64{"winefridge": {0.1, 0.1, 0.1}}
-	out := AssembleSeries(buckets, devices, energy, nil, testTariff(), GroupByHouse)
+	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByHouse)
 	if len(out) != 1 || out[0].Key != houseMonitoredKey {
 		t.Errorf("house without meter should be one monitored series: %+v", out)
 	}
@@ -476,7 +598,7 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 		},
 	}
 
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, devices, testTariff(), loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -581,7 +703,7 @@ func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
 		},
 	}
 
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, devices, testTariff(), loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -598,6 +720,75 @@ func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
 	}
 }
 
+// TestBuildSeriesUnmonitoredAvgWEnergyDerived is the regression for the avg_w=0
+// bug (docs/bug-unmonitored-avg-w.md, spec C8). The unmonitored series has NO
+// power telemetry of its own, so its avg_w must be ENERGY-DERIVED
+// (kwh × 1000 / bucket_hours), not the difference of telemetry power means. The
+// failure mode appears when summed monitored power EXCEEDS meter power (the real
+// counter-vs-∫power averaging bias): meter.AvgW − monitored.AvgW goes negative and
+// the old code clamped it to 0, reporting "0 W" for a series consuming real energy.
+func TestBuildSeriesUnmonitoredAvgWEnergyDerived(t *testing.T) {
+	loc := mustLondon(t)
+	start := time.Date(2026, 6, 11, 0, 0, 0, 0, loc)
+	stop := time.Date(2026, 6, 11, 3, 0, 0, 0, loc) // three 1h buckets
+	win := Window{Start: start, Stop: stop, Label: WindowCustom}
+	iv, _ := lookupInterval("1h")
+	buckets := BucketStarts(win, iv, loc)
+
+	devices := map[string]config.DeviceConfig{
+		"winefridge":        {Class: "continuous_power_device"},
+		"electricity_meter": {Class: EnergyMeterClass},
+	}
+	// Meter ENERGY (0.5) > monitored energy (0.3) ⇒ unmonitored kwh = 0.2 > 0.
+	// But monitored POWER (800) > meter power (500) ⇒ meter.AvgW−monitored.AvgW < 0.
+	counterRows := []influx.Row{}
+	powerRows := []influx.Row{}
+	for _, b := range buckets {
+		counterRows = append(counterRows,
+			influx.Row{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.3, Time: b},
+			influx.Row{DeviceID: "electricity_meter", Field: "energy_kwh", Value: 0.5, Time: b})
+		powerRows = append(powerRows,
+			influx.Row{DeviceID: "winefridge", Field: "power_w", Value: 800, Time: b},
+			influx.Row{DeviceID: "electricity_meter", Field: "power_w", Value: 500, Time: b})
+	}
+	q := &influx.FakeQuerier{
+		QueryFunc: func(flux string) ([]influx.Row, error) {
+			switch {
+			case strings.Contains(flux, "energy_kwh"):
+				return counterRows, nil
+			case strings.Contains(flux, "power_w"):
+				return powerRows, nil
+			}
+			return nil, nil
+		},
+	}
+
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByHouse, false, false, devices, testTariff(), loc)
+	if err != nil {
+		t.Fatalf("BuildSeries: %v", err)
+	}
+	var unmon Series
+	for _, s := range resp.Series {
+		if s.Key == houseUnmonitoredKey {
+			unmon = s
+		}
+	}
+	if unmon.Key == "" {
+		t.Fatal("no unmonitored series")
+	}
+	// Sanity: energy residual is non-zero so avg_w MUST be non-zero.
+	if unmon.KWh[0] <= 0 {
+		t.Fatalf("test setup: unmonitored kwh[0] = %v, want > 0", unmon.KWh[0])
+	}
+	// 1h buckets ⇒ energy-derived avg_w = kwh × 1000 / 1 = 200 W. The bug returns 0.
+	for i := range buckets {
+		want := round.To(unmon.KWh[i]*1000.0/1.0, round.WDP)
+		if unmon.AvgW[i] != want {
+			t.Errorf("unmonitored avg_w[%d] = %v, want %v (energy-derived kwh×1000/hours)", i, unmon.AvgW[i], want)
+		}
+	}
+}
+
 func TestBuildSeriesQueryError(t *testing.T) {
 	loc := mustLondon(t)
 	start := time.Date(2026, 6, 11, 0, 0, 0, 0, loc)
@@ -608,7 +799,7 @@ func TestBuildSeriesQueryError(t *testing.T) {
 		"winefridge": {Class: "continuous_power_device"},
 	}
 	q := &influx.FakeQuerier{Err: context.DeadlineExceeded}
-	if _, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, devices, testTariff(), loc); err == nil {
+	if _, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), loc); err == nil {
 		t.Fatal("BuildSeries should propagate query error")
 	}
 }
@@ -624,7 +815,7 @@ func TestBuildSeriesNoMeteredDevices(t *testing.T) {
 		"doorbell": {Class: "binary_sensor"},
 	}
 	q := &influx.FakeQuerier{}
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, devices, testTariff(), loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -645,7 +836,7 @@ func TestBuildSeriesDefaultGroupByReported(t *testing.T) {
 	}
 	iv, _ := lookupInterval("1h")
 	q := &influx.FakeQuerier{}
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, "", nil, testTariff(), loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, "", false, false, nil, testTariff(), loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -684,7 +875,7 @@ func TestBuildSeriesUPSPartialFinalBucket(t *testing.T) {
 			return nil, nil
 		},
 	}
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, devices, testTariff(), loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}

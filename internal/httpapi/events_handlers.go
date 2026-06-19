@@ -305,5 +305,21 @@ func (s *Server) handleDevices(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 
+	// Synthetic "unmonitored" (rest-of-home) device, present only when a
+	// whole-house meter is configured (C6: with no meter there is nothing to
+	// attribute). It carries the energy capability so it shows up in client
+	// device pickers and plots through the existing /devices/{id}/series path.
+	// It sorts in by id like any other device, keeping the catalogue ordered.
+	if _, ok := energy.MeterID(devices); ok {
+		out = append(out, catalogEntry{
+			ID:           energy.UnmonitoredID,
+			DisplayName:  "Unmonitored (rest of home)",
+			Location:     "",
+			Class:        energy.UnmonitoredClass,
+			Capabilities: []string{"energy"},
+		})
+		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"devices": out})
 }

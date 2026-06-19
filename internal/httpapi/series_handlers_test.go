@@ -16,13 +16,16 @@ import (
 // seriesResp mirrors the energy.SeriesResponse shape for decoding in tests
 // (kept local so the test asserts on the wire JSON, not the Go struct).
 type seriesResp struct {
-	Window   string    `json:"window"`
-	From     string    `json:"from"`
-	To       string    `json:"to"`
-	Interval string    `json:"interval"`
-	GroupBy  string    `json:"group_by"`
-	Buckets  []string  `json:"buckets"`
-	Series   []seriesS `json:"series"`
+	Window              string    `json:"window"`
+	From                string    `json:"from"`
+	To                  string    `json:"to"`
+	Interval            string    `json:"interval"`
+	GroupBy             string    `json:"group_by"`
+	Coverage            *float64  `json:"coverage"`
+	StaleMonitoredCount *int      `json:"stale_monitored_count"`
+	StaleMonitoredIDs   []string  `json:"stale_monitored_ids"`
+	Buckets             []string  `json:"buckets"`
+	Series              []seriesS `json:"series"`
 }
 
 type seriesS struct {
@@ -292,6 +295,10 @@ func TestSeries_House(t *testing.T) {
 	if !ok {
 		t.Fatalf("no meter series: %v", keys)
 	}
+	unmon, ok := keys["unmonitored"]
+	if !ok {
+		t.Fatalf("no unmonitored series: %v", keys)
+	}
 	// monitored bucket 0 = winefridge 0.05 + ups 0.1 = 0.15
 	if !approx(mon.KWh[0], 0.15) {
 		t.Errorf("monitored kwh[0] = %v want 0.15", mon.KWh[0])
@@ -299,6 +306,314 @@ func TestSeries_House(t *testing.T) {
 	// meter bucket 0 = 0.5
 	if !approx(meter.KWh[0], 0.5) {
 		t.Errorf("meter kwh[0] = %v want 0.5", meter.KWh[0])
+	}
+	// unmonitored bucket 0 = meter − monitored = 0.5 − 0.15 = 0.35 (R1.2).
+	if !approx(unmon.KWh[0], 0.35) {
+		t.Errorf("unmonitored kwh[0] = %v want 0.35", unmon.KWh[0])
+	}
+	if unmon.Class != "unmonitored" {
+		t.Errorf("unmonitored class = %q want unmonitored", unmon.Class)
+	}
+	// Ordering R1.4: monitored, unmonitored, meter.
+	var order []string
+	for _, ser := range r.Series {
+		order = append(order, ser.Key)
+	}
+	if len(order) != 3 || order[0] != "monitored" || order[1] != "unmonitored" || order[2] != "meter" {
+		t.Errorf("house series order = %v, want [monitored unmonitored meter]", order)
+	}
+	// Coverage (C12) = monitored ÷ meter for the window; present and consistent
+	// with the series totals.
+	if r.Coverage == nil {
+		t.Fatalf("house response missing coverage")
+	}
+	if want := round.To(mon.TotalKWh/meter.TotalKWh, 4); !approx(*r.Coverage, want) {
+		t.Errorf("coverage = %v want %v (monitored/meter)", *r.Coverage, want)
+	}
+	// Both monitored devices (winefridge, network-ups) reported power → none stale.
+	if r.StaleMonitoredCount == nil || *r.StaleMonitoredCount != 0 {
+		t.Errorf("stale_monitored_count = %v want 0", r.StaleMonitoredCount)
+	}
+}
+
+// TestSeries_HouseStaleness covers C13: a monitored device that reported NO power
+// telemetry in the window is flagged stale (its load silently inflates
+// unmonitored). Here network-ups has no power samples while winefridge does.
+func TestSeries_HouseStaleness(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0} // network-ups: no rows → stale
+	s := seriesSetup(t, energyPer, powerPer)
+
+	w := doGET(t, s, "/series?window=today&group_by=house")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	r := decodeSeries(t, w)
+	if r.StaleMonitoredCount == nil || *r.StaleMonitoredCount != 1 {
+		t.Fatalf("stale_monitored_count = %v want 1", r.StaleMonitoredCount)
+	}
+	if len(r.StaleMonitoredIDs) != 1 || r.StaleMonitoredIDs[0] != "network-ups" {
+		t.Errorf("stale_monitored_ids = %v want [network-ups]", r.StaleMonitoredIDs)
+	}
+}
+
+// Coverage/staleness are house-only signals; a device grouping omits them (C12).
+func TestSeries_DeviceGroupingNoHouseStats(t *testing.T) {
+	s := seriesSetup(t, map[string]float64{"winefridge": 0.05}, map[string]float64{"winefridge": 52.0})
+	w := doGET(t, s, "/series?window=today&group_by=device")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	r := decodeSeries(t, w)
+	if r.Coverage != nil || r.StaleMonitoredCount != nil {
+		t.Errorf("device grouping should omit house stats: coverage=%v stale=%v", r.Coverage, r.StaleMonitoredCount)
+	}
+	if strings.Contains(w.Body.String(), "coverage") {
+		t.Errorf("coverage key present in device-grouped body: %s", w.Body.String())
+	}
+}
+
+// --- R3: synthetic "unmonitored" device ---
+
+func TestUnmonitoredDeviceSeries(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0, "network-ups": 100.0}
+	s := seriesSetup(t, energyPer, powerPer)
+
+	w := doGET(t, s, "/devices/unmonitored/series?window=today")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	r := decodeSeries(t, w)
+	// Same schema as a real device series: group_by=device, exactly one series.
+	if r.GroupBy != "device" {
+		t.Errorf("group_by = %q want device", r.GroupBy)
+	}
+	if len(r.Series) != 1 || r.Series[0].Key != "unmonitored" {
+		t.Fatalf("want one unmonitored series, got %+v", r.Series)
+	}
+	// Values match the house unmonitored series (R3.2): 0.5 − 0.15 = 0.35.
+	if !approx(r.Series[0].KWh[0], 0.35) {
+		t.Errorf("unmonitored kwh[0] = %v want 0.35", r.Series[0].KWh[0])
+	}
+	// avg_w is ENERGY-DERIVED (C8), not 0 — regression for the avg_w=0 bug
+	// (docs/bug-unmonitored-avg-w.md). Bucket 0 is a full hour, so
+	// avg_w = kwh × 1000 / 1h = 350 W.
+	if !approx(r.Series[0].AvgW[0], 350) {
+		t.Errorf("unmonitored avg_w[0] = %v want 350 (energy-derived; was 0)", r.Series[0].AvgW[0])
+	}
+}
+
+func TestUnmonitoredDeviceSeries_NoMeter(t *testing.T) {
+	s := seriesSetup(t, nil, nil)
+	devs := testDevices()
+	delete(devs, "electricity_meter")
+	s.Config = fakeConfig{devices: devs, tariffs: testTariffs()}
+
+	w := doGET(t, s, "/devices/unmonitored/series?window=today")
+	// No whole-house meter ⇒ unmonitored is undefined, 404 (C6), not monitored.
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404 with no meter, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- R2: include_unmonitored catch-all ---
+
+// countSeries returns how many series carry the given key.
+func countSeries(r seriesResp, key string) int {
+	n := 0
+	for _, s := range r.Series {
+		if s.Key == key {
+			n++
+		}
+	}
+	return n
+}
+
+func sumSeriesTotalKWh(r seriesResp) float64 {
+	var sum float64
+	for _, s := range r.Series {
+		sum += s.TotalKWh
+	}
+	return sum
+}
+
+func TestSeries_IncludeUnmonitored_Device(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0, "network-ups": 100.0}
+	s := seriesSetup(t, energyPer, powerPer)
+
+	on := decodeSeries(t, doGET(t, s, "/series?window=today&group_by=device&include_unmonitored=true"))
+	// Exactly one unmonitored series, tagged synthetic.
+	if got := countSeries(on, "unmonitored"); got != 1 {
+		t.Fatalf("unmonitored series count = %d, want 1", got)
+	}
+	var unmon seriesS
+	for _, ser := range on.Series {
+		if ser.Key == "unmonitored" {
+			unmon = ser
+		}
+	}
+	if unmon.Class != "unmonitored" {
+		t.Errorf("catch-all class = %q want unmonitored", unmon.Class)
+	}
+
+	// Parts sum to the whole house (R2.4): Σ(all series incl. catch-all) == meter.
+	house := decodeSeries(t, doGET(t, s, "/series?window=today&group_by=house"))
+	var meterTotal, houseUnmon float64
+	for _, ser := range house.Series {
+		switch ser.Key {
+		case "meter":
+			meterTotal = ser.TotalKWh
+		case "unmonitored":
+			houseUnmon = ser.TotalKWh
+		}
+	}
+	if !approx(sumSeriesTotalKWh(on), meterTotal) {
+		t.Errorf("Σ device+catch-all = %v, want meter %v", sumSeriesTotalKWh(on), meterTotal)
+	}
+	// The catch-all is the SAME quantity as the house unmonitored series.
+	if !approx(unmon.TotalKWh, houseUnmon) {
+		t.Errorf("catch-all total = %v, want house unmonitored %v", unmon.TotalKWh, houseUnmon)
+	}
+}
+
+// AC6: with location/class grouping the catch-all is never subdivided — exactly
+// one unmonitored series regardless of how many groups exist.
+func TestSeries_IncludeUnmonitored_ClassNeverSubdivided(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0, "network-ups": 100.0}
+	s := seriesSetup(t, energyPer, powerPer)
+
+	r := decodeSeries(t, doGET(t, s, "/series?window=today&group_by=class&include_unmonitored=true"))
+	if got := countSeries(r, "unmonitored"); got != 1 {
+		t.Fatalf("class grouping unmonitored count = %d, want exactly 1", got)
+	}
+}
+
+// R2.5: without the flag the response is unchanged — no catch-all series.
+func TestSeries_IncludeUnmonitored_DefaultOff(t *testing.T) {
+	s := seriesSetup(t, map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}, map[string]float64{"winefridge": 52.0})
+	r := decodeSeries(t, doGET(t, s, "/series?window=today&group_by=device"))
+	if got := countSeries(r, "unmonitored"); got != 0 {
+		t.Errorf("device grouping without flag should have no unmonitored series, got %d", got)
+	}
+}
+
+// No meter configured ⇒ the catch-all is a graceful no-op (C6), not an error.
+func TestSeries_IncludeUnmonitored_NoMeter(t *testing.T) {
+	s := seriesSetup(t, map[string]float64{"winefridge": 0.05}, map[string]float64{"winefridge": 52.0})
+	devs := testDevices()
+	delete(devs, "electricity_meter")
+	s.Config = fakeConfig{devices: devs, tariffs: testTariffs()}
+
+	w := doGET(t, s, "/series?window=today&group_by=device&include_unmonitored=true")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := countSeries(decodeSeries(t, w), "unmonitored"); got != 0 {
+		t.Errorf("no meter ⇒ no catch-all, got %d unmonitored series", got)
+	}
+}
+
+func TestSeries_BadIncludeUnmonitored(t *testing.T) {
+	s := seriesSetup(t, nil, nil)
+	w := doGET(t, s, "/series?window=today&include_unmonitored=maybe")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for bad include_unmonitored, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- C3 drift metric + Q4 unclamped mode ---
+
+// driftSetup programs monitored (winefridge 0.5/bucket) to exceed the meter
+// (0.3/bucket) so every bucket has a −0.2 kWh residual — drift beyond the 0.1 kWh
+// quantum. winefridge reports power so it is not counted stale.
+func driftSetup(t *testing.T) *Server {
+	return seriesSetup(t,
+		map[string]float64{"winefridge": 0.5, "electricity_meter": 0.3},
+		map[string]float64{"winefridge": 52.0})
+}
+
+func TestSeries_DriftMetric(t *testing.T) {
+	s := driftSetup(t)
+
+	if got := decode(t, doGET(t, s, "/metrics"))["drift_buckets_total"].(float64); got != 0 {
+		t.Fatalf("drift_buckets_total = %v before any series request, want 0", got)
+	}
+	if w := doGET(t, s, "/series?window=today&group_by=house"); w.Code != http.StatusOK {
+		t.Fatalf("series want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := decode(t, doGET(t, s, "/metrics"))["drift_buckets_total"].(float64); got <= 0 {
+		t.Errorf("drift_buckets_total = %v after drifting house request, want > 0", got)
+	}
+}
+
+// include_unmonitored on a device grouping also exercises the drift path.
+func TestSeries_DriftMetric_CatchAll(t *testing.T) {
+	s := driftSetup(t)
+	doGET(t, s, "/series?window=today&group_by=device&include_unmonitored=true")
+	if got := decode(t, doGET(t, s, "/metrics"))["drift_buckets_total"].(float64); got <= 0 {
+		t.Errorf("drift_buckets_total = %v after catch-all request, want > 0", got)
+	}
+}
+
+// A non-decomposing grouping does not run drift detection.
+func TestSeries_NoDriftWithoutDecomposition(t *testing.T) {
+	s := driftSetup(t)
+	doGET(t, s, "/series?window=today&group_by=device")
+	if got := decode(t, doGET(t, s, "/metrics"))["drift_buckets_total"].(float64); got != 0 {
+		t.Errorf("drift_buckets_total = %v for plain device grouping, want 0", got)
+	}
+}
+
+func TestSeries_Unclamped(t *testing.T) {
+	s := driftSetup(t)
+
+	// Default (clamped): the unmonitored bucket floors at 0.
+	clamped := decodeSeries(t, doGET(t, s, "/series?window=today&group_by=house"))
+	for _, ser := range clamped.Series {
+		if ser.Key == "unmonitored" && ser.KWh[0] < 0 {
+			t.Fatalf("clamped unmonitored kwh[0] = %v, want ≥ 0", ser.KWh[0])
+		}
+	}
+
+	// unclamped=true: the raw negative residual is preserved.
+	w := doGET(t, s, "/series?window=today&group_by=house&unclamped=true")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var unmon seriesS
+	for _, ser := range decodeSeries(t, w).Series {
+		if ser.Key == "unmonitored" {
+			unmon = ser
+		}
+	}
+	if unmon.Key != "unmonitored" {
+		t.Fatalf("no unmonitored series in unclamped house response")
+	}
+	if unmon.KWh[0] >= 0 {
+		t.Errorf("unclamped unmonitored kwh[0] = %v, want negative (meter < monitored)", unmon.KWh[0])
+	}
+}
+
+func TestSeries_BadUnclamped(t *testing.T) {
+	s := seriesSetup(t, nil, nil)
+	if w := doGET(t, s, "/series?window=today&unclamped=perhaps"); w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for bad unclamped, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// The synthetic unmonitored device endpoint also honours unclamped.
+func TestUnmonitoredDeviceSeries_Unclamped(t *testing.T) {
+	s := driftSetup(t)
+	w := doGET(t, s, "/devices/unmonitored/series?window=today&unclamped=true")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	r := decodeSeries(t, w)
+	if len(r.Series) != 1 || r.Series[0].KWh[0] >= 0 {
+		t.Errorf("unclamped synthetic device kwh[0] should be negative, got %+v", r.Series)
 	}
 }
 

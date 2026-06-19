@@ -24,7 +24,7 @@ func ValidShape(s string) bool {
 // SeriesPoint is one (series, bucket) sample in the row-oriented form. Values are
 // already rounded (kWh 3dp, cost 4dp GBP, avg_w 1dp W) by AssembleSeries.
 type SeriesPoint struct {
-	Key  string    `json:"key"`  // series key (device id, location, class, or "monitored"/"meter")
+	Key  string    `json:"key"`  // series key (device id, location, class, or "monitored"/"unmonitored"/"meter")
 	Time time.Time `json:"time"` // bucket start, RFC3339 with the configured tz offset
 	KWh  float64   `json:"kwh"`
 	Cost float64   `json:"cost"`  // GBP, VAT-inclusive
@@ -48,14 +48,19 @@ type SeriesMeta struct {
 // ordered by series (in the columnar response's series order) then by bucket
 // time, so each series' points are contiguous and already time-sorted.
 type RowsResponse struct {
-	Window   string        `json:"window"`
-	From     string        `json:"from"`
-	To       string        `json:"to"`
-	Interval string        `json:"interval"`
-	GroupBy  string        `json:"group_by"`
-	Shape    string        `json:"shape"` // "rows"
-	Series   []SeriesMeta  `json:"series"`
-	Rows     []SeriesPoint `json:"rows"`
+	Window   string `json:"window"`
+	From     string `json:"from"`
+	To       string `json:"to"`
+	Interval string `json:"interval"`
+	GroupBy  string `json:"group_by"`
+	Shape    string `json:"shape"` // "rows"
+
+	// House decomposition confidence signals (group_by=house only), mirroring the
+	// columnar SeriesResponse. See HouseStats.
+	HouseStats
+
+	Series []SeriesMeta  `json:"series"`
+	Rows   []SeriesPoint `json:"rows"`
 }
 
 // Rows converts the columnar SeriesResponse into the row-oriented RowsResponse.
@@ -64,14 +69,15 @@ type RowsResponse struct {
 // matching the columnar invariant that all arrays align to the axis).
 func (r SeriesResponse) Rows() RowsResponse {
 	out := RowsResponse{
-		Window:   r.Window,
-		From:     r.From,
-		To:       r.To,
-		Interval: r.Interval,
-		GroupBy:  r.GroupBy,
-		Shape:    ShapeRows,
-		Series:   make([]SeriesMeta, 0, len(r.Series)),
-		Rows:     make([]SeriesPoint, 0, len(r.Series)*len(r.Buckets)),
+		Window:     r.Window,
+		From:       r.From,
+		To:         r.To,
+		Interval:   r.Interval,
+		GroupBy:    r.GroupBy,
+		Shape:      ShapeRows,
+		HouseStats: r.HouseStats,
+		Series:     make([]SeriesMeta, 0, len(r.Series)),
+		Rows:       make([]SeriesPoint, 0, len(r.Series)*len(r.Buckets)),
 	}
 	for _, s := range r.Series {
 		out.Series = append(out.Series, SeriesMeta{

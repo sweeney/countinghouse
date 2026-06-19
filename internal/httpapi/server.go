@@ -102,6 +102,12 @@ type Server struct {
 	queryErrors atomic.Int64
 	influxNanos atomic.Int64
 
+	// driftBuckets accumulates C3 negative-residual drift buckets (meter below
+	// monitored beyond the 0.1 kWh counter quantum) observed across served series
+	// requests. A non-zero, growing value means the unmonitored decomposition is
+	// being distorted — investigate via the WARN logs / unclamped=true.
+	driftBuckets atomic.Int64
+
 	srv           *http.Server
 	verifier      *auth.JWKSVerifier
 	specConverter *spec.Converter

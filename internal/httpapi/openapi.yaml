@@ -121,9 +121,20 @@ paths:
       description: >
         Multi-series energy time-series over the window: per-series kWh, cost and
         avg_w. group_by selects device (default, one series per metered device,
-        excluding the whole-house meter), location, class, or house (two series:
-        "monitored" = sum of devices, "meter" = the whole-house meter). The shape
-        param chooses columnar (default) or row-oriented output.
+        excluding the whole-house meter), location, class, or house. house yields
+        three series in order: "monitored" = sum of devices, "unmonitored" =
+        clamp(meter − monitored) per bucket (the rest-of-home energy no monitored
+        device accounts for), and "meter" = the whole-house meter. Stacking every
+        series except "meter" reconstructs the whole home; monitored + unmonitored
+        == meter per bucket within rounding tolerance (a slightly-negative residual
+        from counter quantisation clamps to 0). unmonitored cost is the tariff
+        applied to its clamped energy. The house response also carries top-level
+        coverage (monitored ÷ meter) and a stale-monitored-device indicator
+        (count + ids) so consumers can gauge how trustworthy the split is. For
+        device/location/class groupings, include_unmonitored=true adds the same
+        rest-of-home quantity as a single catch-all series so those parts sum to
+        the meter too. The shape param chooses columnar (default) or row-oriented
+        output.
       operationId: getSeries
       tags: [data]
       parameters:
@@ -132,6 +143,8 @@ paths:
         - $ref: "#/components/parameters/To"
         - $ref: "#/components/parameters/Interval"
         - $ref: "#/components/parameters/GroupBy"
+        - $ref: "#/components/parameters/IncludeUnmonitored"
+        - $ref: "#/components/parameters/Unclamped"
         - $ref: "#/components/parameters/Shape"
       responses:
         "200":
@@ -160,6 +173,11 @@ paths:
         Single-device convenience form of /series: the same response shapes
         carrying exactly one series for the device. Non-metered classes return
         400. The shape param chooses columnar (default) or row-oriented output.
+        The reserved id "unmonitored" is a synthetic device serving the house
+        "unmonitored" series (rest of home = clamp(meter − monitored)) through this
+        same single-series shape; it returns 404 when no whole-house meter is
+        configured (unmonitored is then undefined). For id=unmonitored the
+        unclamped diagnostic param applies (ignored for real devices).
       operationId: getDeviceSeries
       tags: [data]
       parameters:
@@ -168,6 +186,7 @@ paths:
         - $ref: "#/components/parameters/From"
         - $ref: "#/components/parameters/To"
         - $ref: "#/components/parameters/Interval"
+        - $ref: "#/components/parameters/Unclamped"
         - $ref: "#/components/parameters/Shape"
       responses:
         "200":
@@ -262,7 +281,10 @@ paths:
         enriched with a derived capabilities hint ("energy" when the class is
         metered, "events" for event-bearing classes — binary_state_device,
         fire_alarm). Lets a UI build a device picker without knowing Influx.
-        Sorted by id.
+        Sorted by id. When a whole-house meter is configured, a synthetic
+        "unmonitored" entry (class "unmonitored", capability "energy", id reserved)
+        is included so the rest-of-home series appears in pickers and plots through
+        /devices/unmonitored/series like any device.
       operationId: getDevices
       tags: [data]
       responses:
@@ -460,6 +482,32 @@ components:
         type: string
         enum: [device, location, class, house]
         default: device
+    IncludeUnmonitored:
+      name: include_unmonitored
+      in: query
+      required: false
+      description: >
+        When true, a device/location/class grouping gains exactly one extra
+        "unmonitored" (rest-of-home) series so the parts sum to the whole-house
+        meter. Never subdivided (one series regardless of grouping); a no-op when
+        no meter is configured. Ignored for group_by=house (which always includes
+        it). Default false — the response is otherwise unchanged.
+      schema:
+        type: boolean
+        default: false
+    Unclamped:
+      name: unclamped
+      in: query
+      required: false
+      description: >
+        Diagnostic mode: when true, the unmonitored series is the RAW signed
+        residual (meter − monitored) with negatives preserved, instead of clamped
+        at 0. Negative kWh/cost/avg_w can appear; this deliberately breaks the
+        monitored+unmonitored==meter presentation, for investigating meter/device
+        drift. Default false. (Operators also have the drift_buckets_total metric.)
+      schema:
+        type: boolean
+        default: false
     Shape:
       name: shape
       in: query
@@ -668,6 +716,13 @@ components:
           type: integer
         influx_avg_latency_ms:
           type: number
+        drift_buckets_total:
+          type: integer
+          description: >
+            Cumulative count of negative-residual drift buckets (meter below
+            monitored beyond the 0.1 kWh counter quantum) observed across served
+            series requests. A growing value means the unmonitored decomposition is
+            being distorted — investigate via WARN logs or unclamped=true.
         version:
           type: string
         uptime_seconds:
@@ -683,7 +738,7 @@ components:
       properties:
         key:
           type: string
-          description: Series identity (device id, location, class, or "monitored"/"meter").
+          description: Series identity (device id, location, class, or "monitored"/"unmonitored"/"meter").
         label:
           type: string
         location:
@@ -735,6 +790,25 @@ components:
           type: string
           enum: [columns]
           description: Always "columns" for this schema.
+        coverage:
+          type: number
+          description: >
+            group_by=house only: monitored ÷ meter energy for the window (0..1).
+            Omitted for other groupings and when no meter is configured. A low
+            value means much of the home is unmonitored — or that monitored is
+            under-counted (see stale_monitored_count).
+        stale_monitored_count:
+          type: integer
+          description: >
+            group_by=house only: count of monitored devices that reported NO power
+            telemetry in the window (likely dropped/offline). Their load shifts
+            into the "unmonitored" series, inflating it, so a non-zero value flags
+            a low-confidence split. Omitted for other groupings / no meter.
+        stale_monitored_ids:
+          type: array
+          items:
+            type: string
+          description: Ids of the stale monitored devices; omitted when none.
         buckets:
           type: array
           items:
@@ -753,7 +827,7 @@ components:
       properties:
         key:
           type: string
-          description: Series identity (device id, location, class, or "monitored"/"meter").
+          description: Series identity (device id, location, class, or "monitored"/"unmonitored"/"meter").
         label:
           type: string
         location:
@@ -813,6 +887,21 @@ components:
           type: string
           enum: [rows]
           description: Always "rows" for this schema.
+        coverage:
+          type: number
+          description: >
+            group_by=house only: monitored ÷ meter energy for the window (0..1).
+            Omitted for other groupings / no meter. See SeriesResponse.coverage.
+        stale_monitored_count:
+          type: integer
+          description: >
+            group_by=house only: count of monitored devices with no power telemetry
+            in the window. See SeriesResponse.stale_monitored_count.
+        stale_monitored_ids:
+          type: array
+          items:
+            type: string
+          description: Ids of the stale monitored devices; omitted when none.
         series:
           type: array
           items:
