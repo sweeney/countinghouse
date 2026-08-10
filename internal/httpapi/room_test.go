@@ -62,38 +62,6 @@ func TestSeries_GroupByRoomKeysOnRoomIDs(t *testing.T) {
 	}
 }
 
-// TestGroupByRoomAndLocationAreEquivalent is the alias-period contract: the two
-// spellings return the same numbers, and only the reported group_by differs.
-func TestGroupByRoomAndLocationAreEquivalent(t *testing.T) {
-	s, _ := dataSetup(t)
-	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
-
-	byRoom := doGET(t, s, "/series?window=today&interval=1h&group_by=room")
-	byLocation := doGET(t, s, "/series?window=today&interval=1h&group_by=location")
-	if byRoom.Code != http.StatusOK || byLocation.Code != http.StatusOK {
-		t.Fatalf("codes: room=%d location=%d", byRoom.Code, byLocation.Code)
-	}
-
-	var a, b map[string]any
-	if err := json.Unmarshal(byRoom.Body.Bytes(), &a); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(byLocation.Body.Bytes(), &b); err != nil {
-		t.Fatal(err)
-	}
-	if a["group_by"] != "room" || b["group_by"] != "location" {
-		t.Errorf("group_by: %v and %v", a["group_by"], b["group_by"])
-	}
-	delete(a, "group_by")
-	delete(b, "group_by")
-	ja, _ := json.Marshal(a)
-	jb, _ := json.Marshal(b)
-	if string(ja) != string(jb) {
-		t.Errorf("the alias returns different data\n room: %s\n  loc: %s", ja, jb)
-	}
-}
-
-// The /bill breakdown carries a place per device, and must carry the room id.
 func TestBillBreakdownCarriesRoom(t *testing.T) {
 	s, _ := dataSetup(t)
 	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
@@ -104,9 +72,6 @@ func TestBillBreakdownCarriesRoom(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"room":"groundfloor.kitchen"`) {
 		t.Errorf("bill breakdown has no room id: %s", w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"location":"groundfloor.kitchen"`) {
-		t.Errorf("bill breakdown dropped the deprecated alias: %s", w.Body.String())
 	}
 }
 

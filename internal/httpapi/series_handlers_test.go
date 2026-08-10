@@ -31,7 +31,7 @@ type seriesResp struct {
 type seriesS struct {
 	Key       string    `json:"key"`
 	Label     string    `json:"label"`
-	Location  string    `json:"location"`
+	Room      string    `json:"room"`
 	Class     string    `json:"class"`
 	KWh       []float64 `json:"kwh"`
 	Cost      []float64 `json:"cost"`
@@ -178,8 +178,8 @@ func TestSeries_Device(t *testing.T) {
 	if !ok {
 		t.Fatalf("no winefridge series")
 	}
-	if wf.Label != "Wine Fridge" || wf.Location != "kitchen" {
-		t.Errorf("winefridge label/location = %q/%q", wf.Label, wf.Location)
+	if wf.Label != "Wine Fridge" || wf.Room != "kitchen" {
+		t.Errorf("winefridge label/room = %q/%q", wf.Label, wf.Room)
 	}
 	// Every array aligns to the bucket axis.
 	for _, arr := range [][]float64{wf.KWh, wf.Cost, wf.AvgW} {
@@ -213,26 +213,26 @@ func TestSeries_Device(t *testing.T) {
 	}
 }
 
-// --- /series group_by=location ---
+// --- /series group_by=room ---
 
-func TestSeries_Location(t *testing.T) {
+func TestSeries_Room(t *testing.T) {
 	energyPer := map[string]float64{"winefridge": 0.05}
 	powerPer := map[string]float64{"winefridge": 52.0, "network-ups": 100.0}
 	s := seriesSetup(t, energyPer, powerPer)
 
-	w := doGET(t, s, "/series?window=today&group_by=location")
+	w := doGET(t, s, "/series?window=today&group_by=room")
 	if w.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
 	}
 	r := decodeSeries(t, w)
-	if r.GroupBy != "location" {
+	if r.GroupBy != "room" {
 		t.Errorf("group_by = %q", r.GroupBy)
 	}
 	keys := map[string]seriesS{}
 	for _, ser := range r.Series {
 		keys[ser.Key] = ser
 	}
-	// kitchen (winefridge) and office (network-ups). meter location excluded.
+	// kitchen (winefridge) and office (network-ups). meter room excluded.
 	if _, ok := keys["kitchen"]; !ok {
 		t.Errorf("no kitchen series: %v", keys)
 	}

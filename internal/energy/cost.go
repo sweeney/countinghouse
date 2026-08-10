@@ -7,15 +7,12 @@ import "github.com/sweeney/countinghouse/internal/config"
 // window's tariff. DisplayName/Location/Class are descriptive passthrough from
 // device config for the /bill breakdown.
 type DeviceCost struct {
-	DeviceID    string `json:"device_id"`
-	DisplayName string `json:"display_name"`
-	// Room is the floorplan room id; Location is its deprecated spelling, emitted
-	// alongside it for one release with the same value.
-	Room     string  `json:"room"`
-	Location string  `json:"location"`
-	Class    string  `json:"class"`
-	KWh      float64 `json:"kwh"`
-	Cost     float64 `json:"cost"`
+	DeviceID    string  `json:"device_id"`
+	DisplayName string  `json:"display_name"`
+	Room        string  `json:"room"`
+	Class       string  `json:"class"`
+	KWh         float64 `json:"kwh"`
+	Cost        float64 `json:"cost"`
 }
 
 // Reconciliation compares the sum of monitored devices against the whole-house

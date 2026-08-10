@@ -121,7 +121,7 @@ paths:
       description: >
         Multi-series energy time-series over the window: per-series kWh, cost and
         avg_w. group_by selects device (default, one series per metered device,
-        excluding the whole-house meter), location, class, or house. house yields
+        excluding the whole-house meter), room, class, or house. house yields
         three series in order: "monitored" = sum of devices, "unmonitored" =
         clamp(meter − monitored) per bucket (the rest-of-home energy no monitored
         device accounts for), and "meter" = the whole-house meter. Stacking every
@@ -131,7 +131,7 @@ paths:
         applied to its clamped energy. The house response also carries top-level
         coverage (monitored ÷ meter) and a stale-monitored-device indicator
         (count + ids) so consumers can gauge how trustworthy the split is. For
-        device/location/class groupings, include_unmonitored=true adds the same
+        device/room/class groupings, include_unmonitored=true adds the same
         rest-of-home quantity as a single catch-all series so those parts sum to
         the meter too. The shape param chooses columnar (default) or row-oriented
         output.
@@ -480,14 +480,14 @@ components:
       description: How to group series. Defaults to "device".
       schema:
         type: string
-        enum: [device, room, location, class, house]
+        enum: [device, room, class, house]
         default: device
     IncludeUnmonitored:
       name: include_unmonitored
       in: query
       required: false
       description: >
-        When true, a device/location/class grouping gains exactly one extra
+        When true, a device/room/class grouping gains exactly one extra
         "unmonitored" (rest-of-home) series so the parts sum to the whole-house
         meter. Never subdivided (one series regardless of grouping); a no-op when
         no meter is configured. Ignored for group_by=house (which always includes
@@ -653,10 +653,6 @@ components:
         room:
           type: string
           description: Floorplan room id.
-        location:
-          type: string
-          deprecated: true
-          description: DEPRECATED alias for room, carrying the same value.
         class:
           type: string
         kwh:
@@ -749,10 +745,6 @@ components:
         room:
           type: string
           description: Floorplan room id.
-        location:
-          type: string
-          deprecated: true
-          description: DEPRECATED alias for room, carrying the same value.
         class:
           type: string
         kwh:
@@ -795,7 +787,7 @@ components:
           enum: [5m, 15m, 30m, 1h, 6h, 1d]
         group_by:
           type: string
-          enum: [device, room, location, class, house]
+          enum: [device, room, class, house]
         shape:
           type: string
           enum: [columns]
@@ -843,10 +835,6 @@ components:
         room:
           type: string
           description: Floorplan room id.
-        location:
-          type: string
-          deprecated: true
-          description: DEPRECATED alias for room, carrying the same value.
         class:
           type: string
         total_kwh:
@@ -897,7 +885,7 @@ components:
           enum: [5m, 15m, 30m, 1h, 6h, 1d]
         group_by:
           type: string
-          enum: [device, room, location, class, house]
+          enum: [device, room, class, house]
         shape:
           type: string
           enum: [rows]
@@ -1079,7 +1067,6 @@ components:
           description: >
             Floorplan room id. Empty for a device whose readings describe the whole
             property rather than a room; see covers.
-        location:
           type: string
           deprecated: true
           description: DEPRECATED alias for room, carrying the same value.
@@ -1096,7 +1083,7 @@ components:
             type: string
             enum: [energy, events]
           description: Derived capability hints ("energy" for metered classes, "events" for event-bearing classes — binary_state_device, fire_alarm).
-      required: [id, display_name, room, location, class, capabilities]
+      required: [id, display_name, room, class, capabilities]
 
     DevicesCatalog:
       type: object

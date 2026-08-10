@@ -212,7 +212,7 @@ func TestAssembleByDeviceZeroFillAndCost(t *testing.T) {
 		t.Fatalf("series count = %d, want 1", len(out))
 	}
 	s := out[0]
-	if s.Key != "winefridge" || s.Label != "Wine Fridge" || s.Location != "kitchen" || s.Class != "continuous_power_device" {
+	if s.Key != "winefridge" || s.Label != "Wine Fridge" || s.Room != "kitchen" || s.Class != "continuous_power_device" {
 		t.Errorf("series metadata wrong: %+v", s)
 	}
 	if len(s.KWh) != 3 || len(s.Cost) != 3 || len(s.AvgW) != 3 {
@@ -293,7 +293,7 @@ func TestAssembleByLocationSumsKitchen(t *testing.T) {
 		"toaster":    {100, 0, 200},
 		"office_pc":  {300, 300, 300},
 	}
-	out := AssembleSeries(buckets, nil, devices, energy, power, testTariff(), GroupByLocation)
+	out := AssembleSeries(buckets, nil, devices, energy, power, testTariff(), GroupByRoom)
 	if len(out) != 2 {
 		t.Fatalf("location series = %d, want 2 (kitchen, office)", len(out))
 	}
@@ -323,7 +323,7 @@ func TestAssembleByLocationExcludesMeter(t *testing.T) {
 		"winefridge":        {1, 1, 1},
 		"electricity_meter": {9, 9, 9},
 	}
-	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByLocation)
+	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByRoom)
 	if len(out) != 1 || out[0].Key != "kitchen" {
 		t.Errorf("meter location leaked into grouping: %+v", out)
 	}

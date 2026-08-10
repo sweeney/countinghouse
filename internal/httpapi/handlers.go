@@ -215,7 +215,7 @@ func (s *Server) recordDrift(win energy.Window, d energy.DriftStats) {
 // validGroupBy reports whether g is an accepted group_by mode.
 func validGroupBy(g string) bool {
 	switch g {
-	case energy.GroupByDevice, energy.GroupByRoom, energy.GroupByLocation, energy.GroupByClass, energy.GroupByHouse:
+	case energy.GroupByDevice, energy.GroupByRoom, energy.GroupByClass, energy.GroupByHouse:
 		return true
 	default:
 		return false
@@ -230,7 +230,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		groupBy = energy.GroupByDevice
 	}
 	if !validGroupBy(groupBy) {
-		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want one of device, room, class, house; location is a deprecated alias for room)")
+		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want one of device, room, class, house)")
 		return
 	}
 	shape := r.URL.Query().Get("shape")
@@ -423,7 +423,6 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 			DeviceID:    id,
 			DisplayName: dev.DisplayName,
 			Room:        dev.Place(),
-			Location:    dev.Place(),
 			Class:       dev.Class,
 		})
 	}
