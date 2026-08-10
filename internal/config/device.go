@@ -16,7 +16,7 @@ type Thresholds struct {
 }
 
 // DeviceConfig mirrors statehouse's device entry. Countinghouse reads
-// only Class, Location, and DisplayName (to route queries and group the
+// only Class, Room, and DisplayName (to route queries and group the
 // bill), but the full struct is kept so the shared `statehouse_devices`
 // namespace parses without loss. The canonical identity fields are
 // Scheme + Primary (and Display); the legacy `ieee_address` /
@@ -36,8 +36,26 @@ type DeviceConfig struct {
 
 	Class       string      `yaml:"class"            json:"class,omitempty"`
 	DisplayName string      `yaml:"display_name"     json:"display_name,omitempty"`
-	Location    string      `yaml:"location"         json:"location,omitempty"`
 	Thresholds  *Thresholds `yaml:"thresholds"       json:"thresholds,omitempty"`
+
+	// Room is the floorplan room id this device sits in, e.g.
+	// "groundfloor.kitchen". It replaces Location.
+	Room string `yaml:"room" json:"room,omitempty"`
+
+	// Covers is what this device's readings describe, when that is NOT the room
+	// it sits in. Either the literal "house" or another room id; absent means it
+	// covers its own room.
+	//
+	// The distinction is the one structural defect in the old single-field
+	// scheme: central_heating, hot_water and electricity_meter each sit in one
+	// room while their readings describe the whole property, so `location` was
+	// recording sometimes one fact and sometimes the other. Two facts, two fields.
+	Covers string `yaml:"covers" json:"covers,omitempty"`
+
+	// Location is the free-text place the device used to declare, and is
+	// DEPRECATED. It is still decoded because a devices namespace that has not
+	// been republished yet still carries it.
+	Location string `yaml:"location" json:"location,omitempty"`
 
 	// EnergyStrategy is mirrored for completeness but is irrelevant to
 	// countinghouse routing (routing is class/energy_kwh-derived; see
@@ -62,3 +80,20 @@ func normaliseDevices(devices map[string]DeviceConfig) {
 		devices[id] = d
 	}
 }
+
+// Place returns the room this device is grouped and billed under: its Room when the
+// namespace has been migrated, otherwise its deprecated Location.
+//
+// Every grouping path goes through this one function, which is what makes
+// group_by=room and group_by=location return identical numbers during the alias
+// period instead of merely being documented to.
+func (d DeviceConfig) Place() string {
+	if d.Room != "" {
+		return d.Room
+	}
+	return d.Location
+}
+
+// CoversWholeSite reports whether this device's readings describe the whole property
+// rather than the room it sits in.
+func (d DeviceConfig) CoversWholeSite() bool { return d.Covers == "house" }

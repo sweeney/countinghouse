@@ -12,7 +12,12 @@ import (
 
 // group_by modes for BuildSeries / AssembleSeries.
 const (
-	GroupByDevice   = "device"
+	GroupByDevice = "device"
+	// GroupByRoom groups by floorplan room id.
+	GroupByRoom = "room"
+	// GroupByLocation is the deprecated spelling of GroupByRoom, kept for one
+	// release so consumers migrate independently. Both produce identical numbers;
+	// only the reported group_by differs.
 	GroupByLocation = "location"
 	GroupByClass    = "class"
 	GroupByHouse    = "house"
@@ -51,8 +56,11 @@ const EnergyMeterClass = "energy_meter"
 // Series is one line/bar in a SeriesResponse: a labelled, location/class-tagged
 // set of per-bucket arrays (all of length len(buckets)) plus window totals.
 type Series struct {
-	Key      string `json:"key"`
-	Label    string `json:"label"`
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	// Room is the floorplan room id; Location is its deprecated spelling, emitted
+	// alongside it for one release with the same value.
+	Room     string `json:"room,omitempty"`
 	Location string `json:"location,omitempty"`
 	Class    string `json:"class,omitempty"`
 
@@ -237,7 +245,8 @@ func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 // Grouping rules (PLAN §A):
 //   - device (default): one series per metered device, EXCLUDING the energy
 //     meter. key=id, label=DisplayName, location/class carried through.
-//   - location: device kWh/cost/avgW summed per Location (meter excluded).
+//   - room: device kWh/cost/avgW summed per room (meter excluded). `location` is
+//     a deprecated alias for it.
 //   - class: summed per Class (meter excluded).
 //   - house: THREE series — "monitored" = sum of ALL non-meter devices;
 //     "unmonitored" = clamp(meter − monitored) per bucket; "meter" = the energy
@@ -264,8 +273,8 @@ func AssembleSeries(
 	get := paddedGetter(len(buckets))
 
 	switch groupBy {
-	case GroupByLocation:
-		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Location })
+	case GroupByRoom, GroupByLocation:
+		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Place() })
 	case GroupByClass:
 		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Class })
 	case GroupByHouse:
@@ -314,7 +323,7 @@ func assembleByDevice(
 		if label == "" {
 			label = id
 		}
-		s := buildSeries(id, label, d.Location, d.Class, buckets,
+		s := buildSeries(id, label, d.Place(), d.Class, buckets,
 			[][]float64{get(energyByDevice, id)},
 			[][]float64{get(powerByDevice, id)},
 			tariff)
@@ -426,7 +435,7 @@ func houseParts(
 	}
 	if meterID != "" {
 		d := devices[meterID]
-		s := buildSeries(houseMeterKey, houseMeterKey, d.Location, d.Class, buckets,
+		s := buildSeries(houseMeterKey, houseMeterKey, d.Place(), d.Class, buckets,
 			[][]float64{get(energyByDevice, meterID)},
 			[][]float64{get(powerByDevice, meterID)},
 			tariff)
@@ -643,12 +652,14 @@ func MeterID(devices map[string]config.DeviceConfig) (string, bool) {
 // buildSeries sums member energy/power slices bucket-wise, derives cost, rounds
 // every value, and computes totals. All member slices are assumed to be length
 // len(buckets).
-func buildSeries(key, label, location, class string, buckets []time.Time, energy, power [][]float64, tariff config.Tariff) Series {
+func buildSeries(key, label, place, class string, buckets []time.Time, energy, power [][]float64, tariff config.Tariff) Series {
 	n := len(buckets)
 	s := Series{
-		Key:      key,
-		Label:    label,
-		Location: location,
+		Key:   key,
+		Label: label,
+		// Both spellings carry the same value during the alias period.
+		Room:     place,
+		Location: place,
 		Class:    class,
 		KWh:      make([]float64, n),
 		Cost:     make([]float64, n),
