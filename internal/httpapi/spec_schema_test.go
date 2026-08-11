@@ -51,15 +51,28 @@ func TestDeviceCatalogRequiredFieldsMatchTheResponse(t *testing.T) {
 			t.Errorf("spec omits %q from required, but every response carries it", field)
 		}
 	}
-	// The field the migration introduces must be required; the one it retires must
-	// only be required while the handler still sends it.
-	_, sendsRoom := resp.Devices[0]["room"]
-	_, sendsLocation := resp.Devices[0]["location"]
-
-	if sendsRoom && !strings.Contains(required, "room") {
-		t.Error("the response carries `room` but the spec does not require it")
+	// Presence of the key is not enough: `location` has no omitempty, so it marshals
+	// even when the handler has stopped populating it. A required field must be one
+	// the response actually carries a value for.
+	carries := func(field string) bool {
+		raw, ok := resp.Devices[0][field]
+		if !ok {
+			return false
+		}
+		var v string
+		if err := json.Unmarshal(raw, &v); err != nil {
+			return true // non-string fields are carried by definition
+		}
+		return v != ""
 	}
-	if !sendsLocation && strings.Contains(required, "location") {
-		t.Error("the spec requires `location` but the response no longer carries it")
+
+	for _, field := range []string{"room", "location"} {
+		inSpec := strings.Contains(required, field)
+		switch {
+		case carries(field) && !inSpec:
+			t.Errorf("the response carries a %q value but the spec does not require it", field)
+		case !carries(field) && inSpec:
+			t.Errorf("the spec requires %q but the response does not carry a value for it", field)
+		}
 	}
 }

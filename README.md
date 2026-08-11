@@ -127,8 +127,13 @@ For one release both spellings work:
 Grouping resolves through one function, so the two spellings cannot drift: a test
 asserts the responses are byte-identical apart from the reported `group_by`.
 
-A device may also declare `covers`. A device sits in a room, but its readings do not
-always describe that room — `central_heating`, `hot_water` and `electricity_meter` each
+A device may also declare `covers`. Under `group_by=room` a device covering the whole
+property is grouped under a **`house`** key rather than the room it sits in — putting
+whole-property consumption in one room would be the same conflation under a new name,
+and dropping it would break the guarantee that the grouped parts plus `unmonitored`
+sum to the meter.
+
+A device sits in a room, but its readings do not always describe that room — `central_heating`, `hot_water` and `electricity_meter` each
 sit in one room while metering the whole property. `location` used to record sometimes
 one fact and sometimes the other; `room` and `covers` record them separately.
 

@@ -3,32 +3,32 @@
   "devices": [
     {
       "class": "continuous_power_device",
-      "cost": 0.658,
+      "cost": 0.011,
       "device_id": "winefridge",
       "display_name": "Wine Fridge",
-      "kwh": 3,
+      "kwh": 0.05,
       "location": "groundfloor.kitchen",
       "room": "groundfloor.kitchen"
     },
     {
       "class": "ups_sensor",
-      "cost": 0.329,
+      "cost": 21.9345,
       "device_id": "network-ups",
       "display_name": "Network UPS",
-      "kwh": 1.5,
+      "kwh": 100,
       "location": "basement.network-cabinet",
       "room": "basement.network-cabinet"
     }
   ],
-  "energy_cost": 0.9871,
+  "energy_cost": 21.9455,
   "reconciliation": {
-    "coverage": 0.45,
-    "meter_kwh": 10,
+    "coverage": 0,
+    "meter_kwh": 0,
     "meter_present": true,
-    "monitored_kwh": 4.5,
-    "unmonitored_kwh": 5.5
+    "monitored_kwh": 100.05,
+    "unmonitored_kwh": -100.05
   },
   "standing_charge": 0.3243,
-  "total": 1.3113,
+  "total": 22.2697,
   "window": "today"
 }

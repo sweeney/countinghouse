@@ -25,6 +25,17 @@ const (
 
 // house series keys.
 const (
+	// houseCoverageKey is the room-grouping key for devices whose readings describe
+	// the whole property rather than the room they sit in.
+	//
+	// They need a key of their own. Dropping them breaks the partition that
+	// withUnmonitoredCatchAll documents — houseParts counts every metered device in
+	// `monitored` regardless of place, so a dropped device inflates `monitored` while
+	// appearing in no series, and the parts stop summing to the meter. Attributing
+	// them to the room they sit in instead would be the conflation this migration
+	// removes, relocated from `location` to `room`.
+	houseCoverageKey = "house"
+
 	houseMonitoredKey   = "monitored"
 	houseMeterKey       = "meter"
 	houseUnmonitoredKey = "unmonitored"
@@ -274,7 +285,15 @@ func AssembleSeries(
 
 	switch groupBy {
 	case GroupByRoom, GroupByLocation:
-		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Place() })
+		// Coverage is consulted before place so that a legacy `location: house` and a
+		// migrated `room` + `covers: house` group identically: republishing the
+		// namespace must not move energy between series.
+		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string {
+			if d.CoversWholeSite() {
+				return houseCoverageKey
+			}
+			return d.Place()
+		})
 	case GroupByClass:
 		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Class })
 	case GroupByHouse:

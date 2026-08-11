@@ -25,7 +25,12 @@ func TestGoldenDeprecatedAliasResponses(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, _ := dataSetup(t)
+			// seriesSetup, not dataSetup: dataSetup's fake keys on single-device flux
+			// substrings, so the multi-device series queries demuxed to nothing and
+			// every snapshot was all zeros — pinning shape but not one computed value.
+			s := seriesSetup(t,
+				map[string]float64{"winefridge": 0.05, "network-ups": 0.02},
+				map[string]float64{"winefridge": 52.0, "network-ups": 100.0})
 			s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
 
 			got := doGET(t, s, tc.path).Body.Bytes()

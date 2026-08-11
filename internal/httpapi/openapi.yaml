@@ -743,7 +743,7 @@ components:
       properties:
         key:
           type: string
-          description: Series identity (device id, location, class, or "monitored"/"unmonitored"/"meter").
+          description: Series identity (device id, room id, class, or "monitored"/"unmonitored"/"meter").
         label:
           type: string
         room:
@@ -837,7 +837,7 @@ components:
       properties:
         key:
           type: string
-          description: Series identity (device id, location, class, or "monitored"/"unmonitored"/"meter").
+          description: Series identity (device id, room id, class, or "monitored"/"unmonitored"/"meter").
         label:
           type: string
         room:
