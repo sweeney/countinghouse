@@ -71,6 +71,13 @@ type Server struct {
 	// tagged deploy.
 	Version string
 
+	// SiteID and DevicesNamespace are the resolved site config, reported on
+	// /healthz so an operator can see which property this instance believes it
+	// serves rather than inferring it from whether the numbers look plausible.
+	// Both empty on an instance predating the per-site split, which is not a fault.
+	SiteID           string
+	DevicesNamespace string
+
 	// Bucket is the Influx bucket the data handlers query (e.g. "statehouse").
 	// main.go sets it from config.
 	Bucket string
@@ -210,6 +217,15 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// siteHealth is the resolved site config as reported by /healthz. It is the answer to
+// "which property is this instance serving, and where is it reading that property's
+// devices from" — a question that was previously only answerable by reading the host's
+// config file, or by noticing the numbers were wrong.
+type siteHealth struct {
+	ID               string `json:"id,omitempty"`
+	DevicesNamespace string `json:"devices_namespace,omitempty"`
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	type health struct {
 		Status          string                            `json:"status"`
@@ -218,6 +234,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		StartedAgo      int                               `json:"started_ago"`
 		Goroutines      int                               `json:"goroutines"`
 		InfluxReachable bool                              `json:"influx_reachable"`
+		Site            *siteHealth                       `json:"site,omitempty"`
 		RemoteConfig    map[string]config.NamespaceStatus `json:"remote_config,omitempty"`
 	}
 	h := health{
@@ -225,6 +242,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		StartedAt:  s.started,
 		StartedAgo: int((time.Since(s.started) + 500*time.Millisecond) / time.Second),
 		Goroutines: runtime.NumGoroutine(),
+	}
+	if s.SiteID != "" || s.DevicesNamespace != "" {
+		h.Site = &siteHealth{ID: s.SiteID, DevicesNamespace: s.DevicesNamespace}
 	}
 	if s.Influx != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)

@@ -1123,12 +1123,31 @@ components:
           type: integer
         influx_reachable:
           type: boolean
+        site:
+          type: object
+          description: >-
+            The site config this instance resolved: which property it serves and
+            where it reads that property's devices from. Omitted on an instance
+            that predates the per-site split, which is not a fault.
+          properties:
+            id:
+              type: string
+              example: home
+            devices_namespace:
+              type: string
+              example: devices_home
         remote_config:
           type: object
           description: >-
-            Per-namespace status of the most recent remote-config fetch, keyed
-            by namespace (statehouse_devices, energy_tariffs). Omitted when no
-            remote-config fetcher is wired.
+            Per-namespace status of the most recent remote-config fetch, keyed by
+            the namespace actually read. The devices key follows
+            site.devices_namespace — `statehouse_devices` by default,
+            `devices_home` once a site names one — so a monitor keyed on a literal
+            `remote_config.statehouse_devices` stops matching when a site migrates,
+            and a missing key reads as healthy in most check expressions. Alert on
+            the top-level `status` field instead, which degrades regardless of the
+            key. `energy_tariffs` is fixed. Omitted when no remote-config fetcher
+            is wired.
           additionalProperties:
             type: object
             properties:

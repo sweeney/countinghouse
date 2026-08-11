@@ -137,6 +137,26 @@ one fact and sometimes the other; `room` and `covers` record them separately.
 Countinghouse reads whichever the devices namespace carries. A namespace still declaring
 `location` keeps working untouched.
 
+## Sites
+
+The devices namespace is named by config, so a site reads its own:
+
+```yaml
+site:
+  id: home
+  devices_namespace: devices_home
+```
+
+It defaults to `statehouse_devices` — the shared namespace every service read before
+devices were split per site — so an unedited config keeps reading what it always read.
+
+Both keys are given explicitly. `devices_namespace` is deliberately *not* derived from
+`id`: a namespace is a document that either exists or does not, and guessing its name
+from the site id would turn a typo in `id` into a silent fetch of nothing rather than a
+startup complaint. Setting `id` without `devices_namespace` is therefore logged as a
+warning at startup, and the resolved pair is reported on `/healthz` so which site an
+instance believes it serves is observable rather than inferred from behaviour.
+
 ## Configuration
 
 Local bootstrap YAML (default `/etc/countinghouse/config.yaml`; see `config/config.example.yaml`),
@@ -152,8 +172,13 @@ house:   { timezone: "Europe/London" }
 
 - **Influx** read token must be scoped (read-only) to the bucket statehouse writes.
 - **`identity.client_id`/`client_secret`** are used only to fetch the remote config namespaces
-  (`statehouse_devices`, `energy_tariffs`) via `client_credentials`. Fetches are fail-open and
-  reload on `SIGHUP`.
+  (the devices namespace named by `site.devices_namespace`, and `energy_tariffs`) via
+  `client_credentials`. Fetches are fail-open and reload on `SIGHUP`.
+- **`/healthz.remote_config`** is keyed by the namespace actually read, so the devices
+  entry is named by `site.devices_namespace` — `statehouse_devices` by default,
+  `devices_home` once a site names one. A monitor keyed on a literal
+  `remote_config.statehouse_devices` therefore stops matching when a site migrates, and
+  in most check expressions a missing key reads as healthy rather than as an error.
 
 ## Run locally
 

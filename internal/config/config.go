@@ -13,11 +13,66 @@ import (
 // configuration here. Device inventory and tariffs come from the remote
 // config service (a later milestone).
 type Config struct {
+	Site         SiteConfig         `yaml:"site"`
 	HTTP         HTTPConfig         `yaml:"http"`
 	Influx       InfluxConfig       `yaml:"influx"`
 	Identity     IdentityConfig     `yaml:"identity"`
 	RemoteConfig RemoteConfigConfig `yaml:"remote_config"`
 	House        HouseConfig        `yaml:"house"`
+
+	// warnings are config states that are legal but probably not what the operator
+	// meant. Collected during Load, before defaults are filled in, because filling
+	// them in is what makes the mistake invisible.
+	warnings []string
+}
+
+// Warnings returns the suspicious-but-legal config states found during Load, for the
+// caller to log at startup.
+//
+// They are warnings rather than errors on purpose: every one of them describes a
+// config that runs correctly for the single site deployed today, and refusing to start
+// would turn a second site's paperwork into an outage of the first.
+func (c Config) Warnings() []string { return c.warnings }
+
+// SiteConfig identifies the property this instance serves and where that property's
+// configuration lives.
+//
+// It is a block rather than a bare id so adding a second property is a config edit
+// rather than a code change: each site names its own devices namespace, which is what
+// makes the namespaces per-site rather than one shared document.
+type SiteConfig struct {
+	// ID matches an entry in the `sites` namespace.
+	ID string `yaml:"id"`
+
+	// DevicesNamespace is the config namespace holding this site's devices.
+	// Defaults to the shared pre-migration namespace, so a config that predates the
+	// per-site split keeps reading exactly what it always read.
+	DevicesNamespace string `yaml:"devices_namespace"`
+}
+
+// DefaultDevicesNamespace is the single shared namespace every service read before
+// devices were split per site.
+const DefaultDevicesNamespace = "statehouse_devices"
+
+// UnmarshalYAML accepts either the block form or a bare id:
+//
+//	site: home
+//	site:
+//	  id: home
+//	  devices_namespace: devices_home
+func (s *SiteConfig) UnmarshalYAML(unmarshal func(any) error) error {
+	var id string
+	if err := unmarshal(&id); err == nil {
+		s.ID = id
+		return nil
+	}
+	type raw SiteConfig
+	var r raw
+	if err := unmarshal(&r); err != nil {
+		return err
+	}
+	*s = SiteConfig(r)
+	return nil
 }
 
 // HTTPConfig describes the HTTP listener.
@@ -111,7 +166,35 @@ func Load(path string) (Config, error) {
 			return cfg, fmt.Errorf("parse house.timezone %q: %w", cfg.House.Timezone, err)
 		}
 	}
+	cfg.warnings = siteWarnings(cfg.Site)
+	if cfg.Site.DevicesNamespace == "" {
+		cfg.Site.DevicesNamespace = DefaultDevicesNamespace
+	}
 	return cfg, nil
+}
+
+// siteWarnings reports a half-filled site block. Must run before the default is
+// applied: afterwards "defaulted" and "explicitly set to the shared namespace" are the
+// same value, and the distinction is the whole point.
+//
+// The namespace is deliberately not derived from the id. A namespace is a document
+// that either exists or does not, so guessing `devices_<id>` would convert a typo in
+// `id` into a successful fetch of nothing — fail-open, an empty snapshot, and every
+// endpoint reporting zero devices — rather than into this complaint. Two facts, stated
+// twice, checked against each other.
+func siteWarnings(s SiteConfig) []string {
+	switch {
+	case s.ID != "" && s.DevicesNamespace == "":
+		return []string{fmt.Sprintf(
+			"site %q names no devices_namespace, so it reads the shared %s; "+
+				"if this instance serves its own property, name its namespace explicitly",
+			s.ID, DefaultDevicesNamespace)}
+	case s.ID == "" && s.DevicesNamespace != "":
+		return []string{fmt.Sprintf(
+			"devices_namespace %q is set but the site has no id, so this instance "+
+				"cannot report which property it serves", s.DevicesNamespace)}
+	}
+	return nil
 }
 
 func trimTrailingNewline(b []byte) []byte {
