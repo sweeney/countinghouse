@@ -33,7 +33,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 |---|---|
 | `GET /healthz` | Health: aggregated `status` (`ok` / `degraded` = a remote-config fetch failing / `unavailable` = Influx unreachable), version, uptime, Influx reachability, remote-config status. Always HTTP 200. Public. |
 | `GET /openapi.json` | This API as JSON (served from `internal/httpapi/openapi.yaml`). Public. |
-| `GET /devices` | Device catalog (id, display_name, room, class, `capabilities`: `energy`/`events`). Includes a synthetic `unmonitored` (rest-of-home) energy device when a whole-house meter is configured. |
+| `GET /devices` | Device catalog (id, display_name, room, `covers`, class, `capabilities`: `energy`/`events`). Includes a synthetic `unmonitored` (rest-of-home) energy device when a whole-house meter is configured. |
 | `GET /devices/{id}/energy?window=&from=&to=` | Windowed kWh for one device (`source`: counter/integral). |
 | `GET /devices/{id}/cost?window=…` | Windowed kWh + VAT-inclusive cost at the effective tariff. |
 | `GET /devices/{id}/series?window=&interval=&shape=` | Single-device time-series (kWh / cost / avg W per bucket). Reserved id `unmonitored` serves the rest-of-home series in the same shape (404 when no meter is configured). |

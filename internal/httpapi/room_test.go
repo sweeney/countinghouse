@@ -207,3 +207,42 @@ func TestDevicesCatalogFallsBackToLegacyLocation(t *testing.T) {
 		t.Errorf("a location-only namespace must still populate room: %s", w.Body.String())
 	}
 }
+
+// A whole-property device has no room, and saying so with an empty string loses the
+// reason. The catalog and the bill therefore carry `covers`, so a consumer can tell
+// "no room known" from "not attributable to a room" — the same two-facts-two-fields
+// split the rest of this migration applies.
+func TestCatalogReportsCoverageForWholePropertyDevices(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: map[string]config.DeviceConfig{
+		"immersion": {Class: "cycle_power_device", DisplayName: "Immersion", Location: "house"},
+		"fridge":    {Class: "continuous_power_device", DisplayName: "Fridge", Room: "groundfloor.kitchen"},
+	}, tariffs: testTariffs()}
+
+	var resp struct {
+		Devices []struct {
+			ID     string `json:"id"`
+			Room   string `json:"room"`
+			Covers string `json:"covers"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(doGET(t, s, "/devices").Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, d := range resp.Devices {
+		switch d.ID {
+		case "immersion":
+			if d.Covers != "house" {
+				t.Errorf("immersion covers = %q, want house", d.Covers)
+			}
+		case "fridge":
+			if d.Covers != "" {
+				t.Errorf("fridge covers = %q, want empty", d.Covers)
+			}
+			if d.Room != "groundfloor.kitchen" {
+				t.Errorf("fridge room = %q", d.Room)
+			}
+		}
+	}
+}

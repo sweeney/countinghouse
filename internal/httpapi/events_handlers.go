@@ -269,8 +269,11 @@ type catalogEntry struct {
 	DisplayName string `json:"display_name"`
 	// Room is the floorplan room id; Location is its deprecated spelling, emitted
 	// alongside it for one release with the same value.
-	Room         string   `json:"room"`
-	Location     string   `json:"location"`
+	Room     string `json:"room"`
+	Location string `json:"location"`
+	// Covers is set when the device's readings describe the whole property rather
+	// than the room it sits in, which is why its room may legitimately be empty.
+	Covers       string   `json:"covers,omitempty"`
 	Class        string   `json:"class"`
 	Capabilities []string `json:"capabilities"`
 }
@@ -304,6 +307,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, _ *http.Request) {
 			DisplayName:  dev.DisplayName,
 			Room:         dev.Place(),
 			Location:     dev.Place(),
+			Covers:       coverageOf(dev),
 			Class:        dev.Class,
 			Capabilities: caps,
 		})
@@ -326,4 +330,13 @@ func (s *Server) handleDevices(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"devices": out})
+}
+
+// coverageOf reports what a device's readings describe when that is not its own room,
+// resolving the legacy `location: house` spelling alongside an explicit `covers`.
+func coverageOf(d config.DeviceConfig) string {
+	if d.CoversWholeSite() {
+		return config.CoverageHouse
+	}
+	return ""
 }
