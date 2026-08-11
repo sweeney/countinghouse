@@ -120,13 +120,9 @@ are `<floor>.<slug>`: `groundfloor.kitchen`, `basement.network-cabinet`.
 The deprecated `location` spelling has been removed: `group_by=location` and the
 `location` response field are both gone. Use `group_by=room` and `room`.
 
-**One exception, and it does not wait for the deprecation window.** A device whose
-readings describe the whole property — the electricity meter, central heating, hot
-water — has no room, so `room` and `location` are both empty for it where `location`
-previously said `"house"`. `"house"` was never a room, and the fact has moved to
-`covers`. A consumer still reading `location` and deferring its migration therefore
-loses these devices' place immediately: to keep them it must read `covers` now, not in
-a release's time. Every other device is unaffected.
+**Whole-property devices have no room.** The electricity meter, central heating and
+hot water report an empty `room` and `covers: "house"` — on `/devices` and in the
+`/bill` breakdown — so an empty room is legible rather than mysterious.
 
 A device may also declare `covers`. Under `group_by=room` a device covering the whole
 property is grouped under a **`house`** key rather than the room it sits in — putting

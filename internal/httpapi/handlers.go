@@ -224,7 +224,7 @@ func validGroupBy(g string) bool {
 }
 
 // handleSeries serves GET /series: a multi-series, columnar energy time-series
-// grouped by device (default), location, class, or house.
+// grouped by device (default), room, class, or house.
 func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	groupBy := r.URL.Query().Get("group_by")
 	if groupBy == "" {
@@ -424,6 +424,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 			DeviceID:    id,
 			DisplayName: dev.DisplayName,
 			Room:        dev.Place(),
+			Covers:      coverageOf(dev),
 			Class:       dev.Class,
 		})
 	}

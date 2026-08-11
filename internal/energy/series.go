@@ -51,7 +51,7 @@ const (
 // EnergyMeterClass is the device class of the whole-house electricity meter. It
 // is metered via the counter path like a plug, but it is the AUTHORITATIVE
 // whole-house total, not one of the monitored devices — so it is EXCLUDED from
-// device/location/class groupings and surfaced separately only under group_by=house.
+// device/room/class groupings and surfaced separately only under group_by=house.
 //
 // It is the single source of truth for the meter class name, shared by the
 // energy package (grouping + routing) and the httpapi /bill handler (meter
@@ -90,7 +90,7 @@ type SeriesResponse struct {
 
 	// House decomposition confidence signals, populated only for group_by=house
 	// when a meter is configured (omitted otherwise — they are meaningless for
-	// device/location/class groupings). See HouseStats.
+	// device/room/class groupings). See HouseStats.
 	HouseStats
 
 	Buckets []time.Time `json:"buckets"`
@@ -248,14 +248,14 @@ func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 //
 // Grouping rules (PLAN §A):
 //   - device (default): one series per metered device, EXCLUDING the energy
-//     meter. key=id, label=DisplayName, location/class carried through.
+//     meter. key=id, label=DisplayName, room/class carried through.
 //   - room: device kWh/cost/avgW summed per room (meter excluded).
 //   - class: summed per Class (meter excluded).
 //   - house: THREE series — "monitored" = sum of ALL non-meter devices;
 //     "unmonitored" = clamp(meter − monitored) per bucket; "meter" = the energy
 //     meter's own series (unmonitored/meter present only when a meter exists).
 //
-// The device/location/class unmonitored catch-all (R2) is applied by BuildSeries
+// The device/room/class unmonitored catch-all (R2) is applied by BuildSeries
 // AFTER this assembly, not here.
 //
 // Cost is derived per bucket as kWh × UnitRate × VAT multiplier. For real-device
@@ -456,7 +456,7 @@ func houseParts(
 }
 
 // withUnmonitoredCatchAll appends the single "unmonitored" catch-all series to a
-// device/location/class grouping (R2): clamp(meter − monitored) per bucket — the
+// device/room/class grouping (R2): clamp(meter − monitored) per bucket — the
 // SAME quantity as the house "unmonitored" series, since the grouped series
 // partition exactly the monitored devices. It is never subdivided: exactly one
 // series regardless of grouping (N1), so a stacked chart of the grouping plus

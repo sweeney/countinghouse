@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sweeney/countinghouse/internal/config"
+	"github.com/sweeney/countinghouse/internal/energy"
 )
 
 // The floorplan migration renames the read-side vocabulary: `location` conflated a
@@ -246,5 +247,57 @@ func TestBillBreakdownIsOrderedByDeviceID(t *testing.T) {
 			t.Fatalf("breakdown order varies between requests: %v then %v", previous, ids)
 		}
 		previous = ids
+	}
+}
+
+// The removal is the point of this change, and nothing asserted it: the only two
+// places the spelling appeared were deleted with it, and TestSeries_BadGroupBy only
+// tries a nonsense value. Re-adding GroupByLocation to validGroupBy would have left
+// the whole suite green.
+func TestGroupByLocationIsRejected(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
+
+	w := doGET(t, s, "/series?window=today&group_by=location")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// /devices gained `covers` so an empty room is legible. The bill is billed per device
+// and the whole-property devices are metered classes, so they appear in the breakdown
+// with room "" — and without covers there is nothing to distinguish "no room
+// configured" from "meters the whole property".
+func TestBillBreakdownCarriesCoverage(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: map[string]config.DeviceConfig{
+		"immersion":         {Class: "cycle_power_device", DisplayName: "Immersion", Location: "house"},
+		"winefridge":        {Class: "continuous_power_device", DisplayName: "Wine Fridge", Room: "groundfloor.kitchen"},
+		"electricity_meter": {Class: energy.EnergyMeterClass, DisplayName: "Meter", Room: "basement.hallway"},
+	}, tariffs: testTariffs()}
+
+	var resp struct {
+		Devices []struct {
+			DeviceID string `json:"device_id"`
+			Room     string `json:"room"`
+			Covers   string `json:"covers"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(doGET(t, s, "/bill?window=today").Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	var seen bool
+	for _, d := range resp.Devices {
+		if d.DeviceID != "immersion" {
+			continue
+		}
+		seen = true
+		if d.Covers != "house" {
+			t.Errorf("immersion covers = %q, want house — an empty room is otherwise unexplained", d.Covers)
+		}
+	}
+	if !seen {
+		t.Fatal("immersion missing from the breakdown")
 	}
 }

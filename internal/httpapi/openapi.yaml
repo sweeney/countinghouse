@@ -6,7 +6,7 @@ info:
     windowed kWh and cost. All endpoints except /healthz and /openapi.json
     require a Bearer JWT (user or service token) issued by the configured
     identity service.
-  version: "0.1.0"
+  version: "0.2.0"
   contact:
     name: Martin Sweeney
     email: martin@sweeney.io
@@ -652,7 +652,14 @@ components:
           type: string
         room:
           type: string
-          description: Floorplan room id.
+          description: >
+            Floorplan room id. Empty for a device whose readings describe the whole
+            property rather than a room; see covers.
+        covers:
+          type: string
+          description: >
+            Set when the device's readings describe the whole property rather than the
+            room it sits in, which is why its room may be empty.
         class:
           type: string
         kwh:
@@ -734,7 +741,7 @@ components:
     Series:
       type: object
       description: >
-        One line/bar: a labelled, location/class-tagged set of per-bucket arrays
+        One line/bar: a labelled, room/class-tagged set of per-bucket arrays
         (each of length len(buckets)) plus window totals.
       properties:
         key:
