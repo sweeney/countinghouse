@@ -1089,7 +1089,7 @@ components:
             type: string
             enum: [energy, events]
           description: Derived capability hints ("energy" for metered classes, "events" for event-bearing classes — binary_state_device, fire_alarm).
-      required: [id, display_name, location, class, capabilities]
+      required: [id, display_name, room, location, class, capabilities]
 
     DevicesCatalog:
       type: object
