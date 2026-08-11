@@ -14,13 +14,9 @@ import (
 const (
 	GroupByDevice = "device"
 	// GroupByRoom groups by floorplan room id.
-	GroupByRoom = "room"
-	// GroupByLocation is the deprecated spelling of GroupByRoom, kept for one
-	// release so consumers migrate independently. Both produce identical numbers;
-	// only the reported group_by differs.
-	GroupByLocation = "location"
-	GroupByClass    = "class"
-	GroupByHouse    = "house"
+	GroupByRoom  = "room"
+	GroupByClass = "class"
+	GroupByHouse = "house"
 )
 
 // house series keys.
@@ -55,7 +51,7 @@ const (
 // EnergyMeterClass is the device class of the whole-house electricity meter. It
 // is metered via the counter path like a plug, but it is the AUTHORITATIVE
 // whole-house total, not one of the monitored devices — so it is EXCLUDED from
-// device/location/class groupings and surfaced separately only under group_by=house.
+// device/room/class groupings and surfaced separately only under group_by=house.
 //
 // It is the single source of truth for the meter class name, shared by the
 // energy package (grouping + routing) and the httpapi /bill handler (meter
@@ -64,16 +60,13 @@ const (
 // device table's "electricity_meter" is descriptive prose, not the class tag.
 const EnergyMeterClass = "energy_meter"
 
-// Series is one line/bar in a SeriesResponse: a labelled, location/class-tagged
+// Series is one line/bar in a SeriesResponse: a labelled, room/class-tagged
 // set of per-bucket arrays (all of length len(buckets)) plus window totals.
 type Series struct {
 	Key   string `json:"key"`
 	Label string `json:"label"`
-	// Room is the floorplan room id; Location is its deprecated spelling, emitted
-	// alongside it for one release with the same value.
-	Room     string `json:"room,omitempty"`
-	Location string `json:"location,omitempty"`
-	Class    string `json:"class,omitempty"`
+	Room  string `json:"room,omitempty"`
+	Class string `json:"class,omitempty"`
 
 	KWh  []float64 `json:"kwh"`
 	Cost []float64 `json:"cost"`
@@ -97,7 +90,7 @@ type SeriesResponse struct {
 
 	// House decomposition confidence signals, populated only for group_by=house
 	// when a meter is configured (omitted otherwise — they are meaningless for
-	// device/location/class groupings). See HouseStats.
+	// device/room/class groupings). See HouseStats.
 	HouseStats
 
 	Buckets []time.Time `json:"buckets"`
@@ -255,15 +248,14 @@ func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 //
 // Grouping rules (PLAN §A):
 //   - device (default): one series per metered device, EXCLUDING the energy
-//     meter. key=id, label=DisplayName, location/class carried through.
-//   - room: device kWh/cost/avgW summed per room (meter excluded). `location` is
-//     a deprecated alias for it.
+//     meter. key=id, label=DisplayName, room/class carried through.
+//   - room: device kWh/cost/avgW summed per room (meter excluded).
 //   - class: summed per Class (meter excluded).
 //   - house: THREE series — "monitored" = sum of ALL non-meter devices;
 //     "unmonitored" = clamp(meter − monitored) per bucket; "meter" = the energy
 //     meter's own series (unmonitored/meter present only when a meter exists).
 //
-// The device/location/class unmonitored catch-all (R2) is applied by BuildSeries
+// The device/room/class unmonitored catch-all (R2) is applied by BuildSeries
 // AFTER this assembly, not here.
 //
 // Cost is derived per bucket as kWh × UnitRate × VAT multiplier. For real-device
@@ -284,7 +276,7 @@ func AssembleSeries(
 	get := paddedGetter(len(buckets))
 
 	switch groupBy {
-	case GroupByRoom, GroupByLocation:
+	case GroupByRoom:
 		// Coverage is consulted before place so that a legacy `location: house` and a
 		// migrated `room` + `covers: house` group identically: republishing the
 		// namespace must not move energy between series.
@@ -425,7 +417,7 @@ func assembleHouse(
 // houseParts builds the two parents of the house decomposition: "monitored" (sum
 // of all metered non-meter devices) and "meter" (the energy meter's own series).
 // Either is nil when it has no members (no monitored devices / no meter). Shared
-// by the house grouping and the device/location/class unmonitored catch-all (R2),
+// by the house grouping and the device/room/class unmonitored catch-all (R2),
 // so "unmonitored" means the identical quantity in both.
 func houseParts(
 	buckets []time.Time,
@@ -464,7 +456,7 @@ func houseParts(
 }
 
 // withUnmonitoredCatchAll appends the single "unmonitored" catch-all series to a
-// device/location/class grouping (R2): clamp(meter − monitored) per bucket — the
+// device/room/class grouping (R2): clamp(meter − monitored) per bucket — the
 // SAME quantity as the house "unmonitored" series, since the grouped series
 // partition exactly the monitored devices. It is never subdivided: exactly one
 // series regardless of grouping (N1), so a stacked chart of the grouping plus
@@ -676,13 +668,11 @@ func buildSeries(key, label, place, class string, buckets []time.Time, energy, p
 	s := Series{
 		Key:   key,
 		Label: label,
-		// Both spellings carry the same value during the alias period.
-		Room:     place,
-		Location: place,
-		Class:    class,
-		KWh:      make([]float64, n),
-		Cost:     make([]float64, n),
-		AvgW:     make([]float64, n),
+		Room:  place,
+		Class: class,
+		KWh:   make([]float64, n),
+		Cost:  make([]float64, n),
+		AvgW:  make([]float64, n),
 	}
 	mult := tariff.Multiplier()
 	for i := 0; i < n; i++ {
@@ -807,7 +797,7 @@ func BuildSeries(
 
 	series := AssembleSeries(buckets, hrs, devices, energyByDevice, powerByDevice, tariff, groupBy)
 
-	// R2: opt the single unmonitored catch-all into a device/location/class
+	// R2: opt the single unmonitored catch-all into a device/room/class
 	// grouping so the parts sum to the whole house. group_by=house already carries
 	// it, so the flag is a no-op there (and on any future grouping it is ignored
 	// rather than double-adding).

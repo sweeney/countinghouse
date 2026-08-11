@@ -10,15 +10,13 @@ import (
 
 var updateGolden = flag.Bool("update-golden", false, "rewrite the golden alias snapshots")
 
-// PLAN.md §11.5: the deprecated `location` spelling is a promise, and a promise needs
-// enforcing rather than documenting. Removing the alias must fail these tests until
-// they are deliberately regenerated with -update-golden.
+// These snapshots pinned the deprecated `location` spelling until it was removed in
+// step 11. The alias case was deleted deliberately, and its golden file with it.
 func TestGoldenDeprecatedAliasResponses(t *testing.T) {
 	cases := []struct {
 		name string
 		path string
 	}{
-		{"group-by-location", "/series?window=today&interval=1h&group_by=location"},
 		{"group-by-room", "/series?window=today&interval=1h&group_by=room"},
 		{"bill-breakdown", "/bill?window=today"},
 	}

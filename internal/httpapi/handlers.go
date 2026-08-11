@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"runtime"
+	"sort"
 	"strconv"
 	"time"
 
@@ -215,7 +216,7 @@ func (s *Server) recordDrift(win energy.Window, d energy.DriftStats) {
 // validGroupBy reports whether g is an accepted group_by mode.
 func validGroupBy(g string) bool {
 	switch g {
-	case energy.GroupByDevice, energy.GroupByRoom, energy.GroupByLocation, energy.GroupByClass, energy.GroupByHouse:
+	case energy.GroupByDevice, energy.GroupByRoom, energy.GroupByClass, energy.GroupByHouse:
 		return true
 	default:
 		return false
@@ -223,14 +224,14 @@ func validGroupBy(g string) bool {
 }
 
 // handleSeries serves GET /series: a multi-series, columnar energy time-series
-// grouped by device (default), location, class, or house.
+// grouped by device (default), room, class, or house.
 func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	groupBy := r.URL.Query().Get("group_by")
 	if groupBy == "" {
 		groupBy = energy.GroupByDevice
 	}
 	if !validGroupBy(groupBy) {
-		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want one of device, room, class, house; location is a deprecated alias for room)")
+		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want one of device, room, class, house)")
 		return
 	}
 	shape := r.URL.Query().Get("shape")
@@ -423,10 +424,15 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 			DeviceID:    id,
 			DisplayName: dev.DisplayName,
 			Room:        dev.Place(),
-			Location:    dev.Place(),
+			Covers:      coverageOf(dev),
 			Class:       dev.Class,
 		})
 	}
+
+	// Ordered by device id: the map above iterates randomly, so without this the
+	// breakdown came back in a different order on every request — churn for any client
+	// diffing two bills or rendering a table.
+	sort.Slice(billable, func(i, j int) bool { return billable[i].DeviceID < billable[j].DeviceID })
 
 	for i := range billable {
 		dc := &billable[i]

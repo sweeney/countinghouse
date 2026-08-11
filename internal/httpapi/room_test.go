@@ -3,15 +3,18 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/sweeney/countinghouse/internal/config"
+	"github.com/sweeney/countinghouse/internal/energy"
+	"github.com/sweeney/countinghouse/internal/influx"
 )
 
 // The floorplan migration renames the read-side vocabulary: `location` conflated a
 // geographic site with a room, so rooms are now `room`, keyed on floorplan ids of the
-// form <floor>.<slug>. `location` stays as a deprecated alias for one release.
+// form <floor>.<slug>. The deprecated `location` spelling has been removed.
 
 func roomDevices() map[string]config.DeviceConfig {
 	return map[string]config.DeviceConfig{
@@ -62,38 +65,6 @@ func TestSeries_GroupByRoomKeysOnRoomIDs(t *testing.T) {
 	}
 }
 
-// TestGroupByRoomAndLocationAreEquivalent is the alias-period contract: the two
-// spellings return the same numbers, and only the reported group_by differs.
-func TestGroupByRoomAndLocationAreEquivalent(t *testing.T) {
-	s, _ := dataSetup(t)
-	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
-
-	byRoom := doGET(t, s, "/series?window=today&interval=1h&group_by=room")
-	byLocation := doGET(t, s, "/series?window=today&interval=1h&group_by=location")
-	if byRoom.Code != http.StatusOK || byLocation.Code != http.StatusOK {
-		t.Fatalf("codes: room=%d location=%d", byRoom.Code, byLocation.Code)
-	}
-
-	var a, b map[string]any
-	if err := json.Unmarshal(byRoom.Body.Bytes(), &a); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(byLocation.Body.Bytes(), &b); err != nil {
-		t.Fatal(err)
-	}
-	if a["group_by"] != "room" || b["group_by"] != "location" {
-		t.Errorf("group_by: %v and %v", a["group_by"], b["group_by"])
-	}
-	delete(a, "group_by")
-	delete(b, "group_by")
-	ja, _ := json.Marshal(a)
-	jb, _ := json.Marshal(b)
-	if string(ja) != string(jb) {
-		t.Errorf("the alias returns different data\n room: %s\n  loc: %s", ja, jb)
-	}
-}
-
-// The /bill breakdown carries a place per device, and must carry the room id.
 func TestBillBreakdownCarriesRoom(t *testing.T) {
 	s, _ := dataSetup(t)
 	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
@@ -104,9 +75,6 @@ func TestBillBreakdownCarriesRoom(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"room":"groundfloor.kitchen"`) {
 		t.Errorf("bill breakdown has no room id: %s", w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), `"location":"groundfloor.kitchen"`) {
-		t.Errorf("bill breakdown dropped the deprecated alias: %s", w.Body.String())
 	}
 }
 
@@ -189,8 +157,8 @@ func TestDevicesCatalogCarriesRoom(t *testing.T) {
 		if d.Room != "groundfloor.kitchen" {
 			t.Errorf("room = %q, want groundfloor.kitchen", d.Room)
 		}
-		if d.Location != "groundfloor.kitchen" {
-			t.Errorf("deprecated location alias = %q, want the same value", d.Location)
+		if d.Location != "" {
+			t.Errorf("the deprecated location alias is still emitted (%q)", d.Location)
 		}
 	}
 	if !seen {
@@ -198,13 +166,17 @@ func TestDevicesCatalogCarriesRoom(t *testing.T) {
 	}
 }
 
-// A namespace still declaring the free-text location must keep working here too.
+// A namespace still declaring the free-text location must keep populating `room`:
+// the API alias is retired here, the config field is not.
 func TestDevicesCatalogFallsBackToLegacyLocation(t *testing.T) {
 	s, _ := dataSetup(t)
 
 	w := doGET(t, s, "/devices")
 	if !strings.Contains(w.Body.String(), `"room":"kitchen"`) {
 		t.Errorf("a location-only namespace must still populate room: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"location"`) {
+		t.Errorf("the deprecated location alias is still emitted: %s", w.Body.String())
 	}
 }
 
@@ -244,5 +216,123 @@ func TestCatalogReportsCoverageForWholePropertyDevices(t *testing.T) {
 				t.Errorf("fridge room = %q", d.Room)
 			}
 		}
+	}
+}
+
+// billableFixture returns a device set and the matching querier responses, sized so
+// an unsorted breakdown cannot pass by luck.
+//
+// The ids are deliberately not in their sorted order here, and there are nine of
+// them: ranging the map unsorted lands on sorted output with probability 1/9!, about
+// three in a million per request, against 1/2 for the two-billable fixture this test
+// used to run on. A test that a broken implementation passes half the time is not a
+// test. The names are also chosen so sorted order differs from any plausible
+// insertion or grouping order.
+func billableFixture() (map[string]config.DeviceConfig, map[string][]influx.Row) {
+	ids := []string{
+		"winefridge", "boiler-pump", "network-ups", "aquarium", "tumble-dryer",
+		"server-rack", "dehumidifier", "immersion", "car-charger",
+	}
+	devices := make(map[string]config.DeviceConfig, len(ids))
+	responses := make(map[string][]influx.Row, len(ids))
+	for i, id := range ids {
+		devices[id] = config.DeviceConfig{
+			Class:       "continuous_power_device",
+			Room:        "groundfloor.kitchen",
+			DisplayName: id,
+		}
+		// Distinct values so nothing can accidentally order by consumption.
+		responses[`r.device_id == "`+id+`"`] = []influx.Row{{Value: float64(i+1) * 1.5}}
+	}
+	return devices, responses
+}
+
+// The /bill breakdown was built by ranging a map and never sorted, so the device
+// order was different on every request. Clients diffing two bills, or rendering a
+// table, saw spurious churn — and it made the golden snapshot pass locally and fail
+// on CI purely on Go's randomised map iteration.
+func TestBillBreakdownIsOrderedByDeviceID(t *testing.T) {
+	s, q := dataSetup(t)
+	devices, responses := billableFixture()
+	q.Responses = responses
+	s.Config = fakeConfig{devices: devices, tariffs: testTariffs()}
+
+	var previous []string
+	for i := 0; i < 8; i++ {
+		var resp struct {
+			Devices []struct {
+				DeviceID string `json:"device_id"`
+			} `json:"devices"`
+		}
+		if err := json.Unmarshal(doGET(t, s, "/bill?window=today").Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, d := range resp.Devices {
+			ids = append(ids, d.DeviceID)
+		}
+		if len(ids) < 9 {
+			t.Fatalf("fixture no longer produces 9 billable devices, got %d: %v — "+
+				"the assertion below is only meaningful at that width", len(ids), ids)
+		}
+		if !sort.StringsAreSorted(ids) {
+			t.Fatalf("breakdown is not ordered by device id: %v", ids)
+		}
+		if previous != nil && strings.Join(ids, ",") != strings.Join(previous, ",") {
+			t.Fatalf("breakdown order varies between requests: %v then %v", previous, ids)
+		}
+		previous = ids
+	}
+}
+
+// The removal is the point of this change, and nothing asserted it: the only two
+// places the spelling appeared were deleted with it, and TestSeries_BadGroupBy only
+// tries a nonsense value. Re-adding GroupByLocation to validGroupBy would have left
+// the whole suite green.
+func TestGroupByLocationIsRejected(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
+
+	w := doGET(t, s, "/series?window=today&group_by=location")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// /devices gained `covers` so an empty room is legible. The bill is billed per device
+// and the whole-property devices are metered classes, so they appear in the breakdown
+// with room "" — and without covers there is nothing to distinguish "no room
+// configured" from "meters the whole property".
+func TestBillBreakdownCarriesCoverage(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: map[string]config.DeviceConfig{
+		"immersion":         {Class: "cycle_power_device", DisplayName: "Immersion", Location: "house"},
+		"winefridge":        {Class: "continuous_power_device", DisplayName: "Wine Fridge", Room: "groundfloor.kitchen"},
+		"electricity_meter": {Class: energy.EnergyMeterClass, DisplayName: "Meter", Room: "basement.hallway"},
+	}, tariffs: testTariffs()}
+
+	var resp struct {
+		Devices []struct {
+			DeviceID string `json:"device_id"`
+			Room     string `json:"room"`
+			Covers   string `json:"covers"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(doGET(t, s, "/bill?window=today").Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	var seen bool
+	for _, d := range resp.Devices {
+		if d.DeviceID != "immersion" {
+			continue
+		}
+		seen = true
+		if d.Covers != "house" {
+			t.Errorf("immersion covers = %q, want house — an empty room is otherwise unexplained", d.Covers)
+		}
+	}
+	if !seen {
+		t.Fatal("immersion missing from the breakdown")
 	}
 }

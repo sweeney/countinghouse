@@ -4,18 +4,19 @@ import "github.com/sweeney/countinghouse/internal/config"
 
 // DeviceCost is one billable device's energy and money for a window. KWh is the
 // metered energy; Cost is the VAT-inclusive £ cost for that energy at the
-// window's tariff. DisplayName/Location/Class are descriptive passthrough from
+// window's tariff. DisplayName/Room/Class are descriptive passthrough from
 // device config for the /bill breakdown.
 type DeviceCost struct {
 	DeviceID    string `json:"device_id"`
 	DisplayName string `json:"display_name"`
-	// Room is the floorplan room id; Location is its deprecated spelling, emitted
-	// alongside it for one release with the same value.
-	Room     string  `json:"room"`
-	Location string  `json:"location"`
-	Class    string  `json:"class"`
-	KWh      float64 `json:"kwh"`
-	Cost     float64 `json:"cost"`
+	Room        string `json:"room"`
+	// Covers is set when the device's readings describe the whole property rather
+	// than the room it sits in, which is why its room may legitimately be empty.
+	// Without it the bill cannot tell "no room configured" from "meters the house".
+	Covers string  `json:"covers,omitempty"`
+	Class  string  `json:"class"`
+	KWh    float64 `json:"kwh"`
+	Cost   float64 `json:"cost"`
 }
 
 // Reconciliation compares the sum of monitored devices against the whole-house

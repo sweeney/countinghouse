@@ -111,29 +111,18 @@ The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth fo
 and response schemas; a path-coverage test fails CI if routes and spec drift.
 
 
-## Rooms, and the deprecated `location`
+## Rooms
 
 `location` used to mean two different things across these services — a geographic site
 and a room — so rooms are now `room`, sites are `site`, and floors are `floor`. Room ids
 are `<floor>.<slug>`: `groundfloor.kitchen`, `basement.network-cabinet`.
 
-For one release both spellings work:
+The deprecated `location` spelling has been removed: `group_by=location` and the
+`location` response field are both gone. Use `group_by=room` and `room`.
 
-| current | deprecated alias |
-|---|---|
-| `group_by=room` | `group_by=location` |
-| `room` in `/series`, `/devices`, `/bill` | `location`, same value |
-
-Grouping resolves through one function, so the two spellings cannot drift: a test
-asserts the responses are byte-identical apart from the reported `group_by`.
-
-**One exception, and it does not wait for the deprecation window.** A device whose
-readings describe the whole property — the electricity meter, central heating, hot
-water — has no room, so `room` and `location` are both empty for it where `location`
-previously said `"house"`. `"house"` was never a room, and the fact has moved to
-`covers`. A consumer still reading `location` and deferring its migration therefore
-loses these devices' place immediately: to keep them it must read `covers` now, not in
-a release's time. Every other device is unaffected.
+**Whole-property devices have no room.** The electricity meter, central heating and
+hot water report an empty `room` and `covers: "house"` — on `/devices` and in the
+`/bill` breakdown — so an empty room is legible rather than mysterious.
 
 A device may also declare `covers`. Under `group_by=room` a device covering the whole
 property is grouped under a **`house`** key rather than the room it sits in — putting

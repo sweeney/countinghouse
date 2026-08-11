@@ -25,10 +25,10 @@ func sampleColumnar() SeriesResponse {
 		GroupBy: "device", Shape: ShapeColumns,
 		Buckets: []time.Time{t0, t0.Add(time.Hour), t0.Add(2 * time.Hour)},
 		Series: []Series{
-			{Key: "winefridge", Label: "Wine Fridge", Location: "kitchen", Class: "continuous_power_device",
+			{Key: "winefridge", Label: "Wine Fridge", Room: "kitchen", Class: "continuous_power_device",
 				KWh: []float64{0.05, 0, 0.1}, Cost: []float64{0.011, 0, 0.022}, AvgW: []float64{52, 0, 99},
 				TotalKWh: 0.15, TotalCost: 0.033},
-			{Key: "bigfridge", Label: "Kitchen Fridge", Location: "kitchen", Class: "continuous_power_device",
+			{Key: "bigfridge", Label: "Kitchen Fridge", Room: "kitchen", Class: "continuous_power_device",
 				KWh: []float64{0.06, 0.04, 0}, Cost: []float64{0.013, 0.009, 0}, AvgW: []float64{60, 40, 0},
 				TotalKWh: 0.1, TotalCost: 0.022},
 		},

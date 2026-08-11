@@ -2,22 +2,20 @@
   "currency": "GBP",
   "devices": [
     {
-      "class": "continuous_power_device",
-      "cost": 0.011,
-      "device_id": "winefridge",
-      "display_name": "Wine Fridge",
-      "kwh": 0.05,
-      "location": "groundfloor.kitchen",
-      "room": "groundfloor.kitchen"
-    },
-    {
       "class": "ups_sensor",
       "cost": 21.9345,
       "device_id": "network-ups",
       "display_name": "Network UPS",
       "kwh": 100,
-      "location": "basement.network-cabinet",
       "room": "basement.network-cabinet"
+    },
+    {
+      "class": "continuous_power_device",
+      "cost": 0.011,
+      "device_id": "winefridge",
+      "display_name": "Wine Fridge",
+      "kwh": 0.05,
+      "room": "groundfloor.kitchen"
     }
   ],
   "energy_cost": 21.9455,

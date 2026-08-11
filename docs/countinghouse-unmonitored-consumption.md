@@ -18,7 +18,7 @@ attribution.
 | R1.6 / C12 — top-level `coverage` on house response | ✅ shipped |
 | C13 — `stale_monitored_count` / `_ids` (no-power-telemetry definition) | ✅ shipped |
 | R3 — synthetic `unmonitored` device (`/devices`, `/devices/unmonitored/series`) | ✅ shipped |
-| R2 — `include_unmonitored=true` catch-all on device/location/class | ✅ shipped |
+| R2 — `include_unmonitored=true` catch-all on device/room/class | ✅ shipped |
 | C1/C2/C9 — per-bucket clamp before totals; tariff-applied cost | ✅ shipped |
 | C8 — `unmonitored.avg_w` energy-derived (`kwh×1000/bucket_hours`) | ✅ shipped (fixed avg_w=0 bug, `docs/bug-unmonitored-avg-w.md`) |
 | Q1, Q2, Q6 | ✅ resolved (see §11 / §6.4 / §2.5) |
@@ -72,16 +72,16 @@ The following reflects the **live API as observed on 2026-06-19** against
 
 ### 2.2 `GET /series` grouping (today)
 
-`group_by` accepts: `device` (default), `location`, `class`, `house`.
+`group_by` accepts: `device` (default), `room`, `class`, `house`.
 
 Per the current OpenAPI description:
 
 > `group_by` selects **device** (default, one series per metered device,
-> **excluding the whole-house meter**), **location**, **class**, or **house**
+> **excluding the whole-house meter**), **room**, **class**, or **house**
 > (two series: `"monitored"` = sum of devices, `"meter"` = the whole-house
 > meter).
 
-So the whole-house meter is *deliberately excluded* from `device`/`location`/
+So the whole-house meter is *deliberately excluded* from `device`/`room`/
 `class` groupings, and `house` is the only mode that surfaces it — as two
 series, `monitored` and `meter`.
 
@@ -221,7 +221,7 @@ monitored + unmonitored == meter        (after clamping, within rounding toleran
 
 - N1. **Sub-attributing** unmonitored to rooms/classes/devices. Unmonitored is by
   definition unattributed; it is always a single catch-all series. It must **not**
-  be split across `location`/`class` buckets.
+  be split across `room`/`class` buckets.
 - N2. Changing how individual devices or the meter are measured.
 - N3. Real-time/streaming semantics beyond what `/series` already offers.
 - N4. Backfilling or correcting historical meter/device data.
@@ -280,9 +280,9 @@ GET /series?window=24h&group_by=house&interval=6h&shape=rows
 }
 ```
 
-### R2 — Optional `unmonitored` bucket in `device` / `location` / `class` groupings
+### R2 — Optional `unmonitored` bucket in `device` / `room` / `class` groupings
 
-`GET /series?group_by=device|location|class` SHOULD support opting the unmonitored
+`GET /series?group_by=device|room|class` SHOULD support opting the unmonitored
 catch-all into the result so the parts sum to the whole house.
 
 - R2.1 — Gated by a query parameter, default **off** for backward compatibility.
@@ -297,7 +297,7 @@ catch-all into the result so the parts sum to the whole house.
 - R2.5 — When disabled, the response is **byte-for-byte** the behaviour of today
   (no new series, no field changes).
 - R2.6 — The synthetic series MUST be distinguishable from a real device, e.g.
-  `class: "unmonitored"` / `location: null`, and an id that cannot collide with a
+  `class: "unmonitored"` / `room: null`, and an id that cannot collide with a
   real device id (recommend reserving `unmonitored`).
 
 ### R3 — Synthetic device `unmonitored` for the single-series path
@@ -314,7 +314,7 @@ shape.
 - R3.3 — `unmonitored` SHOULD appear in `GET /devices` as a synthetic entry so it
   shows up in client device pickers automatically:
   - `id: "unmonitored"`, `label: "Unmonitored (rest of home)"`,
-    `class: "unmonitored"`, `capabilities: ["energy"]`, `location: null`.
+    `class: "unmonitored"`, `capabilities: ["energy"]`, `room: null`.
   - This is the single change that makes `countinghouse-index.html` a **one-line**
     update (the device dropdown already filters on the `energy` capability).
 - R3.4 — Endpoints that are meaningless for a synthetic device (e.g.
@@ -441,7 +441,7 @@ Requirement:
    `countinghouse-index.html` a one-line change; R1 powers the breakdown's
    "rest of home" slice.
 2. **Phase 2 (ergonomics):** R2 (`include_unmonitored` on
-   `device`/`location`/`class`) so breakdown clients get a self-summing stack
+   `device`/`room`/`class`) so breakdown clients get a self-summing stack
    without a second request.
 3. **Phase 3 (hardening):** C3/NF4 drift metrics, C10 `/bill` reconciliation
    tests.
@@ -467,7 +467,7 @@ countinghouse:
 - AC5. `GET /series?group_by=device&include_unmonitored=true` adds exactly one
   `unmonitored` series and `Σ(series) == meter` per bucket; the same request with
   the flag absent is identical to today's response.
-- AC6. `group_by=location` / `group_by=class` with `include_unmonitored=true`
+- AC6. `group_by=room` / `group_by=class` with `include_unmonitored=true`
   still produce exactly **one** unmonitored series (never subdivided).
 - AC7. A constructed bucket where `Σdevices > meter` yields `unmonitored == 0`
   (clamped) and increments the drift metric.

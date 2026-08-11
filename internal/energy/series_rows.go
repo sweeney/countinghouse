@@ -24,7 +24,7 @@ func ValidShape(s string) bool {
 // SeriesPoint is one (series, bucket) sample in the row-oriented form. Values are
 // already rounded (kWh 3dp, cost 4dp GBP, avg_w 1dp W) by AssembleSeries.
 type SeriesPoint struct {
-	Key  string    `json:"key"`  // series key (device id, location, class, or "monitored"/"unmonitored"/"meter")
+	Key  string    `json:"key"`  // series key (device id, room id, class, or "monitored"/"unmonitored"/"meter")
 	Time time.Time `json:"time"` // bucket start, RFC3339 with the configured tz offset
 	KWh  float64   `json:"kwh"`
 	Cost float64   `json:"cost"`  // GBP, VAT-inclusive
@@ -35,12 +35,9 @@ type SeriesPoint struct {
 // rows so consumers still have labels and totals for legends without scanning the
 // row list.
 type SeriesMeta struct {
-	Key   string `json:"key"`
-	Label string `json:"label"`
-	// Room is the floorplan room id; Location is its deprecated spelling, carried
-	// alongside it for one release.
+	Key       string  `json:"key"`
+	Label     string  `json:"label"`
 	Room      string  `json:"room,omitempty"`
-	Location  string  `json:"location,omitempty"`
 	Class     string  `json:"class,omitempty"`
 	TotalKWh  float64 `json:"total_kwh"`
 	TotalCost float64 `json:"total_cost"`
@@ -87,7 +84,6 @@ func (r SeriesResponse) Rows() RowsResponse {
 			Key:       s.Key,
 			Label:     s.Label,
 			Room:      s.Room,
-			Location:  s.Location,
 			Class:     s.Class,
 			TotalKWh:  s.TotalKWh,
 			TotalCost: s.TotalCost,
