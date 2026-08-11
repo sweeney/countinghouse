@@ -154,8 +154,8 @@ func TestDevicesCatalogCarriesRoom(t *testing.T) {
 		if d.Room != "groundfloor.kitchen" {
 			t.Errorf("room = %q, want groundfloor.kitchen", d.Room)
 		}
-		if d.Location != "groundfloor.kitchen" {
-			t.Errorf("deprecated location alias = %q, want the same value", d.Location)
+		if d.Location != "" {
+			t.Errorf("the deprecated location alias is still emitted (%q)", d.Location)
 		}
 	}
 	if !seen {
@@ -163,13 +163,17 @@ func TestDevicesCatalogCarriesRoom(t *testing.T) {
 	}
 }
 
-// A namespace still declaring the free-text location must keep working here too.
+// A namespace still declaring the free-text location must keep populating `room`:
+// the API alias is retired here, the config field is not.
 func TestDevicesCatalogFallsBackToLegacyLocation(t *testing.T) {
 	s, _ := dataSetup(t)
 
 	w := doGET(t, s, "/devices")
 	if !strings.Contains(w.Body.String(), `"room":"kitchen"`) {
 		t.Errorf("a location-only namespace must still populate room: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"location"`) {
+		t.Errorf("the deprecated location alias is still emitted: %s", w.Body.String())
 	}
 }
 

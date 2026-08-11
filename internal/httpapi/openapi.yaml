@@ -1067,9 +1067,6 @@ components:
           description: >
             Floorplan room id. Empty for a device whose readings describe the whole
             property rather than a room; see covers.
-          type: string
-          deprecated: true
-          description: DEPRECATED alias for room, carrying the same value.
         covers:
           type: string
           description: >

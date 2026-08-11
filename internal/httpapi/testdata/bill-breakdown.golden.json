@@ -7,7 +7,6 @@
       "device_id": "winefridge",
       "display_name": "Wine Fridge",
       "kwh": 0.05,
-      "location": "groundfloor.kitchen",
       "room": "groundfloor.kitchen"
     },
     {
@@ -16,7 +15,6 @@
       "device_id": "network-ups",
       "display_name": "Network UPS",
       "kwh": 100,
-      "location": "basement.network-cabinet",
       "room": "basement.network-cabinet"
     }
   ],
