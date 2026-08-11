@@ -33,13 +33,13 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 |---|---|
 | `GET /healthz` | Health: aggregated `status` (`ok` / `degraded` = a remote-config fetch failing / `unavailable` = Influx unreachable), version, uptime, Influx reachability, remote-config status. Always HTTP 200. Public. |
 | `GET /openapi.json` | This API as JSON (served from `internal/httpapi/openapi.yaml`). Public. |
-| `GET /devices` | Device catalog (id, display_name, location, class, `capabilities`: `energy`/`events`). Includes a synthetic `unmonitored` (rest-of-home) energy device when a whole-house meter is configured. |
+| `GET /devices` | Device catalog (id, display_name, room, `covers`, class, `capabilities`: `energy`/`events`). Includes a synthetic `unmonitored` (rest-of-home) energy device when a whole-house meter is configured. |
 | `GET /devices/{id}/energy?window=&from=&to=` | Windowed kWh for one device (`source`: counter/integral). |
 | `GET /devices/{id}/cost?window=…` | Windowed kWh + VAT-inclusive cost at the effective tariff. |
 | `GET /devices/{id}/series?window=&interval=&shape=` | Single-device time-series (kWh / cost / avg W per bucket). Reserved id `unmonitored` serves the rest-of-home series in the same shape (404 when no meter is configured). |
 | `GET /devices/{id}/events?window=` | State-transition events (for vertical-line overlays). |
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
-| `GET /series?window=&interval=&group_by=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `location`, `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`location`/`class` groupings so the parts sum to the meter. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
+| `GET /series?window=&interval=&group_by=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`class` groupings so the parts sum to the meter. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
 | `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Current tariffs keyed by fuel (electricity, gas). |
@@ -67,7 +67,7 @@ Each array drops straight into a web charting library dataset:
 { "window": "today", "interval": "1h", "group_by": "device", "shape": "columns",
   "buckets": ["2026-06-11T00:00:00+01:00", "2026-06-11T01:00:00+01:00"],
   "series": [
-    { "key": "winefridge", "label": "Wine Fridge", "location": "kitchen",
+    { "key": "winefridge", "label": "Wine Fridge", "room": "groundfloor.kitchen",
       "class": "continuous_power_device",
       "kwh": [0.05, 0.04], "cost": [0.011, 0.009], "avg_w": [52.1, 41.8],
       "total_kwh": 1.30, "total_cost": 0.28 }
@@ -109,6 +109,44 @@ at local midnight, so they are unaffected.
 
 The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth for request
 and response schemas; a path-coverage test fails CI if routes and spec drift.
+
+
+## Rooms, and the deprecated `location`
+
+`location` used to mean two different things across these services — a geographic site
+and a room — so rooms are now `room`, sites are `site`, and floors are `floor`. Room ids
+are `<floor>.<slug>`: `groundfloor.kitchen`, `basement.network-cabinet`.
+
+For one release both spellings work:
+
+| current | deprecated alias |
+|---|---|
+| `group_by=room` | `group_by=location` |
+| `room` in `/series`, `/devices`, `/bill` | `location`, same value |
+
+Grouping resolves through one function, so the two spellings cannot drift: a test
+asserts the responses are byte-identical apart from the reported `group_by`.
+
+**One exception, and it does not wait for the deprecation window.** A device whose
+readings describe the whole property — the electricity meter, central heating, hot
+water — has no room, so `room` and `location` are both empty for it where `location`
+previously said `"house"`. `"house"` was never a room, and the fact has moved to
+`covers`. A consumer still reading `location` and deferring its migration therefore
+loses these devices' place immediately: to keep them it must read `covers` now, not in
+a release's time. Every other device is unaffected.
+
+A device may also declare `covers`. Under `group_by=room` a device covering the whole
+property is grouped under a **`house`** key rather than the room it sits in — putting
+whole-property consumption in one room would be the same conflation under a new name,
+and dropping it would break the guarantee that the grouped parts plus `unmonitored`
+sum to the meter.
+
+A device sits in a room, but its readings do not always describe that room — `central_heating`, `hot_water` and `electricity_meter` each
+sit in one room while metering the whole property. `location` used to record sometimes
+one fact and sometimes the other; `room` and `covers` record them separately.
+
+Countinghouse reads whichever the devices namespace carries. A namespace still declaring
+`location` keeps working untouched.
 
 ## Configuration
 

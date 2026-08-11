@@ -1,0 +1,248 @@
+package httpapi
+
+import (
+	"encoding/json"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/sweeney/countinghouse/internal/config"
+)
+
+// The floorplan migration renames the read-side vocabulary: `location` conflated a
+// geographic site with a room, so rooms are now `room`, keyed on floorplan ids of the
+// form <floor>.<slug>. `location` stays as a deprecated alias for one release.
+
+func roomDevices() map[string]config.DeviceConfig {
+	return map[string]config.DeviceConfig{
+		"winefridge": {
+			Class: "continuous_power_device", Room: "groundfloor.kitchen", DisplayName: "Wine Fridge",
+		},
+		"network-ups": {
+			Class: "ups_sensor", Room: "basement.network-cabinet", DisplayName: "Network UPS",
+		},
+		"electricity_meter": {
+			Class: "energy_meter", Room: "basement.hallway", Covers: "house",
+			DisplayName: "Electricity Meter",
+		},
+		"hot_water": {
+			Class: "binary_state_device", Room: "groundfloor.boiler-room", Covers: "house",
+			DisplayName: "Hot Water",
+		},
+	}
+}
+
+func TestSeries_GroupByRoomKeysOnRoomIDs(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
+
+	w := doGET(t, s, "/series?window=today&interval=1h&group_by=room")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		GroupBy string `json:"group_by"`
+		Series  []struct {
+			Key string `json:"key"`
+		} `json:"series"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.GroupBy != "room" {
+		t.Errorf("group_by = %q, want %q", resp.GroupBy, "room")
+	}
+	var keys []string
+	for _, ser := range resp.Series {
+		keys = append(keys, ser.Key)
+	}
+	if !hasKey(keys, "groundfloor.kitchen") {
+		t.Errorf("no series keyed on a room id: %v", keys)
+	}
+}
+
+// TestGroupByRoomAndLocationAreEquivalent is the alias-period contract: the two
+// spellings return the same numbers, and only the reported group_by differs.
+func TestGroupByRoomAndLocationAreEquivalent(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
+
+	byRoom := doGET(t, s, "/series?window=today&interval=1h&group_by=room")
+	byLocation := doGET(t, s, "/series?window=today&interval=1h&group_by=location")
+	if byRoom.Code != http.StatusOK || byLocation.Code != http.StatusOK {
+		t.Fatalf("codes: room=%d location=%d", byRoom.Code, byLocation.Code)
+	}
+
+	var a, b map[string]any
+	if err := json.Unmarshal(byRoom.Body.Bytes(), &a); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(byLocation.Body.Bytes(), &b); err != nil {
+		t.Fatal(err)
+	}
+	if a["group_by"] != "room" || b["group_by"] != "location" {
+		t.Errorf("group_by: %v and %v", a["group_by"], b["group_by"])
+	}
+	delete(a, "group_by")
+	delete(b, "group_by")
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	if string(ja) != string(jb) {
+		t.Errorf("the alias returns different data\n room: %s\n  loc: %s", ja, jb)
+	}
+}
+
+// The /bill breakdown carries a place per device, and must carry the room id.
+func TestBillBreakdownCarriesRoom(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
+
+	w := doGET(t, s, "/bill?window=today")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"room":"groundfloor.kitchen"`) {
+		t.Errorf("bill breakdown has no room id: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"location":"groundfloor.kitchen"`) {
+		t.Errorf("bill breakdown dropped the deprecated alias: %s", w.Body.String())
+	}
+}
+
+// A device covering the whole house sits in a room but reports for the property. That
+// distinction is the one structural defect in the old single-field scheme, so the two
+// facts must survive as two fields.
+func TestCoversIsCarriedSeparatelyFromRoom(t *testing.T) {
+	devs := roomDevices()
+	if devs["electricity_meter"].Covers != "house" {
+		t.Fatal("fixture is wrong")
+	}
+	d := devs["electricity_meter"]
+	if d.Place() != "basement.hallway" {
+		t.Errorf("Place() = %q, want the room it sits in, not its coverage", d.Place())
+	}
+	if !d.CoversWholeSite() {
+		t.Error("CoversWholeSite() = false for a device declaring covers: house")
+	}
+	if devs["winefridge"].CoversWholeSite() {
+		t.Error("a device with no covers must cover only its own room")
+	}
+}
+
+// A namespace still declaring `location` must keep working untouched.
+func TestLegacyLocationOnlyConfigStillGroups(t *testing.T) {
+	s, _ := dataSetup(t)
+
+	w := doGET(t, s, "/series?window=today&interval=1h&group_by=room")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"key":"kitchen"`) {
+		t.Errorf("a location-only namespace must still group: %s", w.Body.String())
+	}
+}
+
+func hasKey(keys []string, want string) bool {
+	for _, k := range keys {
+		if k == want {
+			return true
+		}
+	}
+	return false
+}
+
+// GET /devices is a second catalog path, in events_handlers.go rather than
+// handlers.go, and it was missed when rooms were added: it read dev.Location
+// directly, so the openapi spec and README promised a `room` the code never sent.
+//
+// It matters more than a missing field. Once the devices namespace is republished
+// it carries `room` and stops carrying `location`, so this endpoint would have
+// returned an empty location for every device — and the demo dashboards label
+// their device pickers from exactly this response.
+func TestDevicesCatalogCarriesRoom(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
+
+	w := doGET(t, s, "/devices")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Devices []struct {
+			ID       string `json:"id"`
+			Room     string `json:"room"`
+			Location string `json:"location"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var seen bool
+	for _, d := range resp.Devices {
+		if d.ID != "winefridge" {
+			continue
+		}
+		seen = true
+		if d.Room != "groundfloor.kitchen" {
+			t.Errorf("room = %q, want groundfloor.kitchen", d.Room)
+		}
+		if d.Location != "groundfloor.kitchen" {
+			t.Errorf("deprecated location alias = %q, want the same value", d.Location)
+		}
+	}
+	if !seen {
+		t.Fatalf("winefridge missing from the catalog: %s", w.Body.String())
+	}
+}
+
+// A namespace still declaring the free-text location must keep working here too.
+func TestDevicesCatalogFallsBackToLegacyLocation(t *testing.T) {
+	s, _ := dataSetup(t)
+
+	w := doGET(t, s, "/devices")
+	if !strings.Contains(w.Body.String(), `"room":"kitchen"`) {
+		t.Errorf("a location-only namespace must still populate room: %s", w.Body.String())
+	}
+}
+
+// A whole-property device has no room, and saying so with an empty string loses the
+// reason. The catalog and the bill therefore carry `covers`, so a consumer can tell
+// "no room known" from "not attributable to a room" — the same two-facts-two-fields
+// split the rest of this migration applies.
+func TestCatalogReportsCoverageForWholePropertyDevices(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: map[string]config.DeviceConfig{
+		"immersion": {Class: "cycle_power_device", DisplayName: "Immersion", Location: "house"},
+		"fridge":    {Class: "continuous_power_device", DisplayName: "Fridge", Room: "groundfloor.kitchen"},
+	}, tariffs: testTariffs()}
+
+	var resp struct {
+		Devices []struct {
+			ID     string `json:"id"`
+			Room   string `json:"room"`
+			Covers string `json:"covers"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(doGET(t, s, "/devices").Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, d := range resp.Devices {
+		switch d.ID {
+		case "immersion":
+			if d.Covers != "house" {
+				t.Errorf("immersion covers = %q, want house", d.Covers)
+			}
+		case "fridge":
+			if d.Covers != "" {
+				t.Errorf("fridge covers = %q, want empty", d.Covers)
+			}
+			if d.Room != "groundfloor.kitchen" {
+				t.Errorf("fridge room = %q", d.Room)
+			}
+		}
+	}
+}

@@ -35,8 +35,11 @@ type SeriesPoint struct {
 // rows so consumers still have labels and totals for legends without scanning the
 // row list.
 type SeriesMeta struct {
-	Key       string  `json:"key"`
-	Label     string  `json:"label"`
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	// Room is the floorplan room id; Location is its deprecated spelling, carried
+	// alongside it for one release.
+	Room      string  `json:"room,omitempty"`
 	Location  string  `json:"location,omitempty"`
 	Class     string  `json:"class,omitempty"`
 	TotalKWh  float64 `json:"total_kwh"`
@@ -83,6 +86,7 @@ func (r SeriesResponse) Rows() RowsResponse {
 		out.Series = append(out.Series, SeriesMeta{
 			Key:       s.Key,
 			Label:     s.Label,
+			Room:      s.Room,
 			Location:  s.Location,
 			Class:     s.Class,
 			TotalKWh:  s.TotalKWh,
