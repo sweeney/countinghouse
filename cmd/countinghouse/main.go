@@ -38,6 +38,12 @@ func main() {
 		logger.Error("load config", "error", err)
 		os.Exit(1)
 	}
+	// Legal but probably-unintended config. Not fatal: every one of these runs
+	// correctly for the site deployed today, and the whole point of the site block
+	// is that adding a second property must not be able to take down the first.
+	for _, w := range cfg.Warnings() {
+		logger.Warn("config: " + w)
+	}
 
 	// Build the outbound client_credentials token source and the remote-config
 	// fetcher. The fetcher HOLDS the live device/tariff snapshots that the HTTP
@@ -76,21 +82,24 @@ func main() {
 	location := cfg.House.Location()
 
 	server := &httpapi.Server{
-		Listen:       cfg.HTTP.Listen,
-		Influx:       influxClient,
-		Bucket:       cfg.Influx.Bucket,
-		Clock:        testutil.RealClock{},
-		Loc:          location,
-		Config:       fetcher,
-		RemoteConfig: fetcher,
-		IdentityURL:  cfg.Identity.BaseURL,
-		PublicURL:    cfg.HTTP.PublicURL,
-		Version:      version,
-		Logger:       logger,
+		Listen:           cfg.HTTP.Listen,
+		Influx:           influxClient,
+		Bucket:           cfg.Influx.Bucket,
+		Clock:            testutil.RealClock{},
+		Loc:              location,
+		Config:           fetcher,
+		RemoteConfig:     fetcher,
+		IdentityURL:      cfg.Identity.BaseURL,
+		PublicURL:        cfg.HTTP.PublicURL,
+		Version:          version,
+		SiteID:           cfg.Site.ID,
+		DevicesNamespace: cfg.Site.DevicesNamespace,
+		Logger:           logger,
 	}
 
 	logger.Info("starting", "config", *configPath, "http", cfg.HTTP.Listen,
-		"influx", cfg.Influx.URL, "timezone", cfg.House.Timezone, "version", version)
+		"influx", cfg.Influx.URL, "timezone", cfg.House.Timezone, "version", version,
+		"site", cfg.Site.ID, "devices_namespace", cfg.Site.DevicesNamespace)
 
 	ctx, cancel := signalContext()
 	defer cancel()

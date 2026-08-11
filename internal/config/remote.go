@@ -136,7 +136,8 @@ func (f *Fetcher) Refresh(ctx context.Context) {
 func (f *Fetcher) refreshDevices(ctx context.Context, token string) {
 	var devices map[string]DeviceConfig
 	if err := f.fetch(ctx, token, f.devicesNamespace(), &devices); err != nil {
-		f.warn("remote config: statehouse_devices unavailable, keeping last-known", "error", err)
+		f.warn("remote config: devices namespace unavailable, keeping last-known",
+			"namespace", f.devicesNamespace(), "error", err)
 		f.recordStatus(f.devicesNamespace(), err)
 		return
 	}
@@ -201,7 +202,7 @@ func (f *Fetcher) fetch(ctx context.Context, token, ns string, dst any) error {
 	}
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		return fmt.Errorf("unexpected status %d", resp.StatusCode)
+		return fmt.Errorf("namespace %s: unexpected status %d", ns, resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxConfigBytes+1))
