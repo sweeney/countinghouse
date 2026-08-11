@@ -137,7 +137,19 @@ one fact and sometimes the other; `room` and `covers` record them separately.
 Countinghouse reads whichever the devices namespace carries. A namespace still declaring
 `location` keeps working untouched.
 
-## Configuration
+## Config
+
+The devices namespace is named by config, so a site reads its own:
+
+```yaml
+site:
+  id: home
+  devices_namespace: devices_home
+```
+
+It defaults to `statehouse_devices` — the shared namespace every service read before
+devices were split per site — so an unedited config keeps reading what it always read.
+uration
 
 Local bootstrap YAML (default `/etc/countinghouse/config.yaml`; see `config/config.example.yaml`),
 overlaid by remote config fetched from `config.swee.net`.

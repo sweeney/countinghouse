@@ -1,3 +1,13 @@
+# The property this instance serves.
+#
+#   id                 must match an id in the `sites` namespace.
+#   devices_namespace  the config namespace holding this site's devices. Defaults to
+#                      `statehouse_devices`, the shared namespace every service read
+#                      before devices were split per site.
+site:
+  id: home
+  devices_namespace: devices_home
+
 # Countinghouse local configuration.
 # Device inventory and tariffs are fetched from the remote config service
 # (config.swee.net) and are NOT defined here.

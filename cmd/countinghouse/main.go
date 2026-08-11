@@ -51,9 +51,10 @@ func main() {
 		ClientSecret: cfg.Identity.ClientSecret,
 	}
 	fetcher := &config.Fetcher{
-		BaseURL: cfg.RemoteConfig.BaseURL,
-		Tokens:  tokens,
-		Logger:  logger,
+		BaseURL:          cfg.RemoteConfig.BaseURL,
+		Tokens:           tokens,
+		Logger:           logger,
+		DevicesNamespace: cfg.Site.DevicesNamespace,
 	}
 	if cfg.RemoteConfig.BaseURL == "" {
 		logger.Warn("remote config base_url is empty; serving empty device/tariff snapshots")

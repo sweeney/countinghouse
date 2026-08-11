@@ -13,11 +13,53 @@ import (
 // configuration here. Device inventory and tariffs come from the remote
 // config service (a later milestone).
 type Config struct {
+	Site         SiteConfig         `yaml:"site"`
 	HTTP         HTTPConfig         `yaml:"http"`
 	Influx       InfluxConfig       `yaml:"influx"`
 	Identity     IdentityConfig     `yaml:"identity"`
 	RemoteConfig RemoteConfigConfig `yaml:"remote_config"`
 	House        HouseConfig        `yaml:"house"`
+}
+
+// SiteConfig identifies the property this instance serves and where that property's
+// configuration lives.
+//
+// It is a block rather than a bare id so adding a second property is a config edit
+// rather than a code change: each site names its own devices namespace, which is what
+// makes the namespaces per-site rather than one shared document.
+type SiteConfig struct {
+	// ID matches an entry in the `sites` namespace.
+	ID string `yaml:"id"`
+
+	// DevicesNamespace is the config namespace holding this site's devices.
+	// Defaults to the shared pre-migration namespace, so a config that predates the
+	// per-site split keeps reading exactly what it always read.
+	DevicesNamespace string `yaml:"devices_namespace"`
+}
+
+// DefaultDevicesNamespace is the single shared namespace every service read before
+// devices were split per site.
+const DefaultDevicesNamespace = "statehouse_devices"
+
+// UnmarshalYAML accepts either the block form or a bare id:
+//
+//	site: home
+//	site:
+//	  id: home
+//	  devices_namespace: devices_home
+func (s *SiteConfig) UnmarshalYAML(unmarshal func(any) error) error {
+	var id string
+	if err := unmarshal(&id); err == nil {
+		s.ID = id
+		return nil
+	}
+	type raw SiteConfig
+	var r raw
+	if err := unmarshal(&r); err != nil {
+		return err
+	}
+	*s = SiteConfig(r)
+	return nil
 }
 
 // HTTPConfig describes the HTTP listener.
@@ -110,6 +152,9 @@ func Load(path string) (Config, error) {
 		if _, err := time.LoadLocation(cfg.House.Timezone); err != nil {
 			return cfg, fmt.Errorf("parse house.timezone %q: %w", cfg.House.Timezone, err)
 		}
+	}
+	if cfg.Site.DevicesNamespace == "" {
+		cfg.Site.DevicesNamespace = DefaultDevicesNamespace
 	}
 	return cfg, nil
 }
