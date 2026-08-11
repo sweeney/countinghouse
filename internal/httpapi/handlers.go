@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 	"runtime"
+	"sort"
 	"strconv"
 	"time"
 
@@ -426,6 +427,11 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 			Class:       dev.Class,
 		})
 	}
+
+	// Ordered by device id: the map above iterates randomly, so without this the
+	// breakdown came back in a different order on every request — churn for any client
+	// diffing two bills or rendering a table.
+	sort.Slice(billable, func(i, j int) bool { return billable[i].DeviceID < billable[j].DeviceID })
 
 	for i := range billable {
 		dc := &billable[i]

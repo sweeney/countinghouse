@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 
@@ -213,5 +214,37 @@ func TestCatalogReportsCoverageForWholePropertyDevices(t *testing.T) {
 				t.Errorf("fridge room = %q", d.Room)
 			}
 		}
+	}
+}
+
+// The /bill breakdown was built by ranging a map and never sorted, so the device
+// order was different on every request. Clients diffing two bills, or rendering a
+// table, saw spurious churn — and it made the golden snapshot pass locally and fail
+// on CI purely on Go's randomised map iteration.
+func TestBillBreakdownIsOrderedByDeviceID(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
+
+	var previous []string
+	for i := 0; i < 8; i++ {
+		var resp struct {
+			Devices []struct {
+				DeviceID string `json:"device_id"`
+			} `json:"devices"`
+		}
+		if err := json.Unmarshal(doGET(t, s, "/bill?window=today").Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, d := range resp.Devices {
+			ids = append(ids, d.DeviceID)
+		}
+		if !sort.StringsAreSorted(ids) {
+			t.Fatalf("breakdown is not ordered by device id: %v", ids)
+		}
+		if previous != nil && strings.Join(ids, ",") != strings.Join(previous, ",") {
+			t.Fatalf("breakdown order varies between requests: %v then %v", previous, ids)
+		}
+		previous = ids
 	}
 }
