@@ -478,7 +478,7 @@ func TestSeries_IncludeUnmonitored_Device(t *testing.T) {
 	}
 }
 
-// AC6: with location/class grouping the catch-all is never subdivided — exactly
+// AC6: with room/class grouping the catch-all is never subdivided — exactly
 // one unmonitored series regardless of how many groups exist.
 func TestSeries_IncludeUnmonitored_ClassNeverSubdivided(t *testing.T) {
 	energyPer := map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}

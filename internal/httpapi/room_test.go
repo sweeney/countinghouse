@@ -9,11 +9,12 @@ import (
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/energy"
+	"github.com/sweeney/countinghouse/internal/influx"
 )
 
 // The floorplan migration renames the read-side vocabulary: `location` conflated a
 // geographic site with a room, so rooms are now `room`, keyed on floorplan ids of the
-// form <floor>.<slug>. `location` stays as a deprecated alias for one release.
+// form <floor>.<slug>. The deprecated `location` spelling has been removed.
 
 func roomDevices() map[string]config.DeviceConfig {
 	return map[string]config.DeviceConfig{
@@ -218,13 +219,43 @@ func TestCatalogReportsCoverageForWholePropertyDevices(t *testing.T) {
 	}
 }
 
+// billableFixture returns a device set and the matching querier responses, sized so
+// an unsorted breakdown cannot pass by luck.
+//
+// The ids are deliberately not in their sorted order here, and there are nine of
+// them: ranging the map unsorted lands on sorted output with probability 1/9!, about
+// three in a million per request, against 1/2 for the two-billable fixture this test
+// used to run on. A test that a broken implementation passes half the time is not a
+// test. The names are also chosen so sorted order differs from any plausible
+// insertion or grouping order.
+func billableFixture() (map[string]config.DeviceConfig, map[string][]influx.Row) {
+	ids := []string{
+		"winefridge", "boiler-pump", "network-ups", "aquarium", "tumble-dryer",
+		"server-rack", "dehumidifier", "immersion", "car-charger",
+	}
+	devices := make(map[string]config.DeviceConfig, len(ids))
+	responses := make(map[string][]influx.Row, len(ids))
+	for i, id := range ids {
+		devices[id] = config.DeviceConfig{
+			Class:       "continuous_power_device",
+			Room:        "groundfloor.kitchen",
+			DisplayName: id,
+		}
+		// Distinct values so nothing can accidentally order by consumption.
+		responses[`r.device_id == "`+id+`"`] = []influx.Row{{Value: float64(i+1) * 1.5}}
+	}
+	return devices, responses
+}
+
 // The /bill breakdown was built by ranging a map and never sorted, so the device
 // order was different on every request. Clients diffing two bills, or rendering a
 // table, saw spurious churn — and it made the golden snapshot pass locally and fail
 // on CI purely on Go's randomised map iteration.
 func TestBillBreakdownIsOrderedByDeviceID(t *testing.T) {
-	s, _ := dataSetup(t)
-	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
+	s, q := dataSetup(t)
+	devices, responses := billableFixture()
+	q.Responses = responses
+	s.Config = fakeConfig{devices: devices, tariffs: testTariffs()}
 
 	var previous []string
 	for i := 0; i < 8; i++ {
@@ -239,6 +270,10 @@ func TestBillBreakdownIsOrderedByDeviceID(t *testing.T) {
 		var ids []string
 		for _, d := range resp.Devices {
 			ids = append(ids, d.DeviceID)
+		}
+		if len(ids) < 9 {
+			t.Fatalf("fixture no longer produces 9 billable devices, got %d: %v — "+
+				"the assertion below is only meaningful at that width", len(ids), ids)
 		}
 		if !sort.StringsAreSorted(ids) {
 			t.Fatalf("breakdown is not ordered by device id: %v", ids)

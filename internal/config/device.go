@@ -86,9 +86,8 @@ func normaliseDevices(devices map[string]DeviceConfig) {
 // Location is still decoded because the namespace migrates on its own schedule; it is
 // no longer served on any endpoint.
 //
-// Every grouping path goes through this one function, which is what makes
-// group_by=room and group_by=location return identical numbers during the alias
-// period instead of merely being documented to.
+// Every grouping and billing path goes through this one function, so they agree by
+// construction rather than by each remembering the legacy spelling.
 func (d DeviceConfig) Place() string {
 	if d.Room != "" {
 		return d.Room

@@ -273,9 +273,9 @@ func TestAssembleByDeviceFallbackLabel(t *testing.T) {
 	}
 }
 
-// ---- AssembleSeries: location grouping -------------------------------------
+// ---- AssembleSeries: room grouping -----------------------------------------
 
-func TestAssembleByLocationSumsKitchen(t *testing.T) {
+func TestAssembleByRoomSumsKitchen(t *testing.T) {
 	loc := mustLondon(t)
 	buckets := threeBuckets(loc)
 	devices := map[string]config.DeviceConfig{
@@ -295,7 +295,7 @@ func TestAssembleByLocationSumsKitchen(t *testing.T) {
 	}
 	out := AssembleSeries(buckets, nil, devices, energy, power, testTariff(), GroupByRoom)
 	if len(out) != 2 {
-		t.Fatalf("location series = %d, want 2 (kitchen, office)", len(out))
+		t.Fatalf("room series = %d, want 2 (kitchen, office)", len(out))
 	}
 	// Sorted: kitchen, office.
 	kitchen := out[0]
@@ -312,7 +312,7 @@ func TestAssembleByLocationSumsKitchen(t *testing.T) {
 	}
 }
 
-func TestAssembleByLocationExcludesMeter(t *testing.T) {
+func TestAssembleByRoomExcludesMeter(t *testing.T) {
 	loc := mustLondon(t)
 	buckets := threeBuckets(loc)
 	devices := map[string]config.DeviceConfig{
@@ -325,7 +325,7 @@ func TestAssembleByLocationExcludesMeter(t *testing.T) {
 	}
 	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByRoom)
 	if len(out) != 1 || out[0].Key != "kitchen" {
-		t.Errorf("meter location leaked into grouping: %+v", out)
+		t.Errorf("meter room leaked into grouping: %+v", out)
 	}
 }
 

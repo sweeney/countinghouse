@@ -24,7 +24,7 @@ func ValidShape(s string) bool {
 // SeriesPoint is one (series, bucket) sample in the row-oriented form. Values are
 // already rounded (kWh 3dp, cost 4dp GBP, avg_w 1dp W) by AssembleSeries.
 type SeriesPoint struct {
-	Key  string    `json:"key"`  // series key (device id, location, class, or "monitored"/"unmonitored"/"meter")
+	Key  string    `json:"key"`  // series key (device id, room id, class, or "monitored"/"unmonitored"/"meter")
 	Time time.Time `json:"time"` // bucket start, RFC3339 with the configured tz offset
 	KWh  float64   `json:"kwh"`
 	Cost float64   `json:"cost"`  // GBP, VAT-inclusive

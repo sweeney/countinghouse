@@ -111,7 +111,7 @@ The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth fo
 and response schemas; a path-coverage test fails CI if routes and spec drift.
 
 
-## Rooms, and the deprecated `location`
+## Rooms
 
 `location` used to mean two different things across these services — a geographic site
 and a room — so rooms are now `room`, sites are `site`, and floors are `floor`. Room ids

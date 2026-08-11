@@ -60,7 +60,7 @@ const (
 // device table's "electricity_meter" is descriptive prose, not the class tag.
 const EnergyMeterClass = "energy_meter"
 
-// Series is one line/bar in a SeriesResponse: a labelled, location/class-tagged
+// Series is one line/bar in a SeriesResponse: a labelled, room/class-tagged
 // set of per-bucket arrays (all of length len(buckets)) plus window totals.
 type Series struct {
 	Key   string `json:"key"`
@@ -417,7 +417,7 @@ func assembleHouse(
 // houseParts builds the two parents of the house decomposition: "monitored" (sum
 // of all metered non-meter devices) and "meter" (the energy meter's own series).
 // Either is nil when it has no members (no monitored devices / no meter). Shared
-// by the house grouping and the device/location/class unmonitored catch-all (R2),
+// by the house grouping and the device/room/class unmonitored catch-all (R2),
 // so "unmonitored" means the identical quantity in both.
 func houseParts(
 	buckets []time.Time,
@@ -797,7 +797,7 @@ func BuildSeries(
 
 	series := AssembleSeries(buckets, hrs, devices, energyByDevice, powerByDevice, tariff, groupBy)
 
-	// R2: opt the single unmonitored catch-all into a device/location/class
+	// R2: opt the single unmonitored catch-all into a device/room/class
 	// grouping so the parts sum to the whole house. group_by=house already carries
 	// it, so the flag is a no-op there (and on any future grouping it is ignored
 	// rather than double-adding).

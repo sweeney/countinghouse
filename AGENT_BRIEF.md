@@ -72,7 +72,7 @@ Key facts countinghouse depends on:
 - It already computes whole-house electricity (`gross`/`monitored`/`unmonitored` watts and
   kWh) and writes a synthetic `house_electricity` series — useful for reconciliation.
 - It exposes a read API at `https://statehouse.swee.net` (e.g. `GET /state` returns the
-  full device snapshot incl. `class`, `location`, `latest.power_w`, `latest.energy_kwh`).
+  full device snapshot incl. `class`, `room`, `latest.power_w`, `latest.energy_kwh`).
   Countinghouse can call this for live device metadata, but for **historical** energy it
   should query Influx directly.
 - Device classes: `short_burst_power_device`, `cycle_power_device`,
@@ -97,7 +97,8 @@ the live bucket/org with the user before wiring queries.**
 
 ### Measurements relevant to countinghouse
 
-**`device_power`** — the core series. Tags: `device_id`, `class`, `location`. Fields:
+**`device_power`** — the core series. Tags: `device_id`, `class`, `site`. Note there
+is **no room tag** — rooms come from the devices namespace, never from Influx. Fields:
 - `power_w` float (instantaneous)
 - `voltage_v` float
 - `energy_kwh` float — **cumulative hardware counter**, present only for devices that
@@ -164,7 +165,7 @@ reload at `:239-252`.
 ### `statehouse_devices` (exists today)
 
 Shape: JSON object keyed by device id → device config. Countinghouse needs this for the
-device inventory and especially **`class` and `location`** (to group cost by room/class)
+device inventory and especially **`class` and `room`** (to group cost by room/class)
 and `display_name`. The Go struct statehouse deserializes into
 (`internal/config/config.go:247`):
 
@@ -178,7 +179,7 @@ type DeviceConfig struct {
     FriendlyName string // -> display
     Class       string // device class (drives which query path)
     DisplayName string
-    Location    string
+    Room        string
     Thresholds  *Thresholds
     EnergyStrategy string // "counter" | "integration" override
 }

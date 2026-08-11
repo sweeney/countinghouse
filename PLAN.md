@@ -92,7 +92,10 @@ config/config.example.yaml
 Statehouse is **write-only** to Influx; countinghouse's query layer is net-new. Shared
 client (`influxdb2.NewClient(url, token)`) but `.QueryAPI(org)`.
 
-Measurement **`device_power`** — tags `device_id`, `class`, `location`. Fields
+Measurement **`device_power`** — tags `device_id`, `class`, and `site` (only when
+statehouse has a site configured). There is deliberately **no room tag**: statehouse
+stopped writing one, so room grouping resolves through the devices namespace at query
+time and a re-roomed device re-groups its whole history. Fields
 `power_w`, `voltage_v`, `energy_kwh`, **each written as its own single-field point**
 (they do NOT share rows/timestamps — query builders and the fake must reflect this).
 
@@ -148,11 +151,11 @@ house:   { timezone: "Europe/London" }
 
 **Remote config** via `Fetcher` (copied from statehouse: `TokenSource` iface, Bearer,
 fail-open, 401→`Invalidate()`, per-namespace `Statuses()` on `/healthz`). Two namespaces:
-- `statehouse_devices` — for `class`/`location`/`display_name` (drives routing + grouping).
+- the site's devices namespace — for `class`/`room`/`display_name` (drives routing + grouping).
 - `energy_tariffs` — pricing (below).
 
 `DeviceConfig` mirrors statehouse (`scheme`/`primary`/`ieee_address`/`friendly_name`/
-`class`/`display_name`/`location`/`thresholds`/`energy_strategy`); we read class/location/
+`class`/`display_name`/`room`/`thresholds`/`energy_strategy`); we read class/room/
 display_name only. We do **not** need `statehouse_classes` (routing is class-derived).
 
 ---
@@ -210,7 +213,7 @@ all mirrored from statehouse `server.go`.
 | `GET /openapi.json` | public | spec via `spec.Converter`, `__PUBLIC_URL__` substitution |
 | `GET /devices/{id}/energy?window=&from=&to=` | yes | `{kwh, source, window}` |
 | `GET /devices/{id}/cost?window=...` | yes | `{kwh, cost, currency, tariff}` |
-| `GET /bill?window=month` | yes | per-device breakdown (kwh, cost, location, display_name) + totals + reconciliation vs meter |
+| `GET /bill?window=month` | yes | per-device breakdown (kwh, cost, room, covers, display_name) + totals + reconciliation vs meter |
 | `GET /tariffs` | yes | current electricity tariff |
 | `GET /metrics` | yes | atomic counters: query count/errors, influx latency |
 
@@ -292,14 +295,14 @@ query-on-demand / stateless. Decisions below were confirmed with the user 2026-0
 ## A. Energy time-series
 
 **Endpoints**
-- `GET /series?window=&from=&to=&interval=&group_by=device|location|class|house` — multi-series.
+- `GET /series?window=&from=&to=&interval=&group_by=device|room|class|house` — multi-series.
 - `GET /devices/{id}/series?window=&interval=` — single-device convenience.
 
 **Response: columnar** (shared time axis + per-series value arrays — maps directly to chart libs):
 ```json
 { "window":"today","from":"...","to":"...","interval":"1h","group_by":"device",
   "buckets":["2026-06-11T00:00:00+01:00","2026-06-11T01:00:00+01:00","..."],
-  "series":[ { "key":"winefridge","label":"Wine Fridge","location":"kitchen",
+  "series":[ { "key":"winefridge","label":"Wine Fridge","room":"groundfloor.kitchen",
                "class":"continuous_power_device",
                "kwh":[0.05,0.04],"cost":[0.011,0.009],"avg_w":[52.1,41.8],
                "total_kwh":1.1,"total_cost":0.2413 } ] }
@@ -308,7 +311,7 @@ query-on-demand / stateless. Decisions below were confirmed with the user 2026-0
 **Per-bucket metrics:** `kwh`, `cost` (kwh×tariff×VAT), `avg_w` (mean power). Aggregated
 groups: kwh/cost **summed**, avg_w **summed** (power is additive).
 
-**group_by:** device (default); location (per room); class; house → **two** series
+**group_by:** device (default); room (per room); class; house → **two** series
 `monitored` (sum of devices) + `meter` (whole-house `electricity_meter`) so consumers can
 show total + the unmonitored gap.
 
@@ -364,7 +367,7 @@ Event/interval/stats logic lives in a new `internal/events` package.
 ## C. Device catalog (discovery)
 
 `GET /devices` — pass-through of the `statehouse_devices` namespace so a UI can build its
-device picker without knowing Influx. Per device: `id`, `display_name`, `location`, `class`,
+device picker without knowing Influx. Per device: `id`, `display_name`, `room`, `class`,
 and a derived `capabilities` hint (`energy` when PathForClass is metered, `events` for
 binary/activity classes). Sourced entirely from the cached `ConfigProvider.Devices()`.
 
