@@ -268,7 +268,10 @@ type catalogEntry struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"display_name"`
 	// Room is the floorplan room id; Location is its deprecated spelling, emitted
-	// alongside it for one release with the same value.
+	// alongside it for one release with the same value — except for whole-property
+	// devices, where both are empty and the fact lives in Covers. For those, the
+	// deprecation window buys a consumer nothing: the old spelling stops carrying the
+	// information immediately.
 	Room     string `json:"room"`
 	Location string `json:"location"`
 	// Covers is set when the device's readings describe the whole property rather

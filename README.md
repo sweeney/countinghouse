@@ -127,6 +127,14 @@ For one release both spellings work:
 Grouping resolves through one function, so the two spellings cannot drift: a test
 asserts the responses are byte-identical apart from the reported `group_by`.
 
+**One exception, and it does not wait for the deprecation window.** A device whose
+readings describe the whole property — the electricity meter, central heating, hot
+water — has no room, so `room` and `location` are both empty for it where `location`
+previously said `"house"`. `"house"` was never a room, and the fact has moved to
+`covers`. A consumer still reading `location` and deferring its migration therefore
+loses these devices' place immediately: to keep them it must read `covers` now, not in
+a release's time. Every other device is unaffected.
+
 A device may also declare `covers`. Under `group_by=room` a device covering the whole
 property is grouped under a **`house`** key rather than the room it sits in — putting
 whole-property consumption in one room would be the same conflation under a new name,
