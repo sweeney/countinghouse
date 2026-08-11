@@ -67,10 +67,29 @@ func seriesFakeQuerier(buckets []time.Time, energyPer, powerPer map[string]float
 		if isCounter {
 			per = energyPer
 		}
+		// The window-total builders (DeviceWindowKWh, behind /bill and
+		// /devices/{id}/energy) end in last() or integral() and so return ONE row
+		// per table — never the bucket axis. Only the series builders use
+		// aggregateWindow. Emitting bucket rows for both shapes let /bill read
+		// whichever bucket happened to sort last, which is how a summing bug hid
+		// behind a green golden snapshot.
+		windowTotal := !strings.Contains(flux, "aggregateWindow")
+
 		var rows []influx.Row
 		for id, v := range per {
 			// Only emit if this device is in the query's device set.
 			if !strings.Contains(flux, `"`+id+`"`) {
+				continue
+			}
+			if windowTotal {
+				// Counter: per-bucket kWh accumulated over the window. Integral:
+				// mean W held for len(buckets) hours, already divided by 1000 by
+				// the Flux the real builder emits.
+				total := v * float64(len(buckets))
+				if !isCounter {
+					total /= 1000.0
+				}
+				rows = append(rows, influx.Row{DeviceID: id, Value: total})
 				continue
 			}
 			for i := range buckets {

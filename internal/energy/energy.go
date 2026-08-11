@@ -45,12 +45,20 @@ func PathForClass(class string) (string, bool) {
 // [start, stop). It selects the query path from class, builds the matching
 // Flux, runs it via q, and reduces the rows to one kWh value.
 //
-// Reduction: both query paths are designed to yield a single summary row
-// (counter: last() of the increase; integral: the W·h→kWh map). We take the
-// last row's value to be defensive about an unexpected multi-row result, and
-// treat an empty result (device offline / no data in window) as 0 kWh with no
-// error. source is the path used ("counter"/"integral"). An unknown class is
-// an error.
+// Reduction: both query paths reduce to one row PER TABLE, not one row overall
+// (counter: last() of the increase; integral: the W·h→kWh map). Influx starts a
+// new table whenever a tag value changes inside the window — a room rename, a
+// class correction, a new site tag — so a device's energy arrives split across
+// several rows, each a distinct slice of the same window. We therefore SUM the
+// rows: taking only the last silently discarded every earlier slice, which made
+// a longer window report less energy than a window contained within it.
+//
+// The sum omits the delta across a table boundary itself (the gap between one
+// tag set's last sample and the next's first), which is bounded by one sample
+// interval and cannot be recovered without a single-table query.
+//
+// An empty result (device offline / no data in window) is 0 kWh with no error.
+// source is the path used ("counter"/"integral"). An unknown class is an error.
 func DeviceWindowKWh(ctx context.Context, q influx.Querier, bucket, deviceID, class string, start, stop time.Time) (kwh float64, source string, err error) {
 	path, ok := PathForClass(class)
 	if !ok {
@@ -69,9 +77,11 @@ func DeviceWindowKWh(ctx context.Context, q influx.Querier, bucket, deviceID, cl
 	if err != nil {
 		return 0, path, err
 	}
-	if len(rows) == 0 {
-		return 0, path, nil
+	// Every row is one table's total for the window; the device's energy is
+	// their sum. An empty result sums to 0, which is the wanted answer anyway.
+	var total float64
+	for _, r := range rows {
+		total += r.Value
 	}
-	// Defensive: the last row holds the window's summary value.
-	return rows[len(rows)-1].Value, path, nil
+	return total, path, nil
 }
