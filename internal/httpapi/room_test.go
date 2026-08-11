@@ -151,3 +151,59 @@ func hasKey(keys []string, want string) bool {
 	}
 	return false
 }
+
+// GET /devices is a second catalog path, in events_handlers.go rather than
+// handlers.go, and it was missed when rooms were added: it read dev.Location
+// directly, so the openapi spec and README promised a `room` the code never sent.
+//
+// It matters more than a missing field. Once the devices namespace is republished
+// it carries `room` and stops carrying `location`, so this endpoint would have
+// returned an empty location for every device — and the demo dashboards label
+// their device pickers from exactly this response.
+func TestDevicesCatalogCarriesRoom(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: roomDevices(), tariffs: testTariffs()}
+
+	w := doGET(t, s, "/devices")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Devices []struct {
+			ID       string `json:"id"`
+			Room     string `json:"room"`
+			Location string `json:"location"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var seen bool
+	for _, d := range resp.Devices {
+		if d.ID != "winefridge" {
+			continue
+		}
+		seen = true
+		if d.Room != "groundfloor.kitchen" {
+			t.Errorf("room = %q, want groundfloor.kitchen", d.Room)
+		}
+		if d.Location != "groundfloor.kitchen" {
+			t.Errorf("deprecated location alias = %q, want the same value", d.Location)
+		}
+	}
+	if !seen {
+		t.Fatalf("winefridge missing from the catalog: %s", w.Body.String())
+	}
+}
+
+// A namespace still declaring the free-text location must keep working here too.
+func TestDevicesCatalogFallsBackToLegacyLocation(t *testing.T) {
+	s, _ := dataSetup(t)
+
+	w := doGET(t, s, "/devices")
+	if !strings.Contains(w.Body.String(), `"room":"kitchen"`) {
+		t.Errorf("a location-only namespace must still populate room: %s", w.Body.String())
+	}
+}

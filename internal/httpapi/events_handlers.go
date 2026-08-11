@@ -265,8 +265,11 @@ func deviceLabel(id string, dev config.DeviceConfig) string {
 
 // catalogEntry is one /devices catalog row.
 type catalogEntry struct {
-	ID           string   `json:"id"`
-	DisplayName  string   `json:"display_name"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	// Room is the floorplan room id; Location is its deprecated spelling, emitted
+	// alongside it for one release with the same value.
+	Room         string   `json:"room"`
 	Location     string   `json:"location"`
 	Class        string   `json:"class"`
 	Capabilities []string `json:"capabilities"`
@@ -299,7 +302,8 @@ func (s *Server) handleDevices(w http.ResponseWriter, _ *http.Request) {
 		out = append(out, catalogEntry{
 			ID:           id,
 			DisplayName:  dev.DisplayName,
-			Location:     dev.Location,
+			Room:         dev.Place(),
+			Location:     dev.Place(),
 			Class:        dev.Class,
 			Capabilities: caps,
 		})
