@@ -91,9 +91,26 @@ func (d DeviceConfig) Place() string {
 	if d.Room != "" {
 		return d.Room
 	}
+	if d.Location == CoverageHouse {
+		return ""
+	}
 	return d.Location
 }
 
+// CoverageHouse is the sentinel meaning a device's readings describe the whole
+// property rather than the room it sits in.
+//
+// It is also a legacy `location` value. That field carried two different facts —
+// usually a place, but `house` was always a scope — which is the conflation this
+// migration removes. It is also one of countinghouse's own reserved series keys, so
+// keying a room series on it would collide as well as mislead.
+const CoverageHouse = "house"
+
 // CoversWholeSite reports whether this device's readings describe the whole property
 // rather than the room it sits in.
-func (d DeviceConfig) CoversWholeSite() bool { return d.Covers == "house" }
+func (d DeviceConfig) CoversWholeSite() bool {
+	if d.Covers != "" {
+		return d.Covers == CoverageHouse
+	}
+	return d.Room == "" && d.Location == CoverageHouse
+}
