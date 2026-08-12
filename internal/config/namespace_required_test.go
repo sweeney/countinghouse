@@ -1,6 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -110,6 +115,44 @@ func TestFetcherHasNoFallbackToTheDeletedNamespace(t *testing.T) {
 	f.DevicesNamespace = "devices_home"
 	if got := f.devicesNamespace(); got != "devices_home" {
 		t.Errorf("configured: %q, want devices_home", got)
+	}
+}
+
+// Removing the fallback leaves DevicesNamespace empty, and the request path is built by
+// concatenation — so an unnamed namespace would have asked for /api/v1/config/. That is
+// a different endpoint failing for a reason that says nothing about the real mistake,
+// which swaps a silent failure for a confusing one. It must issue no request at all.
+func TestFetcherIssuesNoRequestWhenTheNamespaceIsUnnamed(t *testing.T) {
+	var asked []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("{}"))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	var logged bytes.Buffer
+	f := &Fetcher{
+		BaseURL:    srv.URL,
+		Tokens:     &staticTokenSource{token: "test-token"},
+		HTTPClient: srv.Client(),
+		Logger:     slog.New(slog.NewTextHandler(&logged, nil)),
+		// DevicesNamespace deliberately unset.
+	}
+	f.Refresh(context.Background())
+
+	for _, p := range asked {
+		if strings.HasSuffix(p, "/api/v1/config/") {
+			t.Errorf("asked for the empty namespace %q; it must skip the fetch entirely", p)
+		}
+	}
+	if !strings.Contains(logged.String(), "no devices namespace") {
+		t.Errorf("skipping must say why; got:\n%s", logged.String())
+	}
+	if _, ok := f.Statuses()[""]; ok {
+		t.Error("an empty namespace must not be recorded as a status key")
 	}
 }
 

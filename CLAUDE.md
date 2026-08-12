@@ -32,7 +32,10 @@ Sibling/reference service: `../statehouse` (mirror its conventions).
 ## Config & auth (see AGENT_BRIEF §4, §6)
 
 - Config is remote at `config.swee.net` (`GET /api/v1/config/{namespace}`), not local files.
-  Namespaces: `statehouse_devices` (exists), `energy_tariffs` (countinghouse defines it).
+  Namespaces: the site's devices namespace (named by `site.devices_namespace` in local
+  config — `devices_home` here; the old shared `statehouse_devices` was deleted upstream
+  and there is no default, so a config naming none refuses to start), and `energy_tariffs`
+  (countinghouse defines it).
 - Auth via `github.com/sweeney/identity/common`: JWKS verify inbound, `client_credentials`
   `TokenSource` outbound. **Accept service tokens** (`ParseServiceToken`) as well as user
   tokens — statehouse's gap of rejecting service tokens must not be inherited.
