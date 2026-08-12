@@ -45,17 +45,21 @@ func PathForClass(class string) (string, bool) {
 // [start, stop). It selects the query path from class, builds the matching
 // Flux, runs it via q, and reduces the rows to one kWh value.
 //
-// Reduction: both query paths reduce to one row PER TABLE, not one row overall
-// (counter: last() of the increase; integral: the W·h→kWh map). Influx starts a
-// new table whenever a tag value changes inside the window — a room rename, a
-// class correction, a new site tag — so a device's energy arrives split across
-// several rows, each a distinct slice of the same window. We therefore SUM the
-// rows: taking only the last silently discarded every earlier slice, which made
-// a longer window report less energy than a window contained within it.
+// Reduction: the Flux builders now regroup a device's tag-fragments into ONE table
+// before reducing (see influx.regroupByDeviceWindow), so both paths return exactly one
+// row and this reduction is a formality. It is written to stay correct if that invariant
+// ever weakens, and the two paths need OPPOSITE handling for that case:
 //
-// The sum omits the delta across a table boundary itself (the gap between one
-// tag set's last sample and the next's first), which is bounded by one sample
-// interval and cannot be recovered without a single-table query.
+//   - counter: increase() accumulates only over the points in its own table, so
+//     fragments hold disjoint slices of the window and their totals ADD.
+//   - integral: integral() reads its bounds from the group key's _start/_stop — the
+//     whole window — so each fragment is extrapolated across all of it. Fragments are
+//     competing ESTIMATES OF THE SAME QUANTITY, not addends. Summing them is what
+//     tripled the UPS bill (5.533 kWh against a true 1.837); one estimate is roughly
+//     right, so take one rather than multiply the error.
+//
+// Getting this backwards is expensive and silent, which is why both directions are
+// pinned by tests rather than left to the comment.
 //
 // An empty result (device offline / no data in window) is 0 kWh with no error.
 // source is the path used ("counter"/"integral"). An unknown class is an error.
@@ -77,8 +81,14 @@ func DeviceWindowKWh(ctx context.Context, q influx.Querier, bucket, deviceID, cl
 	if err != nil {
 		return 0, path, err
 	}
-	// Every row is one table's total for the window; the device's energy is
-	// their sum. An empty result sums to 0, which is the wanted answer anyway.
+	if len(rows) == 0 {
+		return 0, path, nil
+	}
+	if path == PathIntegral {
+		// Competing estimates of the same window, never addends — see above.
+		return rows[len(rows)-1].Value, path, nil
+	}
+	// Counter: disjoint accumulations, so they add.
 	var total float64
 	for _, r := range rows {
 		total += r.Value

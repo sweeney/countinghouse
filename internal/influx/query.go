@@ -60,13 +60,52 @@ func fluxTime(t time.Time) string {
 //
 // energy_kwh is written as its own single-field point (it does not share rows
 // with power_w/voltage_v), so we filter strictly on _field == "energy_kwh".
+// Influx opens a NEW TABLE whenever a point's tag set changes, so statehouse's
+// location -> site migration fragmented every device's series mid-window. Each reducer
+// below then ran per fragment rather than per device, and each broke differently:
+// increase() lost the delta across every boundary; integral() extrapolated a fragment
+// across the whole window (three fragments summed to 3x the real energy); difference()
+// dropped a fragment's opening delta entirely (issue #17).
+//
+// Collapsing the fragments into one table per device upstream of every reducer fixes all
+// three at once. Two details are load-bearing and were found against real Influx:
+//
+//   - keep() must come first. Grouping tables whose column sets differ (one carries
+//     `site`, one `location`, one both) panics the server: "arrow/array: index out of
+//     range".
+//   - sort() is required. A merged table is not time-ordered, and increase(), integral()
+//     and difference() are all order-sensitive. It has no tie-breaker, so it assumes the
+//     fragments are a strict temporal partition — which the production data is (2880
+//     samples for one device over 24h, one per 30s, no shared timestamps). Overlapping
+//     stamps across fragments would leave the order among them undefined.
+//
+// regroupByDevice is for the series builders. aggregateWindow rewrites _start/_stop per
+// bucket, so those columns must stay OUT of the group key or every bucket becomes its own
+// table.
+const regroupByDevice = `  |> keep(columns: ["_time", "_value", "device_id"])
+  |> group(columns: ["device_id"])
+  |> sort(columns: ["_time"])`
+
+// regroupByDeviceWindow is for the whole-window builders. Only integral() actually
+// requires it: it reads its integration bounds from the group key and refuses to run
+// otherwise ("integral function needs _start column to be part of group key"), so
+// _start/_stop are retained and grouped on. They are constant across a range query, so
+// this still yields one table per device. BuildCounterFlux does not need the window
+// variant — increase()|>last() ignores the group key — but shares it so the two
+// whole-window builders regroup identically and cannot drift apart.
+const regroupByDeviceWindow = `  |> keep(columns: ["_time", "_value", "device_id", "_start", "_stop"])
+  |> group(columns: ["device_id", "_start", "_stop"])
+  |> sort(columns: ["_time"])`
+
 func BuildCounterFlux(bucket, deviceID string, start, stop time.Time) string {
 	return fmt.Sprintf(`from(bucket: %q)
   |> range(start: %s, stop: %s)
   |> filter(fn: (r) => r._measurement == "device_power" and r._field == "energy_kwh")
   |> filter(fn: (r) => %s)
+%s
   |> increase()
-  |> last()`, bucket, fluxTime(start), fluxTime(stop), deviceIDPredicate(deviceID))
+  |> last()`, bucket, fluxTime(start), fluxTime(stop), deviceIDPredicate(deviceID),
+		regroupByDeviceWindow)
 }
 
 // BuildActivityFlux builds the binary/event-timeline query over the
@@ -120,7 +159,9 @@ func BuildIntegralFlux(bucket, deviceID string, start, stop time.Time) string {
   |> range(start: %s, stop: %s)
   |> filter(fn: (r) => r._measurement == "device_power" and r._field == "power_w")
   |> filter(fn: (r) => %s)
+%s
   |> integral(unit: 1h, interpolate: "linear")
   |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))`,
-		bucket, fluxTime(start), fluxTime(stop), deviceIDPredicate(deviceID))
+		bucket, fluxTime(start), fluxTime(stop), deviceIDPredicate(deviceID),
+		regroupByDeviceWindow)
 }

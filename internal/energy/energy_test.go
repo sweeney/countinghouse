@@ -172,13 +172,22 @@ func TestDeviceWindowKWhCounterSumsEveryTable(t *testing.T) {
 	}
 }
 
-// The integral path splits on a tag change identically, so it needs the same
-// reduction: integral() emits one row per table, never a running series.
-func TestDeviceWindowKWhIntegralSumsEveryTable(t *testing.T) {
+// The integral path must NOT sum, and this is the opposite of the counter path above.
+//
+// integral() reads its integration bounds from the group key's _start/_stop — the whole
+// window — so a fragment holding a third of the samples is extrapolated across all of it.
+// Fragments are therefore competing ESTIMATES OF THE SAME QUANTITY, not addends. Summing
+// three of them tripled the UPS bill in production (5.533 kWh against a true 1.837).
+//
+// The Flux now returns one table per device so this cannot arise, but the reduction must
+// not be the thing that re-creates it: if fragments ever reappear, one estimate is roughly
+// right and their sum is a multiple of the truth.
+func TestDeviceWindowKWhIntegralDoesNotSumFragments(t *testing.T) {
 	f := &influx.FakeQuerier{Responses: map[string][]influx.Row{
 		"network-ups": {
-			{DeviceID: "network-ups", Field: "power_w", Value: 11.089},
-			{DeviceID: "network-ups", Field: "power_w", Value: 0.689},
+			// Two extrapolations of the same day, as fragmentation produced.
+			{DeviceID: "network-ups", Field: "power_w", Value: 1.837},
+			{DeviceID: "network-ups", Field: "power_w", Value: 1.848},
 		},
 	}}
 	kwh, source, err := DeviceWindowKWh(context.Background(), f, "statehouse",
@@ -186,11 +195,29 @@ func TestDeviceWindowKWhIntegralSumsEveryTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if math.Abs(kwh-11.778) > 1e-9 {
-		t.Fatalf("kwh = %v, want 11.778 (11.089 + 0.689)", kwh)
+	if math.Abs(kwh-3.685) < 1e-9 {
+		t.Fatal("integral fragments were summed: that is the 3x over-count this fix removes")
+	}
+	if math.Abs(kwh-1.848) > 1e-9 {
+		t.Fatalf("kwh = %v, want a single estimate (1.848), not a sum", kwh)
 	}
 	if source != PathIntegral {
 		t.Fatalf("source = %q, want %q", source, PathIntegral)
+	}
+}
+
+// The single-row case is what the regrouped Flux actually returns, on both paths.
+func TestDeviceWindowKWhIntegralSingleRow(t *testing.T) {
+	f := &influx.FakeQuerier{Responses: map[string][]influx.Row{
+		"network-ups": {{DeviceID: "network-ups", Field: "power_w", Value: 1.8366}},
+	}}
+	kwh, _, err := DeviceWindowKWh(context.Background(), f, "statehouse",
+		"network-ups", "ups_sensor", start, stop)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if math.Abs(kwh-1.8366) > 1e-9 {
+		t.Fatalf("kwh = %v, want 1.8366 unchanged", kwh)
 	}
 }
 
