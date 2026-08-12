@@ -74,13 +74,24 @@ else
 fi
 
 echo "=== Config ==="
+# Guarded: this heredoc is a first-install template, and rewriting it over an
+# existing config would revert every hand edit — including client_secret, which is
+# not recoverable from here.
+if [ -f /etc/$SERVICE/config.yaml ]; then
+    echo "  /etc/$SERVICE/config.yaml exists, leaving it alone"
+else
 cat > /etc/$SERVICE/config.yaml <<CONFIG
 # The property this instance serves. Replace the id with the site's id from the
-# `sites` namespace, and name this site's devices namespace once it is published
-# (e.g. devices_home). Until it is named, the shared pre-migration namespace is
-# read and startup logs a warning saying so — which is the intended nudge, not a
-# fault. It is spelled out rather than derived from the id so a typo is a
-# complaint at startup instead of a successful fetch of nothing.
+# \`sites\` namespace, and UNCOMMENT devices_namespace with the namespace published
+# for this site (e.g. devices_home).
+#
+# The service will refuse to start until it is named. That is deliberate: there is
+# no shared namespace to fall back to any more, so a config that names none would
+# fetch nothing and serve zero devices — every bill and every series answering zero
+# rather than erroring. Refusing to boot is the louder, safer failure.
+#
+# It is spelled out rather than derived from the id so a typo is a complaint at
+# startup instead of a successful fetch of nothing.
 site:
   id: "REPLACE_ME"
   # devices_namespace: "devices_REPLACE_ME"
@@ -108,6 +119,8 @@ house:
 CONFIG
 chown root:$SERVICE /etc/$SERVICE/config.yaml; chmod 640 /etc/$SERVICE/config.yaml
 echo "  wrote /etc/$SERVICE/config.yaml (listen :$PORT)"
+echo "  NOTE: name site.devices_namespace before starting — the service will refuse otherwise"
+fi
 
 echo "=== systemd unit ==="
 # KEEP IN SYNC with deploy/countinghouse.service

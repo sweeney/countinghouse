@@ -3,16 +3,18 @@
 #   id                 the site's id in the `sites` namespace. Reported on /healthz and
 #                      named in the startup log; nothing cross-checks it against that
 #                      namespace, so a wrong id is visible rather than rejected.
-#   devices_namespace  the config namespace holding this site's devices. Defaults to
-#                      `statehouse_devices`, the shared namespace every service read
-#                      before devices were split per site.
+#   devices_namespace  the config namespace holding this site's devices. REQUIRED —
+#                      the service refuses to start without it. It briefly defaulted to
+#                      the shared pre-split namespace, which has since been deleted, so
+#                      the default came to name a 404.
 #
 # Both are given explicitly. devices_namespace is deliberately not derived from id: a
 # namespace is a document that either exists or does not, so guessing `devices_<id>`
 # would turn a typo in id into a 404, a fail-open empty snapshot, and every endpoint
-# honestly reporting zero devices. Setting id without devices_namespace is legal — it
-# reads the shared namespace — but warns at startup, because for a second property
-# that combination silently serves the first property's data.
+# honestly reporting zero devices — every bill and every series answering zero rather
+# than erroring. Naming no namespace is refused at startup for the same reason. The
+# mirror case (a namespace with no id) only warns: it serves correct numbers and merely
+# cannot say which property they belong to.
 site:
   id: home
   devices_namespace: devices_home

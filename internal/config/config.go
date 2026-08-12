@@ -44,15 +44,13 @@ type SiteConfig struct {
 	// ID matches an entry in the `sites` namespace.
 	ID string `yaml:"id"`
 
-	// DevicesNamespace is the config namespace holding this site's devices.
-	// Defaults to the shared pre-migration namespace, so a config that predates the
-	// per-site split keeps reading exactly what it always read.
+	// DevicesNamespace is the config namespace holding this site's devices. It is
+	// required: there is no shared namespace to fall back to since statehouse_devices
+	// was deleted from the config service, and defaulting to a document that does not
+	// exist buys a silent empty snapshot rather than a diagnostic. Load refuses a
+	// config that leaves it unset.
 	DevicesNamespace string `yaml:"devices_namespace"`
 }
-
-// DefaultDevicesNamespace is the single shared namespace every service read before
-// devices were split per site.
-const DefaultDevicesNamespace = "statehouse_devices"
 
 // UnmarshalYAML accepts either the block form or a bare id:
 //
@@ -167,29 +165,53 @@ func Load(path string) (Config, error) {
 		}
 	}
 	cfg.warnings = siteWarnings(cfg.Site)
-	if cfg.Site.DevicesNamespace == "" {
-		cfg.Site.DevicesNamespace = DefaultDevicesNamespace
+	if err := requireDevicesNamespace(cfg.Site); err != nil {
+		return cfg, err
 	}
 	return cfg, nil
 }
 
-// siteWarnings reports a half-filled site block. Must run before the default is
-// applied: afterwards "defaulted" and "explicitly set to the shared namespace" are the
-// same value, and the distinction is the whole point.
+// requireDevicesNamespace refuses a config that does not name the namespace its devices
+// live in.
 //
-// The namespace is deliberately not derived from the id. A namespace is a document
-// that either exists or does not, so guessing `devices_<id>` would convert a typo in
-// `id` into a successful fetch of nothing — fail-open, an empty snapshot, and every
-// endpoint reporting zero devices — rather than into this complaint. Two facts, stated
-// twice, checked against each other.
+// This was a warning while `statehouse_devices` still existed and the fallback worked.
+// That namespace was deleted from the config service, so the default now names a
+// document that returns 404, and every layer below handles it correctly into silence:
+// the fetch fails, Refresh is fail-open and keeps the last-known snapshot, at startup
+// there is no last-known snapshot, and every endpoint then reports zero devices. For a
+// billing service that is a wrong answer wearing the shape of a right one.
+//
+// The namespace is deliberately NOT derived from the id. A namespace is a document that
+// either exists or does not, so guessing `devices_<id>` would turn a typo in `id` back
+// into a successful fetch of nothing — precisely the failure this refusal exists to
+// remove. Two facts, stated twice, checked against each other.
+func requireDevicesNamespace(s SiteConfig) error {
+	if s.DevicesNamespace != "" {
+		return nil
+	}
+	subject, id := "this instance", s.ID
+	if s.ID != "" {
+		subject = fmt.Sprintf("site %q", s.ID)
+	} else {
+		id = "<this site's id from the sites namespace>"
+	}
+	return fmt.Errorf(
+		"%s names no devices_namespace, and there is no shared namespace left to fall "+
+			"back to: statehouse_devices was deleted from the config service, so defaulting "+
+			"to it would fetch nothing and serve zero devices while looking healthy. Name it:"+
+			"\n\nsite:\n  id: %s\n  devices_namespace: <the namespace published for this site>\n",
+		subject, id)
+}
+
+// siteWarnings reports a half-filled site block that is legal and works.
+//
+// Only the mirror case is left: a namespace with no id fetches the right devices and
+// serves correct numbers, and costs only the ability to say which property it serves.
+// Refusing to start over that would take a working instance down to fix a label. The
+// other half — an id with no namespace — is no longer a warning but an error, since
+// there is nothing left for it to fall back to.
 func siteWarnings(s SiteConfig) []string {
-	switch {
-	case s.ID != "" && s.DevicesNamespace == "":
-		return []string{fmt.Sprintf(
-			"site %q names no devices_namespace, so it reads the shared %s; "+
-				"if this instance serves its own property, name its namespace explicitly",
-			s.ID, DefaultDevicesNamespace)}
-	case s.ID == "" && s.DevicesNamespace != "":
+	if s.ID == "" && s.DevicesNamespace != "" {
 		return []string{fmt.Sprintf(
 			"devices_namespace %q is set but the site has no id, so this instance "+
 				"cannot report which property it serves", s.DevicesNamespace)}

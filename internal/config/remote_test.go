@@ -28,9 +28,10 @@ func newTestFetcher(t *testing.T, mux *http.ServeMux, tokens TokenSource) *Fetch
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &Fetcher{
-		BaseURL:    srv.URL,
-		Tokens:     tokens,
-		HTTPClient: srv.Client(),
+		BaseURL:          srv.URL,
+		DevicesNamespace: "devices_home",
+		Tokens:           tokens,
+		HTTPClient:       srv.Client(),
 	}
 }
 
@@ -48,7 +49,7 @@ func serveNamespace(mux *http.ServeMux, ns string, v any) {
 
 func TestFetcher_RefreshPopulatesSnapshots(t *testing.T) {
 	mux := http.NewServeMux()
-	serveNamespace(mux, "statehouse_devices", map[string]any{
+	serveNamespace(mux, "devices_home", map[string]any{
 		"washingmachine": map[string]any{
 			// Legacy Z2M shorthand: normaliseDevices folds these into
 			// scheme=zigbee, primary=ieee_address, display=friendly_name.
@@ -100,20 +101,20 @@ func TestFetcher_RefreshPopulatesSnapshots(t *testing.T) {
 	}
 
 	st := f.Statuses()
-	if !st["statehouse_devices"].OK {
-		t.Error("statehouse_devices status not OK")
+	if !st["devices_home"].OK {
+		t.Error("devices_home status not OK")
 	}
 	if !st["energy_tariffs"].OK {
 		t.Error("energy_tariffs status not OK")
 	}
-	if st["statehouse_devices"].FetchedAt.IsZero() {
-		t.Error("statehouse_devices fetched_at is zero")
+	if st["devices_home"].FetchedAt.IsZero() {
+		t.Error("devices_home fetched_at is zero")
 	}
 }
 
 func TestFetcher_DevicesReturnsCopy(t *testing.T) {
 	mux := http.NewServeMux()
-	serveNamespace(mux, "statehouse_devices", map[string]any{
+	serveNamespace(mux, "devices_home", map[string]any{
 		"kettle": map[string]any{"class": "short_burst_power_device"},
 	})
 	serveNamespace(mux, "energy_tariffs", map[string]any{"tariffs": map[string]any{}})
@@ -137,7 +138,7 @@ func TestFetcher_DevicesReturnsCopy(t *testing.T) {
 func TestFetcher_401InvalidatesAndKeepsSnapshot(t *testing.T) {
 	// Phase 1: a healthy server populates the snapshot.
 	good := http.NewServeMux()
-	serveNamespace(good, "statehouse_devices", map[string]any{
+	serveNamespace(good, "devices_home", map[string]any{
 		"fridge": map[string]any{"class": "continuous_power_device", "display_name": "Fridge"},
 	})
 	serveNamespace(good, "energy_tariffs", map[string]any{
@@ -149,7 +150,8 @@ func TestFetcher_401InvalidatesAndKeepsSnapshot(t *testing.T) {
 	defer goodSrv.Close()
 
 	src := &trackingTokenSource{token: "stale-token"} // not "test-token" -> 401 from serveNamespace
-	f := &Fetcher{BaseURL: goodSrv.URL, Tokens: &staticTokenSource{token: "test-token"}, HTTPClient: goodSrv.Client()}
+	f := &Fetcher{BaseURL: goodSrv.URL, Tokens: &staticTokenSource{token: "test-token"},
+		HTTPClient: goodSrv.Client(), DevicesNamespace: "devices_home"}
 	f.Refresh(context.Background())
 	if _, ok := f.Devices()["fridge"]; !ok {
 		t.Fatal("precondition: fridge should be present after first refresh")
@@ -157,7 +159,7 @@ func TestFetcher_401InvalidatesAndKeepsSnapshot(t *testing.T) {
 
 	// Phase 2: point the fetcher at a server that always 401s.
 	bad := http.NewServeMux()
-	for _, ns := range []string{"statehouse_devices", "energy_tariffs"} {
+	for _, ns := range []string{"devices_home", "energy_tariffs"} {
 		bad.HandleFunc("/api/v1/config/"+ns, func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 		})
@@ -180,7 +182,7 @@ func TestFetcher_401InvalidatesAndKeepsSnapshot(t *testing.T) {
 	if _, ok := f.Tariffs().Electricity(); !ok {
 		t.Error("tariff snapshot was wiped after a 401 (should fail-open)")
 	}
-	if f.Statuses()["statehouse_devices"].OK {
+	if f.Statuses()["devices_home"].OK {
 		t.Error("status should record the 401 failure")
 	}
 }
@@ -188,7 +190,7 @@ func TestFetcher_401InvalidatesAndKeepsSnapshot(t *testing.T) {
 func TestFetcher_OneNamespaceFailureKeepsOther(t *testing.T) {
 	mux := http.NewServeMux()
 	// devices is healthy; tariffs returns 503.
-	serveNamespace(mux, "statehouse_devices", map[string]any{
+	serveNamespace(mux, "devices_home", map[string]any{
 		"oven": map[string]any{"class": "cycle_power_device", "display_name": "Oven"},
 	})
 	mux.HandleFunc("/api/v1/config/energy_tariffs", func(w http.ResponseWriter, r *http.Request) {
@@ -202,8 +204,8 @@ func TestFetcher_OneNamespaceFailureKeepsOther(t *testing.T) {
 		t.Error("devices snapshot should be populated despite tariffs failure")
 	}
 	st := f.Statuses()
-	if !st["statehouse_devices"].OK {
-		t.Error("statehouse_devices should be OK")
+	if !st["devices_home"].OK {
+		t.Error("devices_home should be OK")
 	}
 	if st["energy_tariffs"].OK {
 		t.Error("energy_tariffs should be failed")
@@ -215,7 +217,7 @@ func TestFetcher_OneNamespaceFailureKeepsOther(t *testing.T) {
 
 func TestFetcher_TokenFailureKeepsSnapshot(t *testing.T) {
 	mux := http.NewServeMux()
-	serveNamespace(mux, "statehouse_devices", map[string]any{
+	serveNamespace(mux, "devices_home", map[string]any{
 		"lamp": map[string]any{"class": "continuous_power_device"},
 	})
 	serveNamespace(mux, "energy_tariffs", map[string]any{"tariffs": map[string]any{}})
@@ -232,13 +234,13 @@ func TestFetcher_TokenFailureKeepsSnapshot(t *testing.T) {
 	if _, ok := f.Devices()["lamp"]; !ok {
 		t.Error("snapshot wiped after token failure (should fail-open)")
 	}
-	if f.Statuses()["statehouse_devices"].OK {
+	if f.Statuses()["devices_home"].OK {
 		t.Error("status should record token failure")
 	}
 }
 
 func TestFetcher_EmptyBaseURLNoOp(t *testing.T) {
-	f := &Fetcher{Tokens: &errTokenSource{}}
+	f := &Fetcher{Tokens: &errTokenSource{}, DevicesNamespace: "devices_home"}
 	f.Refresh(context.Background()) // must not panic, must not call Token
 	if len(f.Devices()) != 0 {
 		t.Error("expected empty devices")

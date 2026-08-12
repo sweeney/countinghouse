@@ -37,6 +37,9 @@ func writeFile(t *testing.T, dir, name, content string) string {
 func TestLoadOverridesDefaults(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "config.yaml", `
+site:
+  id: "test"
+  devices_namespace: "devices_test"
 http:
   listen: ":9090"
   public_url: "https://countinghouse.example"
@@ -85,6 +88,9 @@ func TestLoadTokenFileFallback(t *testing.T) {
 	dir := t.TempDir()
 	tokPath := writeFile(t, dir, "influx-token", "secret-token\n")
 	p := writeFile(t, dir, "config.yaml", `
+site:
+  id: "test"
+  devices_namespace: "devices_test"
 influx:
   url: "http://influx:8086"
   token_file: "`+tokPath+`"
@@ -102,6 +108,9 @@ func TestLoadInlineTokenWinsOverFile(t *testing.T) {
 	dir := t.TempDir()
 	tokPath := writeFile(t, dir, "influx-token", "from-file")
 	p := writeFile(t, dir, "config.yaml", `
+site:
+  id: "test"
+  devices_namespace: "devices_test"
 influx:
   token: "from-inline"
   token_file: "`+tokPath+`"
@@ -140,6 +149,9 @@ house:
 func TestLoadValidTimezonePasses(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "config.yaml", `
+site:
+  id: "test"
+  devices_namespace: "devices_test"
 house:
   timezone: "Europe/London"
 `)

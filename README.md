@@ -147,15 +147,23 @@ site:
   devices_namespace: devices_home
 ```
 
-It defaults to `statehouse_devices` — the shared namespace every service read before
-devices were split per site — so an unedited config keeps reading what it always read.
+**`devices_namespace` is required, and the service refuses to start without it.** It
+briefly defaulted to `statehouse_devices`, the shared namespace every service read
+before devices were split per site. That namespace has been deleted from the config
+service, so the default came to name a document that returns 404 — and every layer below
+handles that correctly into silence: the fetch fails, the refresh is fail-open and keeps
+the last-known snapshot, at startup there is no last-known snapshot, and every endpoint
+then reports zero devices. For a billing service that is a wrong answer in the shape of a
+right one, so an unnamed namespace is now a refusal to boot rather than a warning.
 
 Both keys are given explicitly. `devices_namespace` is deliberately *not* derived from
 `id`: a namespace is a document that either exists or does not, and guessing its name
 from the site id would turn a typo in `id` into a silent fetch of nothing rather than a
-startup complaint. Setting `id` without `devices_namespace` is therefore logged as a
-warning at startup, and the resolved pair is reported on `/healthz` so which site an
-instance believes it serves is observable rather than inferred from behaviour.
+startup complaint. The mirror case — a namespace with no `id` — stays a warning, because
+that instance serves correct numbers and only loses the ability to say which property it
+serves; taking it down to fix a label would be the worse trade. The resolved pair is
+reported on `/healthz` so which site an instance believes it serves is observable rather
+than inferred from behaviour.
 
 ## Configuration
 
@@ -175,10 +183,11 @@ house:   { timezone: "Europe/London" }
   (the devices namespace named by `site.devices_namespace`, and `energy_tariffs`) via
   `client_credentials`. Fetches are fail-open and reload on `SIGHUP`.
 - **`/healthz.remote_config`** is keyed by the namespace actually read, so the devices
-  entry is named by `site.devices_namespace` — `statehouse_devices` by default,
-  `devices_home` once a site names one. A monitor keyed on a literal
-  `remote_config.statehouse_devices` therefore stops matching when a site migrates, and
-  in most check expressions a missing key reads as healthy rather than as an error.
+  entry is named by `site.devices_namespace` — `devices_home` for this site. There is no
+  default: a config naming no namespace does not start. A monitor keyed on a literal
+  namespace therefore stops matching when a site migrates, and in most check expressions
+  a missing key reads as healthy rather than as an error — so alert on the top-level
+  `status` field, which degrades regardless of the key.
 
 ## Run locally
 

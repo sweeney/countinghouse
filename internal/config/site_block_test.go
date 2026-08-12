@@ -28,31 +28,13 @@ func TestSiteBlockNamesTheDevicesNamespace(t *testing.T) {
 	}
 }
 
-// A config with no site block keeps reading the shared namespace it always read, so
-// deploying the binary before editing the host's config changes nothing.
-func TestDevicesNamespaceDefaultsToTheSharedOne(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(p, []byte("http:\n  listen: :8080\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := Load(p)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if cfg.Site.DevicesNamespace != DefaultDevicesNamespace {
-		t.Errorf("DevicesNamespace = %q, want %q", cfg.Site.DevicesNamespace, DefaultDevicesNamespace)
-	}
-}
-
 // Naming the namespace in config is only useful if the fetcher reads it. Publishing a
 // per-site namespace did nothing while this was a package-level constant.
+//
+// The unset case is no longer a default but a refusal, pinned in
+// namespace_required_test.go — there is no shared document left to fall back to.
 func TestFetcherReadsTheConfiguredNamespace(t *testing.T) {
-	f := &Fetcher{}
-	if got := f.devicesNamespace(); got != DefaultDevicesNamespace {
-		t.Errorf("unset: %q, want the shared default %q", got, DefaultDevicesNamespace)
-	}
-	f.DevicesNamespace = "devices_home"
+	f := &Fetcher{DevicesNamespace: "devices_home"}
 	if got := f.devicesNamespace(); got != "devices_home" {
 		t.Errorf("configured: %q, want devices_home", got)
 	}
