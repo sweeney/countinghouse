@@ -74,7 +74,10 @@ func fluxTime(t time.Time) string {
 //     `site`, one `location`, one both) panics the server: "arrow/array: index out of
 //     range".
 //   - sort() is required. A merged table is not time-ordered, and increase(), integral()
-//     and difference() are all order-sensitive.
+//     and difference() are all order-sensitive. It has no tie-breaker, so it assumes the
+//     fragments are a strict temporal partition — which the production data is (2880
+//     samples for one device over 24h, one per 30s, no shared timestamps). Overlapping
+//     stamps across fragments would leave the order among them undefined.
 //
 // regroupByDevice is for the series builders. aggregateWindow rewrites _start/_stop per
 // bucket, so those columns must stay OUT of the group key or every bucket becomes its own
@@ -83,10 +86,13 @@ const regroupByDevice = `  |> keep(columns: ["_time", "_value", "device_id"])
   |> group(columns: ["device_id"])
   |> sort(columns: ["_time"])`
 
-// regroupByDeviceWindow is for the whole-window builders. integral() reads its integration
-// bounds from the group key and refuses to run otherwise ("integral function needs _start
-// column to be part of group key"), so _start/_stop are retained and grouped on. They are
-// constant across a range query, so this still yields one table per device.
+// regroupByDeviceWindow is for the whole-window builders. Only integral() actually
+// requires it: it reads its integration bounds from the group key and refuses to run
+// otherwise ("integral function needs _start column to be part of group key"), so
+// _start/_stop are retained and grouped on. They are constant across a range query, so
+// this still yields one table per device. BuildCounterFlux does not need the window
+// variant — increase()|>last() ignores the group key — but shares it so the two
+// whole-window builders regroup identically and cannot drift apart.
 const regroupByDeviceWindow = `  |> keep(columns: ["_time", "_value", "device_id", "_start", "_stop"])
   |> group(columns: ["device_id", "_start", "_stop"])
   |> sort(columns: ["_time"])`
