@@ -195,11 +195,12 @@ func requireDevicesNamespace(s SiteConfig) error {
 	} else {
 		id = "<this site's id from the sites namespace>"
 	}
+	// No trailing newline: staticcheck ST1005, and the logger quotes the value anyway.
 	return fmt.Errorf(
 		"%s names no devices_namespace, and there is no shared namespace left to fall "+
 			"back to: statehouse_devices was deleted from the config service, so defaulting "+
 			"to it would fetch nothing and serve zero devices while looking healthy. Name it:"+
-			"\n\nsite:\n  id: %s\n  devices_namespace: <the namespace published for this site>\n",
+			"\n\nsite:\n  id: %s\n  devices_namespace: <the namespace published for this site>",
 		subject, id)
 }
 
