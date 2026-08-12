@@ -3,6 +3,7 @@ package energy
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -140,16 +141,70 @@ func TestDeviceWindowKWhQueryError(t *testing.T) {
 	}
 }
 
-func TestDeviceWindowKWhMultipleRowsTakesLast(t *testing.T) {
+// Both reducers — increase()|>last() and integral() — collapse to one row PER
+// TABLE, and Influx starts a new table whenever a tag value changes inside the
+// window: a room rename, a class correction, a new site tag. So a multi-row
+// result is the normal shape for any window spanning such a change, not an
+// anomaly, and every row is a distinct slice of the same device's energy.
+//
+// Taking only the last row discarded all the earlier slices. In production that
+// made a longer window report LESS than a window inside it: electricity_meter
+// read 3.357 kWh for 12 Aug, but 0.562 kWh for 2d, 7d and week alike — every
+// window containing 11 Aug, the day the floorplan tags changed. A 7-day bill was
+// smaller than one of its own days.
+func TestDeviceWindowKWhCounterSumsEveryTable(t *testing.T) {
 	f := &influx.FakeQuerier{Responses: map[string][]influx.Row{
-		"multi": {{Value: 1.0}, {Value: 2.0}, {Value: 3.5}},
+		"electricity_meter": {
+			{DeviceID: "electricity_meter", Field: "energy_kwh", Value: 5.817},
+			{DeviceID: "electricity_meter", Field: "energy_kwh", Value: 0.562},
+		},
+	}}
+	kwh, source, err := DeviceWindowKWh(context.Background(), f, "statehouse",
+		"electricity_meter", EnergyMeterClass, start, stop)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if math.Abs(kwh-6.379) > 1e-9 {
+		t.Fatalf("kwh = %v, want 6.379 (5.817 + 0.562): every table is real energy", kwh)
+	}
+	if source != PathCounter {
+		t.Fatalf("source = %q, want %q", source, PathCounter)
+	}
+}
+
+// The integral path splits on a tag change identically, so it needs the same
+// reduction: integral() emits one row per table, never a running series.
+func TestDeviceWindowKWhIntegralSumsEveryTable(t *testing.T) {
+	f := &influx.FakeQuerier{Responses: map[string][]influx.Row{
+		"network-ups": {
+			{DeviceID: "network-ups", Field: "power_w", Value: 11.089},
+			{DeviceID: "network-ups", Field: "power_w", Value: 0.689},
+		},
+	}}
+	kwh, source, err := DeviceWindowKWh(context.Background(), f, "statehouse",
+		"network-ups", "ups_sensor", start, stop)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if math.Abs(kwh-11.778) > 1e-9 {
+		t.Fatalf("kwh = %v, want 11.778 (11.089 + 0.689)", kwh)
+	}
+	if source != PathIntegral {
+		t.Fatalf("source = %q, want %q", source, PathIntegral)
+	}
+}
+
+// A single-table result is the common case and must be unchanged by the sum.
+func TestDeviceWindowKWhSingleRowIsUnchanged(t *testing.T) {
+	f := &influx.FakeQuerier{Responses: map[string][]influx.Row{
+		"solo": {{Value: 3.5}},
 	}}
 	kwh, _, err := DeviceWindowKWh(context.Background(), f, "statehouse",
-		"multi", "energy_meter", start, stop)
+		"solo", EnergyMeterClass, start, stop)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if kwh != 3.5 {
-		t.Fatalf("kwh = %v, want last row 3.5", kwh)
+		t.Fatalf("kwh = %v, want 3.5", kwh)
 	}
 }
