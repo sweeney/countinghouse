@@ -1141,13 +1141,13 @@ components:
           description: >-
             Per-namespace status of the most recent remote-config fetch, keyed by
             the namespace actually read. The devices key follows
-            site.devices_namespace — `statehouse_devices` by default,
-            `devices_home` once a site names one — so a monitor keyed on a literal
-            `remote_config.statehouse_devices` stops matching when a site migrates,
-            and a missing key reads as healthy in most check expressions. Alert on
-            the top-level `status` field instead, which degrades regardless of the
-            key. `energy_tariffs` is fixed. Omitted when no remote-config fetcher
-            is wired.
+            site.devices_namespace, which is required — there is no default, and a
+            config naming no namespace refuses to start. A monitor keyed on a
+            literal namespace therefore stops matching when a site migrates, and a
+            missing key reads as healthy in most check expressions. Alert on the
+            top-level `status` field instead, which degrades regardless of the key.
+            `energy_tariffs` is fixed. Omitted when no remote-config fetcher is
+            wired.
           additionalProperties:
             type: object
             properties:

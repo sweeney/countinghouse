@@ -35,6 +35,27 @@ if [ -z "$SECRET" ]; then
 fi
 [ -n "$SECRET" ] || { echo "client_secret is required" >&2; exit 1; }
 
+# The site and its devices namespace. Demanded here rather than written as a
+# placeholder: the service refuses to start without the namespace, and a template that
+# defers the decision moves the failure to first boot, when nobody is watching. Asking
+# now means a fresh host either works or fails in front of the person installing it.
+#
+# Not derived from the id. A namespace is a document that either exists or does not, so
+# guessing `devices_<id>` turns a typo in the id into a 404 and an empty snapshot.
+SITE_ID="${CH_SITE_ID:-}"
+if [ -z "$SITE_ID" ]; then
+    printf 'site id (from the `sites` namespace, e.g. home): '
+    read -r SITE_ID
+fi
+[ -n "$SITE_ID" ] || { echo "site id is required" >&2; exit 1; }
+
+DEVICES_NS="${CH_DEVICES_NAMESPACE:-}"
+if [ -z "$DEVICES_NS" ]; then
+    printf 'devices namespace for this site (e.g. devices_home): '
+    read -r DEVICES_NS
+fi
+[ -n "$DEVICES_NS" ] || { echo "devices_namespace is required — the service will not start without it" >&2; exit 1; }
+
 echo "=== Service user ==="
 if ! id "$SERVICE" >/dev/null 2>&1; then
     useradd --system --shell /usr/sbin/nologin --home-dir "/var/lib/$SERVICE" "$SERVICE"
@@ -74,16 +95,23 @@ else
 fi
 
 echo "=== Config ==="
+# Guarded: this heredoc is a first-install template, and rewriting it over an
+# existing config would revert every hand edit — including client_secret, which is
+# not recoverable from here.
+if [ -f /etc/$SERVICE/config.yaml ]; then
+    echo "  /etc/$SERVICE/config.yaml exists, leaving it alone"
+else
 cat > /etc/$SERVICE/config.yaml <<CONFIG
-# The property this instance serves. Replace the id with the site's id from the
-# `sites` namespace, and name this site's devices namespace once it is published
-# (e.g. devices_home). Until it is named, the shared pre-migration namespace is
-# read and startup logs a warning saying so — which is the intended nudge, not a
-# fault. It is spelled out rather than derived from the id so a typo is a
+# The property this instance serves, supplied at install time.
+#
+# devices_namespace is required — the service refuses to start without it. There is
+# no shared namespace to fall back to any more, so a config naming none would fetch
+# nothing and serve zero devices: every bill and every series answering zero rather
+# than erroring. It is spelled out rather than derived from the id so a typo is a
 # complaint at startup instead of a successful fetch of nothing.
 site:
-  id: "REPLACE_ME"
-  # devices_namespace: "devices_REPLACE_ME"
+  id: "$SITE_ID"
+  devices_namespace: "$DEVICES_NS"
 
 http:
   listen: ":$PORT"
@@ -108,6 +136,8 @@ house:
 CONFIG
 chown root:$SERVICE /etc/$SERVICE/config.yaml; chmod 640 /etc/$SERVICE/config.yaml
 echo "  wrote /etc/$SERVICE/config.yaml (listen :$PORT)"
+echo "  NOTE: name site.devices_namespace before starting — the service will refuse otherwise"
+fi
 
 echo "=== systemd unit ==="
 # KEEP IN SYNC with deploy/countinghouse.service

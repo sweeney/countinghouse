@@ -34,7 +34,7 @@ func TestFetchFailureNamesTheConfiguredNamespace(t *testing.T) {
 	if !strings.Contains(out, "devices_hme") {
 		t.Errorf("the fetch warning must name the namespace it asked for; got:\n%s", out)
 	}
-	if strings.Contains(out, "statehouse_devices") {
+	if strings.Contains(out, "devices_home") {
 		t.Errorf("the warning names a namespace that was never requested:\n%s", out)
 	}
 }
@@ -47,7 +47,7 @@ func TestFetchErrorIdentifiesTheNamespace(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Fetcher{BaseURL: srv.URL, Tokens: &staticTokenSource{"token"}}
+	f := &Fetcher{BaseURL: srv.URL, Tokens: &staticTokenSource{"token"}, DevicesNamespace: "devices_home"}
 	err := f.fetch(context.Background(), "token", "devices_hme", &map[string]DeviceConfig{})
 	if err == nil {
 		t.Fatal("want an error for a 404")

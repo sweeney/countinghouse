@@ -68,13 +68,11 @@ var defaultFetchClient = &http.Client{Timeout: 10 * time.Second}
 // maxConfigBytes is the maximum response body size accepted from the config service.
 const maxConfigBytes = 1 << 20 // 1 MiB
 
-// Namespace names fetched from the config service.
-const (
-	nsDevices = "statehouse_devices"
-	nsTariffs = "energy_tariffs"
-)
+// nsTariffs is the one namespace that is still the same document for every site.
+// The devices namespace is per-site and comes from config — see DevicesNamespace.
+const nsTariffs = "energy_tariffs"
 
-// Devices returns a copy of the current statehouse_devices snapshot keyed by
+// Devices returns a copy of the current devices snapshot keyed by
 // device_id. Safe for concurrent use. Implements httpapi.ConfigProvider.
 func (f *Fetcher) Devices() map[string]DeviceConfig {
 	f.mu.RLock()
@@ -134,11 +132,23 @@ func (f *Fetcher) Refresh(ctx context.Context) {
 }
 
 func (f *Fetcher) refreshDevices(ctx context.Context, token string) {
+	ns := f.devicesNamespace()
+	// The request path is built by concatenation, so an unnamed namespace would ask for
+	// /api/v1/config/ — a different endpoint, failing for a reason that says nothing
+	// about the actual mistake. That trades a silent failure for a confusing one, so
+	// refuse instead. Load rejects a config that names no namespace, so reaching here
+	// means a Fetcher built by hand; say so rather than guessing a name.
+	if ns == "" {
+		f.warn("remote config: no devices namespace configured, skipping the devices fetch " +
+			"(a Fetcher built without going through config.Load)")
+		return
+	}
+
 	var devices map[string]DeviceConfig
-	if err := f.fetch(ctx, token, f.devicesNamespace(), &devices); err != nil {
+	if err := f.fetch(ctx, token, ns, &devices); err != nil {
 		f.warn("remote config: devices namespace unavailable, keeping last-known",
-			"namespace", f.devicesNamespace(), "error", err)
-		f.recordStatus(f.devicesNamespace(), err)
+			"namespace", ns, "error", err)
+		f.recordStatus(ns, err)
 		return
 	}
 	if devices == nil {
@@ -148,7 +158,7 @@ func (f *Fetcher) refreshDevices(ctx context.Context, token string) {
 	f.mu.Lock()
 	f.devices = devices
 	f.mu.Unlock()
-	f.recordStatus(f.devicesNamespace(), nil)
+	f.recordStatus(ns, nil)
 }
 
 func (f *Fetcher) refreshTariffs(ctx context.Context, token string) {
@@ -224,11 +234,11 @@ func (f *Fetcher) warn(msg string, args ...any) {
 	}
 }
 
-// devicesNamespace is the namespace this fetcher reads devices from, defaulting to
-// the shared pre-migration document when config names none.
+// devicesNamespace is the namespace this fetcher reads devices from. There is no
+// fallback: Load refuses a config that names none, and substituting one here would
+// reintroduce the deleted shared namespace by the back door for any Fetcher built
+// without going through Load. Defaulting the same value in two places is the shape of
+// bug that recurred throughout this migration, so it now has exactly one source.
 func (f *Fetcher) devicesNamespace() string {
-	if f.DevicesNamespace != "" {
-		return f.DevicesNamespace
-	}
-	return nsDevices
+	return f.DevicesNamespace
 }

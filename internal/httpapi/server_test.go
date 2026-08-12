@@ -140,12 +140,12 @@ func TestHandleHealth_InfluxUnreachable(t *testing.T) {
 // takes precedence over a degraded namespace.
 func TestHandleHealth_StatusDerivation(t *testing.T) {
 	okNS := map[string]config.NamespaceStatus{
-		"statehouse_devices": {OK: true},
-		"energy_tariffs":     {OK: true},
+		"devices_home":   {OK: true},
+		"energy_tariffs": {OK: true},
 	}
 	degradedNS := map[string]config.NamespaceStatus{
-		"statehouse_devices": {OK: true},
-		"energy_tariffs":     {OK: false, Error: "boom"},
+		"devices_home":   {OK: true},
+		"energy_tariffs": {OK: false, Error: "boom"},
 	}
 	cases := []struct {
 		name   string
@@ -191,8 +191,8 @@ func TestHandleHealth_StatusDerivation(t *testing.T) {
 func TestHandleHealth_RemoteConfig(t *testing.T) {
 	s := setup(t)
 	s.RemoteConfig = fakeConfigStatus{statuses: map[string]config.NamespaceStatus{
-		"statehouse_devices": {OK: true},
-		"energy_tariffs":     {OK: false, Error: "boom"},
+		"devices_home":   {OK: true},
+		"energy_tariffs": {OK: false, Error: "boom"},
 	}}
 	mux := newMux(s)
 	r := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -205,8 +205,8 @@ func TestHandleHealth_RemoteConfig(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &h); err != nil {
 		t.Fatalf("unmarshal health: %v", err)
 	}
-	if !h.RemoteConfig["statehouse_devices"].OK {
-		t.Error("want statehouse_devices OK")
+	if !h.RemoteConfig["devices_home"].OK {
+		t.Error("want devices_home OK")
 	}
 	if h.RemoteConfig["energy_tariffs"].OK {
 		t.Error("want energy_tariffs not OK")
