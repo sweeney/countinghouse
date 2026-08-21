@@ -17,6 +17,20 @@ const (
 	GroupByRoom  = "room"
 	GroupByClass = "class"
 	GroupByHouse = "house"
+
+	// GroupBySelf is the single-device assembly behind GET /devices/{id}/series.
+	// It is INTERNAL: the /series handler rejects it as a group_by value, and a
+	// response built with it reports group_by "device" (see resolveGroupBy),
+	// because it is the device grouping — just not a FLEET one.
+	//
+	// The distinction is the whole-house meter. The fleet groupings exclude it
+	// (see IsWholeHouseTotal): it measures the same electricity as the plugs, so
+	// one series per device plus the meter double-counts the house. A request for
+	// ONE device cannot double-count anything, so the exclusion has no work to do
+	// and its only effect was to empty the response — 200 with "series": null for
+	// the meter, which reads as "no readings" (issue #21). Self assembles exactly
+	// the requested device, whatever its class.
+	GroupBySelf = "self"
 )
 
 // house series keys.
@@ -249,6 +263,9 @@ func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 // Grouping rules (PLAN §A):
 //   - device (default): one series per metered device, EXCLUDING the energy
 //     meter. key=id, label=DisplayName, room/class carried through.
+//   - self (internal, single-device endpoint): the device series WITHOUT the
+//     whole-house exclusion — a one-device request is not a fleet and cannot
+//     double-count. Identical to device for every other class.
 //   - room: device kWh/cost/avgW summed per room (meter excluded).
 //   - class: summed per Class (meter excluded).
 //   - house: THREE series — "monitored" = sum of ALL non-meter devices;
@@ -290,10 +307,12 @@ func AssembleSeries(
 		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Class })
 	case GroupByHouse:
 		return assembleHouse(buckets, bucketHours, devices, energyByDevice, powerByDevice, tariff, get)
+	case GroupBySelf:
+		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, tariff, get, true)
 	case GroupByDevice, "":
-		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, tariff, get)
+		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, tariff, get, false)
 	default:
-		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, tariff, get)
+		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, tariff, get, false)
 	}
 }
 
@@ -315,19 +334,27 @@ func paddedGetter(n int) getter {
 	}
 }
 
-// assembleByDevice yields one series per metered non-meter device.
+// assembleByDevice yields one series per metered device. When
+// includeWholeHouseTotal is false (the fleet view, group_by=device) the
+// whole-house meter is left out so the series do not double-count the house;
+// when true (GroupBySelf, the single-device endpoint) it is assembled like any
+// other device, since one device cannot double-count.
 func assembleByDevice(
 	buckets []time.Time,
 	devices map[string]config.DeviceConfig,
 	energyByDevice, powerByDevice map[string][]float64,
 	tariff config.Tariff,
 	get getter,
+	includeWholeHouseTotal bool,
 ) []Series {
 	ids := sortedDeviceIDs(devices)
 	var out []Series
 	for _, id := range ids {
 		d := devices[id]
-		if !isMetered(d.Class) || d.Class == EnergyMeterClass {
+		if !isMetered(d.Class) {
+			continue
+		}
+		if IsWholeHouseTotal(d) && !includeWholeHouseTotal {
 			continue
 		}
 		label := d.DisplayName
@@ -355,7 +382,7 @@ func assembleGrouped(
 ) []Series {
 	members := map[string][]string{}
 	for id, d := range devices {
-		if !isMetered(d.Class) || d.Class == EnergyMeterClass {
+		if !isMetered(d.Class) || IsWholeHouseTotal(d) {
 			continue
 		}
 		k := keyOf(d)
@@ -430,7 +457,7 @@ func houseParts(
 	meterID, _ := MeterID(devices)
 	for _, id := range sortedDeviceIDs(devices) {
 		d := devices[id]
-		if d.Class == EnergyMeterClass {
+		if IsWholeHouseTotal(d) {
 			continue
 		}
 		if !isMetered(d.Class) {
@@ -569,7 +596,7 @@ func computeHouseStats(series []Series, devices map[string]config.DeviceConfig, 
 	var stale []string
 	for _, id := range sortedDeviceIDs(devices) {
 		d := devices[id]
-		if d.Class == EnergyMeterClass || !isMetered(d.Class) {
+		if IsWholeHouseTotal(d) || !isMetered(d.Class) {
 			continue
 		}
 		if _, ok := powerByDevice[id]; !ok {
@@ -653,7 +680,7 @@ func OnlySeries(series []Series, key string) []Series {
 // ever one meter; sorting just makes the choice deterministic).
 func MeterID(devices map[string]config.DeviceConfig) (string, bool) {
 	for _, id := range sortedDeviceIDs(devices) {
-		if devices[id].Class == EnergyMeterClass {
+		if IsWholeHouseTotal(devices[id]) {
 			return id, true
 		}
 	}
@@ -698,10 +725,40 @@ func buildSeries(key, label, place, class string, buckets []time.Time, energy, p
 }
 
 // isMetered reports whether a class participates in energy series at all (any
-// class PathForClass routes — plug classes, energy meter, ups_sensor).
+// class PathForClass routes — plug classes, energy meter, ups_sensor). It is the
+// SAME predicate the /devices/{id}/series handler gates on, so a class the
+// handler admits is a class assembly can build — the two must never diverge, or
+// the endpoint answers 200 with no series (issue #21).
 func isMetered(class string) bool {
 	_, ok := PathForClass(class)
 	return ok
+}
+
+// IsWholeHouseTotal reports whether a device's readings ARE the authoritative
+// whole-house total rather than one contributor to it. Such a device is excluded
+// from the fleet groupings (device/room/class) and from `monitored`, and surfaced
+// on its own as the house "meter" series; including it alongside the plugs it
+// already measures would double-count the house.
+//
+// It is the single place that distinction is decided — shared by assembleByDevice,
+// assembleGrouped, houseParts, computeHouseStats, MeterID and the /bill handler —
+// so those can never drift apart. Drift between two such filters is what produced
+// issue #21: assembly excluded the meter from a grouping the handler had already
+// decided to serve, and the endpoint answered 200 with no series at all.
+//
+// It keys on CLASS, deliberately, not on `covers: house`. The two say different
+// things: `covers` answers "which place do these readings describe?" — it exists
+// so a whole-property device is not attributed to the room it sits in (it groups
+// under houseCoverageKey instead) — while class answers "is this the meter?".
+// A whole-property device that is not the meter, an immersion heater wired
+// house-wide say, is still a real load the meter sees, so it belongs in
+// `monitored` and in a grouped series; that partition is pinned by
+// TestGroupedSeriesPartitionTheMonitoredDevices. Keying the exclusion on
+// `covers` would drop it from both and inflate `unmonitored` by its consumption.
+// It would also make a namespace that omits `covers` on the meter double-count
+// the entire house, a far worse failure than the one being fixed.
+func IsWholeHouseTotal(d config.DeviceConfig) bool {
+	return d.Class == EnergyMeterClass
 }
 
 // sortedDeviceIDs returns the inventory ids sorted for deterministic output.
@@ -818,6 +875,14 @@ func BuildSeries(
 		series = rebuildUnmonitoredUnclamped(series, buckets, hrs, devices, energyByDevice, powerByDevice, tariff)
 	}
 
+	// An assembly that produced nothing marshals as "series": null, and a consumer
+	// reading a full bucket axis beside a null cannot tell "nothing matched this
+	// grouping" from "this device reported no data" — the ambiguity issue #21 was
+	// filed over. An empty grouping is an empty list; absence is not a value.
+	if series == nil {
+		series = []Series{}
+	}
+
 	resp := SeriesResponse{
 		Window:   win.Label,
 		From:     win.Start.In(loc).Format(time.RFC3339),
@@ -836,9 +901,13 @@ func BuildSeries(
 	return resp, nil
 }
 
-// resolveGroupBy normalises the reported group_by (empty → device).
+// resolveGroupBy normalises the reported group_by (empty or the internal
+// GroupBySelf → device).
 func resolveGroupBy(groupBy string) string {
-	if groupBy == "" {
+	// GroupBySelf is an internal assembly mode, not a wire value: a single-device
+	// response is a device-grouped response carrying one device, and clients
+	// switch on group_by to pick a renderer.
+	if groupBy == "" || groupBy == GroupBySelf {
 		return GroupByDevice
 	}
 	return groupBy

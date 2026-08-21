@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"runtime"
 	"sort"
@@ -332,12 +333,32 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build over a single-device inventory grouped by device, so the response
-	// carries exactly this device's series.
+	// Build over a single-device inventory in the self grouping, so the response
+	// carries exactly this device's series. Self rather than device because the
+	// fleet grouping drops the whole-house meter to avoid double-counting it
+	// against the plugs — an exclusion with nothing to exclude here, which used to
+	// leave the meter's own request answering 200 with no series (issue #21).
 	single := map[string]config.DeviceConfig{id: dev}
-	resp, err := s.buildSeries(r, win, iv, energy.GroupByDevice, false, false, single, tariff)
+	resp, err := s.buildSeries(r, win, iv, energy.GroupBySelf, false, false, single, tariff)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
+		return
+	}
+	writeSingleSeries(w, shape, resp, id)
+}
+
+// writeSingleSeries writes a single-device response, enforcing the invariant both
+// by-id paths promise: exactly one series. The class gate upstream (PathForClass)
+// has already decided this device HAS an energy series, so producing none means
+// the gate and the assembler disagree about a class — the failure behind issue
+// #21, where the handler admitted the whole-house meter and assembly silently
+// declined it. That must surface as an error rather than as a 200 carrying a full
+// bucket axis and no data, which a consumer reads as "this device reported
+// nothing". Unreachable by construction; it exists so the next divergence is loud.
+func writeSingleSeries(w http.ResponseWriter, shape string, resp energy.SeriesResponse, id string) {
+	if len(resp.Series) != 1 {
+		writeError(w, http.StatusInternalServerError,
+			fmt.Sprintf("assembled %d series for device %q, want exactly 1", len(resp.Series), id))
 		return
 	}
 	writeSeriesShaped(w, shape, resp)
@@ -388,7 +409,7 @@ func (s *Server) handleUnmonitoredSeries(w http.ResponseWriter, r *http.Request)
 	// Keep only the unmonitored series and present it as a device-shaped response.
 	resp.Series = energy.OnlySeries(resp.Series, energy.UnmonitoredID)
 	resp.GroupBy = energy.GroupByDevice
-	writeSeriesShaped(w, shape, resp)
+	writeSingleSeries(w, shape, resp, energy.UnmonitoredID)
 }
 
 // handleBill serves GET /bill. It queries every billable device (metered,
@@ -414,9 +435,11 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		if _, metered := energy.PathForClass(dev.Class); !metered {
 			continue
 		}
-		if dev.Class == energy.EnergyMeterClass {
+		if energy.IsWholeHouseTotal(dev) {
 			// The whole-house meter is reconciled separately, not billed as a
-			// device. Record its id for the meterKWh query below.
+			// device — the same predicate that keeps it out of the fleet series
+			// groupings, so the bill and the charts always agree on what the
+			// monitored set is. Record its id for the meterKWh query below.
 			meterID = id
 			continue
 		}
