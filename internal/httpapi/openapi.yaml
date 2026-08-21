@@ -177,7 +177,15 @@ paths:
       description: >
         Single-device convenience form of /series: the same response shapes
         carrying exactly one series for the device. Non-metered classes return
-        400. The shape param chooses columnar (default) or row-oriented output.
+        400. Every energy-capable device in /devices is served, INCLUDING the
+        whole-house meter: it is excluded from /series?group_by=device because
+        it would double-count against the plugs it measures, but a request for a
+        single device cannot double-count, and its series here is identical to
+        the "meter" series of group_by=house. The response always carries exactly
+        one series and group_by reads "device"; a build that produced none is an
+        internal inconsistency and returns 500 rather than 200 with an empty
+        series list. The shape param chooses columnar (default) or row-oriented
+        output.
         The reserved id "unmonitored" is a synthetic device serving the house
         "unmonitored" series (rest of home = clamp(meter − monitored)) through this
         same single-series shape; it returns 404 when no whole-house meter is
@@ -210,6 +218,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/Internal"
         "502":
           $ref: "#/components/responses/BadGateway"
         "503":
@@ -564,6 +574,15 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    Internal:
+      description: >
+        Server-side inconsistency — the request was valid and upstream answered,
+        but the response could not be assembled (e.g. a device the class gate
+        admits produced no series). Never returned in normal operation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     BadGateway:
       description: Upstream Influx query failed
       content:
@@ -831,6 +850,10 @@ components:
           description: Local-timezone bucket-start axis every series aligns to.
         series:
           type: array
+          description: >
+            One entry per series in the grouping. Always an array — a grouping
+            that matched nothing is [], never null, so a consumer can tell an
+            empty grouping from a missing field.
           items:
             $ref: "#/components/schemas/Series"
       required: [window, from, to, interval, group_by, shape, buckets, series]

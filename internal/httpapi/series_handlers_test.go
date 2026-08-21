@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
+	"github.com/sweeney/countinghouse/internal/energy"
 	"github.com/sweeney/countinghouse/internal/influx"
 	"github.com/sweeney/countinghouse/internal/round"
 )
@@ -821,5 +824,271 @@ func TestSeries_RequiresAuth(t *testing.T) {
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("%s no-token: want 401, got %d", path, w.Code)
 		}
+	}
+}
+
+// --- #21: the whole-house meter through /devices/{id}/series ---
+
+// The reported bug: /devices/electricity_meter/series 200s with a full bucket
+// axis and "series": null, so a consumer reads "this device has no readings"
+// while /energy, /cost and group_by=house all report the same data fine.
+func TestDeviceSeries_Meter(t *testing.T) {
+	energyPer := map[string]float64{"electricity_meter": 0.5, "winefridge": 0.05}
+	powerPer := map[string]float64{"electricity_meter": 500.0, "winefridge": 52.0}
+	s := seriesSetup(t, energyPer, powerPer)
+
+	w := doGET(t, s, "/devices/electricity_meter/series?window=today&interval=1h")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"series":null`) {
+		t.Fatalf(`body carries "series": null — a consumer reads that as "no readings": %s`, w.Body.String())
+	}
+	r := decodeSeries(t, w)
+	if r.GroupBy != "device" {
+		t.Errorf("group_by = %q want device", r.GroupBy)
+	}
+	if len(r.Series) != 1 {
+		t.Fatalf("want exactly 1 series, got %d: %+v", len(r.Series), r.Series)
+	}
+	got := r.Series[0]
+	if got.Key != "electricity_meter" {
+		t.Errorf("key = %q want electricity_meter", got.Key)
+	}
+	if got.Label != "Electricity Meter" {
+		t.Errorf("label = %q want the display name", got.Label)
+	}
+	if got.Class != "energy_meter" {
+		t.Errorf("class = %q want energy_meter", got.Class)
+	}
+	if len(r.Buckets) != 14 || len(got.KWh) != 14 {
+		t.Fatalf("axis/series length mismatch: %d buckets, %d kwh", len(r.Buckets), len(got.KWh))
+	}
+	if !approx(got.KWh[0], 0.5) {
+		t.Errorf("kwh[0] = %v want 0.5", got.KWh[0])
+	}
+	if !approx(got.AvgW[0], 500) {
+		t.Errorf("avg_w[0] = %v want 500", got.AvgW[0])
+	}
+	if !approx(got.TotalKWh, round.To(0.5*14, round.KWhDP)) {
+		t.Errorf("total_kwh = %v want 7", got.TotalKWh)
+	}
+}
+
+// The by-id meter series and the house grouping's "meter" series are the same
+// quantity by two routes; the issue was filed because they disagreed. Pin that
+// they agree bucket-for-bucket end to end.
+func TestDeviceSeries_MeterMatchesHouseMeterSeries(t *testing.T) {
+	energyPer := map[string]float64{"electricity_meter": 0.5, "winefridge": 0.05}
+	powerPer := map[string]float64{"electricity_meter": 500.0, "winefridge": 52.0}
+	s := seriesSetup(t, energyPer, powerPer)
+
+	byID := decodeSeries(t, doGET(t, s, "/devices/electricity_meter/series?window=today&interval=1h"))
+	house := decodeSeries(t, doGET(t, s, "/series?window=today&interval=1h&group_by=house"))
+
+	var meter *seriesS
+	for i := range house.Series {
+		if house.Series[i].Key == "meter" {
+			meter = &house.Series[i]
+		}
+	}
+	if meter == nil {
+		t.Fatalf("house grouping has no meter series: %+v", house.Series)
+	}
+	if len(byID.Series) != 1 {
+		t.Fatalf("want 1 by-id series, got %+v", byID.Series)
+	}
+	if !reflect.DeepEqual(byID.Buckets, house.Buckets) {
+		t.Errorf("bucket axes differ")
+	}
+	if !reflect.DeepEqual(byID.Series[0].KWh, meter.KWh) {
+		t.Errorf("kwh: by-id %v != house meter %v", byID.Series[0].KWh, meter.KWh)
+	}
+	if !reflect.DeepEqual(byID.Series[0].Cost, meter.Cost) {
+		t.Errorf("cost: by-id %v != house meter %v", byID.Series[0].Cost, meter.Cost)
+	}
+	if !reflect.DeepEqual(byID.Series[0].AvgW, meter.AvgW) {
+		t.Errorf("avg_w: by-id %v != house meter %v", byID.Series[0].AvgW, meter.AvgW)
+	}
+	if !approx(byID.Series[0].TotalKWh, meter.TotalKWh) {
+		t.Errorf("total_kwh: by-id %v != house meter %v", byID.Series[0].TotalKWh, meter.TotalKWh)
+	}
+}
+
+// The by-id meter series must agree with /devices/{id}/energy for the same
+// window, the cross-check that made the null obviously wrong in the report.
+func TestDeviceSeries_MeterAgreesWithDeviceEnergy(t *testing.T) {
+	s := seriesSetup(t, map[string]float64{"electricity_meter": 0.5}, map[string]float64{"electricity_meter": 500.0})
+
+	series := decodeSeries(t, doGET(t, s, "/devices/electricity_meter/series?window=today&interval=1h"))
+	energyBody := decode(t, doGET(t, s, "/devices/electricity_meter/energy?window=today"))
+
+	if len(series.Series) != 1 {
+		t.Fatalf("want 1 series, got %+v", series.Series)
+	}
+	if !approx(series.Series[0].TotalKWh, energyBody["kwh"].(float64)) {
+		t.Errorf("series total %v != /energy kwh %v", series.Series[0].TotalKWh, energyBody["kwh"])
+	}
+}
+
+// Whatever the device, this endpoint must never answer 200 with an absent or
+// empty series list: that is neither data nor an error, the worst outcome for a
+// consumer. Every metered class in the inventory is checked, so a future class
+// that the handler gate admits and assembly declines fails here.
+func TestDeviceSeries_NeverEmptyForAMeteredDevice(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "network-ups": 0.02, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0, "network-ups": 20.0, "electricity_meter": 500.0}
+	s := seriesSetup(t, energyPer, powerPer)
+
+	for id, dev := range testDevices() {
+		if _, metered := energy.PathForClass(dev.Class); !metered {
+			continue
+		}
+		w := doGET(t, s, "/devices/"+id+"/series?window=today&interval=1h")
+		if w.Code != http.StatusOK {
+			t.Errorf("%s: want 200, got %d: %s", id, w.Code, w.Body.String())
+			continue
+		}
+		if strings.Contains(w.Body.String(), `"series":null`) {
+			t.Errorf("%s: 200 with \"series\": null", id)
+			continue
+		}
+		if got := decodeSeries(t, w); len(got.Series) != 1 {
+			t.Errorf("%s: want 1 series, got %d: %+v", id, len(got.Series), got.Series)
+		}
+	}
+}
+
+// shape=rows takes the same path; the meter must produce real rows there too
+// rather than an empty rows array with a populated bucket axis.
+func TestDeviceSeries_MeterRowsShape(t *testing.T) {
+	s := seriesSetup(t, map[string]float64{"electricity_meter": 0.5}, map[string]float64{"electricity_meter": 500.0})
+
+	w := doGET(t, s, "/devices/electricity_meter/series?window=today&interval=1h&shape=rows")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Series []struct {
+			Key string `json:"key"`
+		} `json:"series"`
+		Rows []struct {
+			Key string  `json:"key"`
+			KWh float64 `json:"kwh"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode rows: %v", err)
+	}
+	if len(got.Series) != 1 || got.Series[0].Key != "electricity_meter" {
+		t.Fatalf("want one meter series meta, got %+v", got.Series)
+	}
+	if len(got.Rows) != 14 {
+		t.Fatalf("want 14 rows, got %d", len(got.Rows))
+	}
+	if !approx(got.Rows[0].KWh, 0.5) {
+		t.Errorf("rows[0].kwh = %v want 0.5", got.Rows[0].KWh)
+	}
+}
+
+// The catalogue is the promise and /devices/{id}/series is the delivery: every
+// entry advertising the "energy" capability must return one populated series.
+// The meter broke that promise (issue #21) — it is listed as energy-capable and
+// answered with none — and the synthetic "unmonitored" device rides the same
+// path, so both are covered here without naming either.
+func TestDeviceSeries_EveryEnergyCapableDeviceHasASeries(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "network-ups": 0.02, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0, "network-ups": 20.0, "electricity_meter": 500.0}
+	s := seriesSetup(t, energyPer, powerPer)
+
+	var catalog struct {
+		Devices []struct {
+			ID           string   `json:"id"`
+			Capabilities []string `json:"capabilities"`
+		} `json:"devices"`
+	}
+	cw := doGET(t, s, "/devices")
+	if err := json.Unmarshal(cw.Body.Bytes(), &catalog); err != nil {
+		t.Fatalf("decode catalog: %v", err)
+	}
+	if len(catalog.Devices) == 0 {
+		t.Fatal("empty catalog")
+	}
+
+	checked := 0
+	for _, d := range catalog.Devices {
+		if !slices.Contains(d.Capabilities, "energy") {
+			continue
+		}
+		checked++
+		w := doGET(t, s, "/devices/"+d.ID+"/series?window=today&interval=1h")
+		if w.Code != http.StatusOK {
+			t.Errorf("%s advertises energy but /series returned %d: %s", d.ID, w.Code, w.Body.String())
+			continue
+		}
+		got := decodeSeries(t, w)
+		if len(got.Series) != 1 {
+			t.Errorf("%s advertises energy but got %d series", d.ID, len(got.Series))
+			continue
+		}
+		if len(got.Series[0].KWh) != len(got.Buckets) {
+			t.Errorf("%s: %d kwh values against %d buckets", d.ID, len(got.Series[0].KWh), len(got.Buckets))
+		}
+	}
+	if checked < 3 {
+		t.Fatalf("expected at least 3 energy-capable devices in the catalog, checked %d", checked)
+	}
+}
+
+// GroupBySelf is an internal assembly mode, not a wire value: /series must keep
+// rejecting it, and the by-id endpoint must keep reporting group_by "device" so
+// clients switching on that field are unaffected by the fix.
+func TestSeries_SelfGroupingIsNotAWireValue(t *testing.T) {
+	s := seriesSetup(t, map[string]float64{"electricity_meter": 0.5}, map[string]float64{"electricity_meter": 500.0})
+
+	w := doGET(t, s, "/series?window=today&group_by="+energy.GroupBySelf)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for group_by=self, got %d: %s", w.Code, w.Body.String())
+	}
+
+	byID := decodeSeries(t, doGET(t, s, "/devices/electricity_meter/series?window=today"))
+	if byID.GroupBy != energy.GroupByDevice {
+		t.Errorf("group_by = %q, want device", byID.GroupBy)
+	}
+}
+
+// writeSingleSeries is the guard that stops a by-id response ever being 200 with
+// no data. Both by-id handlers now write through it, and for
+// /devices/unmonitored/series it CHANGED the failure mode (200-with-empty → 500),
+// so the branch is pinned directly rather than left to an unreachable state.
+func TestWriteSingleSeries_RejectsAnythingButOneSeries(t *testing.T) {
+	one := energy.Series{Key: "winefridge"}
+
+	for _, tc := range []struct {
+		name   string
+		series []energy.Series
+		status int
+	}{
+		{"none", nil, http.StatusInternalServerError},
+		{"empty", []energy.Series{}, http.StatusInternalServerError},
+		{"two", []energy.Series{one, {Key: "unmonitored"}}, http.StatusInternalServerError},
+		{"exactly one", []energy.Series{one}, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			writeSingleSeries(w, energy.ShapeColumns, energy.SeriesResponse{Series: tc.series}, "winefridge")
+			if w.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tc.status, w.Body.String())
+			}
+			if tc.status == http.StatusOK {
+				return
+			}
+			// The message must name the device and the count, so an operator
+			// reading the log knows which class diverged, not merely that one did.
+			got, _ := decode(t, w)["error"].(string)
+			if !strings.Contains(got, `"winefridge"`) || !strings.Contains(got, "want exactly 1") {
+				t.Errorf("error = %q, want it to name the device and the expectation", got)
+			}
+		})
 	}
 }
