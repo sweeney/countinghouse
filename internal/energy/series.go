@@ -673,7 +673,8 @@ func OnlySeries(series []Series, key string) []Series {
 }
 
 // MeterID returns the id of the whole-house energy meter in the inventory (the
-// device whose class is EnergyMeterClass) and whether one exists. It is the
+// device IsWholeHouseTotal identifies — that predicate's doc carries the
+// definition, so this one cannot drift from it) and whether one exists. It is the
 // single place "is there a meter, and which device is it?" is answered, shared by
 // the house grouping, the bill reconciliation, the device catalogue, and the
 // synthetic unmonitored series. The first id in sorted order wins (there is only

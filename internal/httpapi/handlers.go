@@ -338,6 +338,12 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 	// fleet grouping drops the whole-house meter to avoid double-counting it
 	// against the plugs — an exclusion with nothing to exclude here, which used to
 	// leave the meter's own request answering 200 with no series (issue #21).
+	//
+	// include_unmonitored stays false and is not a param of this endpoint: self
+	// resolves to the device grouping, so the flag would append the rest-of-home
+	// catch-all as a SECOND series and writeSingleSeries would turn that into a
+	// 500. A single-device response carries one series by definition; the
+	// rest-of-home quantity has its own id (/devices/unmonitored/series).
 	single := map[string]config.DeviceConfig{id: dev}
 	resp, err := s.buildSeries(r, win, iv, energy.GroupBySelf, false, false, single, tariff)
 	if err != nil {

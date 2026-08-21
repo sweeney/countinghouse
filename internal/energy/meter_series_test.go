@@ -1,6 +1,7 @@
 package energy
 
 import (
+	"math"
 	"reflect"
 	"testing"
 	"time"
@@ -103,22 +104,31 @@ func TestSelfGroupingMatchesHouseMeterSeries(t *testing.T) {
 // The fix must not leak the meter into the fleet groupings, which is what the
 // exclusion is for: the meter would double-count against the plugs it measures.
 func TestFleetGroupingsStillExcludeTheMeter(t *testing.T) {
-	energyBy := map[string][]float64{"electricity_meter": {0.5, 0.75}, "fridge": {0.1, 0.2}}
-	powerBy := map[string][]float64{"electricity_meter": {500, 750}, "fridge": {100, 200}}
+	// Two plugs, in different rooms and of different classes, so each grouping
+	// has more than one member and the total is genuinely accumulated: a
+	// single-member total would compare exactly by luck and hide the tolerance
+	// this assertion needs.
+	inv := meterFullInventory()
+	inv["kettle"] = config.DeviceConfig{Class: "short_burst_power_device", Room: "groundfloor.utility", DisplayName: "Kettle"}
+	energyBy := map[string][]float64{"electricity_meter": {0.5, 0.75}, "fridge": {0.05, 0.05}, "kettle": {0.1, 0.1}}
+	powerBy := map[string][]float64{"electricity_meter": {500, 750}, "fridge": {50, 50}, "kettle": {100, 100}}
 
 	for _, groupBy := range []string{GroupByDevice, GroupByRoom, GroupByClass} {
-		out := AssembleSeries(meterBuckets(), []float64{1, 1}, meterFullInventory(), energyBy, powerBy, testTariff(), groupBy)
+		out := AssembleSeries(meterBuckets(), []float64{1, 1}, inv, energyBy, powerBy, testTariff(), groupBy)
 		for _, s := range out {
 			if s.Key == "electricity_meter" || s.Class == EnergyMeterClass {
 				t.Errorf("group_by=%s leaked the meter: %+v", groupBy, s)
 			}
 		}
+		// Compared with a tolerance (the package convention, cost_test.go): a
+		// leak is what this assertion is for, and float representation error in
+		// an accumulated total would report itself as one.
 		var total float64
 		for _, s := range out {
 			total += s.TotalKWh
 		}
-		if total != 0.3 {
-			t.Errorf("group_by=%s total = %v, want 0.3 (the fridge alone)", groupBy, total)
+		if math.Abs(total-0.3) > eps {
+			t.Errorf("group_by=%s total = %v, want 0.3 (the two plugs, meter excluded)", groupBy, total)
 		}
 	}
 }

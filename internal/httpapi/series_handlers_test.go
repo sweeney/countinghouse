@@ -1056,3 +1056,39 @@ func TestSeries_SelfGroupingIsNotAWireValue(t *testing.T) {
 		t.Errorf("group_by = %q, want device", byID.GroupBy)
 	}
 }
+
+// writeSingleSeries is the guard that stops a by-id response ever being 200 with
+// no data. Both by-id handlers now write through it, and for
+// /devices/unmonitored/series it CHANGED the failure mode (200-with-empty → 500),
+// so the branch is pinned directly rather than left to an unreachable state.
+func TestWriteSingleSeries_RejectsAnythingButOneSeries(t *testing.T) {
+	one := energy.Series{Key: "winefridge"}
+
+	for _, tc := range []struct {
+		name   string
+		series []energy.Series
+		status int
+	}{
+		{"none", nil, http.StatusInternalServerError},
+		{"empty", []energy.Series{}, http.StatusInternalServerError},
+		{"two", []energy.Series{one, {Key: "unmonitored"}}, http.StatusInternalServerError},
+		{"exactly one", []energy.Series{one}, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			writeSingleSeries(w, energy.ShapeColumns, energy.SeriesResponse{Series: tc.series}, "winefridge")
+			if w.Code != tc.status {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tc.status, w.Body.String())
+			}
+			if tc.status == http.StatusOK {
+				return
+			}
+			// The message must name the device and the count, so an operator
+			// reading the log knows which class diverged, not merely that one did.
+			got, _ := decode(t, w)["error"].(string)
+			if !strings.Contains(got, `"winefridge"`) || !strings.Contains(got, "want exactly 1") {
+				t.Errorf("error = %q, want it to name the device and the expectation", got)
+			}
+		})
+	}
+}
