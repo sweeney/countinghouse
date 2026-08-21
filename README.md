@@ -110,6 +110,20 @@ at local midnight, so they are unaffected.
 The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth for request
 and response schemas; a path-coverage test fails CI if routes and spec drift.
 
+### Browser access
+
+Every response carries `Access-Control-Allow-Origin: *`, and preflight (`OPTIONS`)
+is answered before auth runs, since a preflight carries no `Authorization` header.
+The wildcard is safe because the API authenticates by **Bearer token, not cookies**,
+so no `Access-Control-Allow-Credentials` is involved.
+
+Responses also carry `Timing-Allow-Origin: *`. CORS does not imply it: without it a
+cross-origin consumer's `PerformanceResourceTiming` entry has every phase (DNS, TCP,
+TLS, TTFB) and both transfer sizes zeroed, leaving only total duration — so a
+dashboard measuring countinghouse cannot tell a slow query from a slow network. The
+same token reasoning makes the wildcard safe here: a page with no token can only
+time its own 401, and a page with one is already reading the body it is measuring.
+
 
 ## Rooms
 

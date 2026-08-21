@@ -26,6 +26,11 @@ tags:
   - name: system
     description: Health and API spec endpoints.
 
+# Every response carries permissive CORS headers (Access-Control-Allow-Origin: *)
+# and Timing-Allow-Origin: *, so browser consumers on any origin can call the API
+# and read real PerformanceResourceTiming phases rather than zeroed ones. Safe as
+# a wildcard because the API authenticates by Bearer token, not cookies.
+
 paths:
   /healthz:
     get:
