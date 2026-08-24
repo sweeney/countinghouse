@@ -262,3 +262,51 @@ func TestSeries_GroupByFloorUnmonitoredIsItsOwnSeries(t *testing.T) {
 		t.Errorf("floor series lost when the catch-all was added: %+v", got)
 	}
 }
+
+// When a request is BOTH invalid and contradictory, say both. Reporting only the
+// conflict sends the operator to fix one thing, retry, and meet a second 400 for
+// a typo that was visible the whole time.
+func TestSeries_ReportsAnUnknownIDAndTheConflictTogether(t *testing.T) {
+	s := floorSeriesSetup(t)
+	w := doGET(t, s, "/series?group_by=room&rooms=floor9.typo&include_unmonitored=true")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "floor9.typo") {
+		t.Errorf("the typo is invisible in: %s", body)
+	}
+	if !strings.Contains(body, "unmonitored") {
+		t.Errorf("the conflict is invisible in: %s", body)
+	}
+}
+
+// A value that is entirely separators is a client bug — almost always a join that
+// produced nothing — and reading it as "no filter" answers with the whole house.
+// That is the same silent widening the 400s here exist to remove.
+func TestSeries_RejectsAFilterOfOnlySeparators(t *testing.T) {
+	s := floorSeriesSetup(t)
+	for _, q := range []string{
+		"/series?group_by=room&rooms=,,",
+		"/series?group_by=room&rooms=+%20+",
+		"/series?group_by=device&floors=,",
+	} {
+		w := doGET(t, s, q)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: want 400, got %d: %s", q, w.Code, w.Body.String())
+		}
+	}
+}
+
+// A bare `rooms=` is different: a client building the value from an empty
+// selection means "no filter", and gets the unfiltered answer it asked for.
+func TestSeries_BareEmptyFilterIsNoFilter(t *testing.T) {
+	s := floorSeriesSetup(t)
+	w := doGET(t, s, "/series?window=today&group_by=room&rooms=&floors=")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := len(decodeSeries(t, w).Series); got < 2 {
+		t.Errorf("series = %d, want the unfiltered set", got)
+	}
+}

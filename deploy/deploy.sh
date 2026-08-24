@@ -26,6 +26,12 @@ VERSION=$(date +%Y%m%d-%H%M%S)
 COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo dev)
 REMOTE_BIN="${BINARY}-${VERSION}"
 
+# Journal position markers, set just before the restart (see journal_since).
+# Initialised here so the diagnosis helpers are safe under `set -u` whatever order
+# they are reached in.
+CURSOR=""
+SINCE=""
+
 # --- startup-failure diagnosis ------------------------------------------------
 #
 # countinghouse refuses to start rather than serving a plausible-looking wrong
@@ -41,8 +47,24 @@ REMOTE_BIN="${BINARY}-${VERSION}"
 # build back.
 
 # journal_since prints this boot's log lines only.
+#
+# It reads from a CURSOR taken just before the restart, not a timestamp.
+# `journalctl --since` parses a bare timestamp in the HOST's local timezone
+# (systemd.time(7)), so a UTC timestamp on a Europe/London host points an hour
+# into the future for eight months of the year: the window comes back empty,
+# every classification below misses, and the diagnosis degrades to "not a known
+# startup refusal" plus an empty log — silently, and only in summer. A cursor is
+# timezone-free and also closes the one-second race between reading the clock and
+# the restart landing.
+#
+# The timestamp form is kept as a fallback for a host whose journalctl does not
+# print a cursor, and it uses LOCAL time there for the same reason.
 journal_since() {
-    ssh "$REMOTE" "sudo journalctl -u $SERVICE --since '$SINCE' --no-pager" 2>/dev/null || true
+    if [ -n "$CURSOR" ]; then
+        ssh "$REMOTE" "sudo journalctl -u $SERVICE --after-cursor '$CURSOR' --no-pager" 2>/dev/null || true
+    else
+        ssh "$REMOTE" "sudo journalctl -u $SERVICE --since '$SINCE' --no-pager" 2>/dev/null || true
+    fi
 }
 
 # render_errors turns slog's one-line JSON back into something readable, so a
@@ -190,9 +212,13 @@ ssh "$REMOTE" "chmod 755 $DEPLOY_DIR/$REMOTE_BIN"
 echo "=== Activating $REMOTE_BIN ==="
 ssh "$REMOTE" "ln -sfn $REMOTE_BIN $DEPLOY_DIR/$BINARY"
 
-# Timestamp the restart so the diagnosis reads only THIS boot's logs. Without it a
-# stale refusal from an earlier attempt would be reported as the cause of this one.
-SINCE=$(ssh "$REMOTE" "date -u +'%Y-%m-%d %H:%M:%S'")
+# Mark the journal position so the diagnosis reads only THIS boot's logs — without
+# it a stale refusal from an earlier attempt would be reported as the cause of this
+# one. A cursor is preferred over a timestamp; see journal_since for why. Both are
+# captured so the fallback is available if this journalctl prints no cursor. The
+# timestamp is LOCAL time, because that is how journalctl reads an unqualified one.
+CURSOR=$(ssh "$REMOTE" "sudo journalctl -u $SERVICE -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'" 2>/dev/null || true)
+SINCE=$(ssh "$REMOTE" "date +'%Y-%m-%d %H:%M:%S'")
 
 echo "=== Restarting $SERVICE ==="
 ssh "$REMOTE" "sudo systemctl restart $SERVICE"

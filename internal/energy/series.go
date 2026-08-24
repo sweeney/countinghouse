@@ -496,12 +496,20 @@ func assembleGrouped(
 			es = append(es, get(energyByDevice, id))
 			ps = append(ps, get(powerByDevice, id))
 		}
+		// houseCoverageKey is a coverage SCOPE, not a place, so it takes neither a
+		// room nor a floorplan name — it is the one key /rooms and /floors never
+		// list, and both the spec and the README tell clients to join a room
+		// series' `room` to that catalog. Reporting room: "house" would hand them
+		// the single value guaranteed to miss. The unmonitored catch-all already
+		// reads this way for the same reason: it belongs to no place either.
+		isPlace := (groupBy == GroupByRoom || groupBy == GroupByFloor) && k != houseCoverageKey
+
 		// A series that IS a room reports that room, so a client can join it to
 		// the /rooms catalog. A floor or class series belongs to no single room,
 		// so `room` stays empty rather than carrying a floor id in a field named
 		// room.
 		room := ""
-		if groupBy == GroupByRoom {
+		if isPlace && groupBy == GroupByRoom {
 			room = k
 		}
 		// The floorplan's name when it publishes one, the id otherwise. Never a
@@ -509,11 +517,12 @@ func assembleGrouped(
 		// this exists to remove, and moving it here would not make it less of a
 		// guess. A legend rendering `label || key` therefore shows "Room A" once
 		// the floorplan names it and "floor1.room-a" until then.
+		//
+		// Only the PLACE groupings take names. A class is not a place (the
+		// floorplan does not name one, and a key colliding with a class name must
+		// not relabel it), and neither is the house scope.
 		label := k
-		// Only the PLACE groupings take floorplan names. A class is not a place:
-		// the floorplan does not name one, and a floorplan key that happened to
-		// collide with a class name must not relabel it.
-		if groupBy == GroupByRoom || groupBy == GroupByFloor {
+		if isPlace {
 			if name := groupLabels[k]; name != "" {
 				label = name
 			}

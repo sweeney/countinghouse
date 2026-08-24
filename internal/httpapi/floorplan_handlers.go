@@ -130,6 +130,14 @@ type roomEntry struct {
 // floor id), then by room id — so a client renders the list in building order
 // top to bottom without re-sorting, and rooms whose floor is unknown sort last
 // together rather than being scattered.
+//
+// The room records and the floor records are read in two calls, so a SIGHUP
+// landing between them could sort this response's rooms by the previous fetch's
+// storey order. That is the same cosmetic trade groupLabels documents: ordering
+// is presentation, the worst case is one response ordered by a floorplan that was
+// current a moment ago, and it corrects itself on the next request. Pinning them
+// to one instant would mean holding a lock across the whole handler to fix
+// something no client can observe as wrong.
 func (s *Server) handleRooms(w http.ResponseWriter, _ *http.Request) {
 	records := s.rooms()
 	counts := energy.CountByGroupKey(s.Config.Devices(), energy.GroupByRoom)

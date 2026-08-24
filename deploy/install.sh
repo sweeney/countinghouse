@@ -40,19 +40,36 @@ echo "=== Installing config ==="
 if [ ! -f /etc/$SERVICE/config.yaml ]; then
     cat > /etc/$SERVICE/config.yaml << 'CONFIG'
 # The property this instance serves. Replace the id with the site's id from the
-# `sites` namespace, and UNCOMMENT devices_namespace with the namespace published
-# for this site (e.g. devices_home).
+# `sites` namespace, then UNCOMMENT BOTH namespaces with the documents published
+# for this site (e.g. devices_home and floorplan_home).
 #
-# The service will refuse to start until it is named. That is deliberate: there is
-# no shared namespace to fall back to any more, so a config that names none would
-# fetch nothing and serve zero devices — every bill and every series answering zero
-# rather than erroring. Refusing to boot is the louder, safer failure.
+# The service refuses to start until BOTH are named, and it reports them one at a
+# time — so uncomment both now rather than meeting the second refusal after fixing
+# the first.
 #
-# It is spelled out rather than derived from the id so a typo is a complaint at
+#   devices_namespace    there is no shared namespace to fall back to any more, so a
+#                        config naming none would fetch nothing and serve zero
+#                        devices — every bill and every series answering zero rather
+#                        than erroring.
+#   floorplan_namespace  the floor and room records (the same document greenhouse
+#                        reads). Unnamed, nothing breaks: /floors and /rooms still
+#                        list everything holding a metered device and every kWh is
+#                        right. Only the NAMES are lost, so those endpoints answer
+#                        with ids where labels belong — indistinguishable from a
+#                        floorplan publishing nothing, and noticed days later as a
+#                        legend reading "floor1.room-c" to a human.
+#
+# Both are spelled out rather than derived from the id, so a typo is a complaint at
 # startup instead of a successful fetch of nothing.
+#
+# One more refusal to expect on a fresh host: a namespace that is named but never
+# fetched (config service down, wrong credentials) also aborts the boot, because
+# fail-open has no last-known snapshot to fall back to at startup. It clears itself
+# once the fetch lands.
 site:
   id: "REPLACE_ME"
   # devices_namespace: "devices_REPLACE_ME"
+  # floorplan_namespace: "floorplan_REPLACE_ME"
 
 http:
   listen: ":8585"

@@ -279,3 +279,50 @@ func TestLoad_MissingBothNamespacesReportsDevicesFirst(t *testing.T) {
 		t.Errorf("want the devices_namespace refusal first; got %q", err)
 	}
 }
+
+// A hybrid document — wrapper shape, but one collection published as an object —
+// used to drop every record in that collection with no error and no warning,
+// which is indistinguishable from a floorplan that publishes none. That is the
+// exact failure the required-namespace and cold-start refusals exist to remove,
+// arriving one layer further in, so it fails loudly instead.
+//
+// Loud rather than LIBERAL deliberately: greenhouse's decoder has the same
+// asymmetry, so accepting an object here would mean the two services read
+// different rooms out of one document. Erroring keeps the accepted set identical
+// and only changes what happens to a document neither service can read properly.
+func TestFloorplanDocument_HybridShapeIsAnError(t *testing.T) {
+	for name, raw := range map[string]string{
+		"object rooms beside array floors": `{"floors": [{"id": "floor1"}], "rooms": {"floor1.room-a": {"name": "Room A"}}}`,
+		"object floors beside array rooms": `{"rooms": [{"id": "floor1.room-a"}], "floors": {"floor1": {"name": "Floor One"}}}`,
+		"rooms published as a string":      `{"floors": [{"id": "floor1"}], "rooms": "none"}`,
+	} {
+		var doc floorplanDocument
+		err := json.Unmarshal([]byte(raw), &doc)
+		if err == nil {
+			t.Errorf("%s: decoded silently as %+v, want an error rather than dropped records", name, doc)
+			continue
+		}
+		if !strings.Contains(err.Error(), "floorplan") {
+			t.Errorf("%s: error should name the document: %v", name, err)
+		}
+	}
+}
+
+// A null document is not an empty one. `{}` is a namespace that published no
+// records — an answer this service can serve honestly — whereas `null` is a
+// publishing mistake that would otherwise latch as a successful fetch and satisfy
+// the cold-start check with nothing.
+func TestFloorplanDocument_NullIsAnErrorButEmptyIsNot(t *testing.T) {
+	var null floorplanDocument
+	if err := json.Unmarshal([]byte(`null`), &null); err == nil {
+		t.Error("a null floorplan document must not decode as an empty one")
+	}
+
+	var empty floorplanDocument
+	if err := json.Unmarshal([]byte(`{}`), &empty); err != nil {
+		t.Errorf("an empty document is a valid answer (no records published): %v", err)
+	}
+	if len(empty.Floors) != 0 || len(empty.Rooms) != 0 {
+		t.Errorf("empty document = %+v, want no records", empty)
+	}
+}

@@ -156,7 +156,9 @@ answer it differently.
 **Grouped series are labelled with the floorplan's name.** `group_by=room` and
 `group_by=floor` set `label` to the published name (`"Room A"`) and fall back to the id
 when none is published; `key` is always the id. A room-grouped series also reports its
-`room`, so it can be joined to `/rooms`.
+`room`, so it can be joined to `/rooms` — except the reserved `house` series, which
+reports an empty `room` and keeps its key as its label, because a coverage scope is not a
+place and `/rooms` never lists it.
 
 **`group_by=floor`** sums a floor's rooms — energy is additive, so sum is the only sane
 statistic and there is no `group_fn`. With `include_unmonitored=true` the rest-of-home
@@ -166,7 +168,8 @@ house-scoped and belongs to no storey.
 **`rooms=` / `floors=` filters** (CSV) narrow the device set for `/series`, composing as
 AND. They were previously accepted and ignored — a client asking for one room got a 200
 carrying the whole house — so an unknown id is now a `400` rather than a silently
-unfiltered answer. They cannot be combined with `include_unmonitored=true` or
+unfiltered answer, as is a value carrying only separators (`rooms=,,`, almost always a
+join that produced nothing). A bare `rooms=` still means "no filter". They cannot be combined with `include_unmonitored=true` or
 `group_by=house`: the unmonitored series is the meter minus **all** monitored devices, so
 against a filtered set it would quietly absorb the excluded devices and publish them as
 rest-of-home. `/devices/{id}/series` ignores them — the path has already selected.

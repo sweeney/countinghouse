@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // FloorConfig is one floor record as the floorplan namespace publishes it.
@@ -130,6 +131,12 @@ func normaliseRooms(rooms map[string]RoomConfig) {
 // silence — blank names and null order, indistinguishable from a floorplan
 // namespace nobody configured.
 //
+// Liberal in what it ACCEPTS, never in what it drops. A document mixing the two
+// shapes — one collection as an array, the other as an object — is refused rather
+// than half-read, because dropping the odd collection silently produces exactly
+// the "publishes nothing" appearance this service refuses everywhere else. See
+// UnmarshalJSON.
+//
 // The shapes are told apart by JSON type, not by key name: a "floors" key
 // holding an object is a floor whose id happens to be "floors", and decodes as
 // the map shape — PROVIDED no sibling "rooms" array is present. The case needs a
@@ -149,6 +156,14 @@ func (d *floorplanDocument) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &probe); err != nil {
 		return err
 	}
+	// A null body unmarshals into a nil map without error, and would otherwise
+	// fall through to the map branch and decode as a document with no records —
+	// latching a SUCCESSFUL fetch (see Fetcher.Cold) for a namespace that
+	// published nothing readable. `{}` is different and stays valid: it is a
+	// namespace that published no records, which is an answer.
+	if probe == nil {
+		return fmt.Errorf("floorplan document is null, not an object")
+	}
 
 	floorsRaw, hasFloors := probe["floors"]
 	roomsRaw, hasRooms := probe["rooms"]
@@ -158,11 +173,33 @@ func (d *floorplanDocument) UnmarshalJSON(b []byte) error {
 	// versa) is still read as the wrapper it is, rather than falling through to
 	// the map branch and failing to unmarshal an array into a FloorConfig.
 	if (hasFloors && isJSONArray(floorsRaw)) || (hasRooms && isJSONArray(roomsRaw)) {
+		// In the wrapper shape BOTH collections are arrays. One published as an
+		// object (or anything else) is refused rather than skipped: skipping drops
+		// every record in it with no error and no warning, which is
+		// indistinguishable from a floorplan publishing none — the same silence
+		// the required-namespace and cold-start refusals exist to remove, one layer
+		// further in. Refused, the fetch fails, recordStatus records it, /healthz
+		// degrades, and at boot Cold() refuses to start.
+		//
+		// Loud rather than LIBERAL: greenhouse's decoder has the same asymmetry, so
+		// accepting an object here would mean the two services read different rooms
+		// out of one document. This keeps the accepted set identical and only
+		// changes what happens to a document neither can read properly.
+		if hasFloors && !isJSONArray(floorsRaw) {
+			return fmt.Errorf("floorplan document publishes \"rooms\" as an array but " +
+				"\"floors\" as something else: in the wrapper shape both are arrays of " +
+				"records, and skipping the odd one out would drop every floor silently")
+		}
+		if hasRooms && !isJSONArray(roomsRaw) {
+			return fmt.Errorf("floorplan document publishes \"floors\" as an array but " +
+				"\"rooms\" as something else: in the wrapper shape both are arrays of " +
+				"records, and skipping the odd one out would drop every room silently")
+		}
 		out := floorplanDocument{
 			Floors: map[string]FloorConfig{},
 			Rooms:  map[string]RoomConfig{},
 		}
-		if hasFloors && isJSONArray(floorsRaw) {
+		if hasFloors {
 			var list []FloorConfig
 			if err := json.Unmarshal(floorsRaw, &list); err != nil {
 				return err
@@ -179,7 +216,7 @@ func (d *floorplanDocument) UnmarshalJSON(b []byte) error {
 				out.Floors[f.ID] = f
 			}
 		}
-		if hasRooms && isJSONArray(roomsRaw) {
+		if hasRooms {
 			var list []RoomConfig
 			if err := json.Unmarshal(roomsRaw, &list); err != nil {
 				return err

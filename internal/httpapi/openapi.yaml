@@ -569,7 +569,10 @@ components:
       required: false
       description: >
         Comma-separated floorplan room ids; only devices in those rooms are
-        covered. Composes with floors= as AND. A room holding no billed device is
+        covered. Composes with floors= as AND. An omitted parameter, or a bare
+        `rooms=`, means no filter; a value carrying only separators or whitespace
+        (`rooms=,,`) is rejected with 400 rather than silently widening to the
+        whole house. A room holding no billed device is
         rejected with 400 rather than silently returning an unfiltered or empty
         answer — the accepted set is exactly what GET /rooms lists, so a picker
         filled from that catalog cannot produce a rejected request. The reserved
@@ -894,8 +897,10 @@ components:
           description: >
             Floorplan room id. Set for a per-device series (the room the device
             sits in) and for a group_by=room series (the room it IS, so it can be
-            joined to GET /rooms). Empty for floor, class and house series, which
-            belong to no single room.
+            joined to GET /rooms). Empty for floor, class, and the reserved
+            "house" and "unmonitored" series, which belong to no single room —
+            "house" is a coverage scope that GET /rooms never lists, so it is
+            never reported here as one.
         class:
           type: string
         kwh:
@@ -1000,8 +1005,10 @@ components:
           description: >
             Floorplan room id. Set for a per-device series (the room the device
             sits in) and for a group_by=room series (the room it IS, so it can be
-            joined to GET /rooms). Empty for floor, class and house series, which
-            belong to no single room.
+            joined to GET /rooms). Empty for floor, class, and the reserved
+            "house" and "unmonitored" series, which belong to no single room —
+            "house" is a coverage scope that GET /rooms never lists, so it is
+            never reported here as one.
         class:
           type: string
         total_kwh:

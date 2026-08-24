@@ -210,3 +210,49 @@ func TestAssembleByClassIsUnaffectedByFloorplanNames(t *testing.T) {
 		}
 	}
 }
+
+// The `house` key is a coverage SCOPE, not a room — it is the one key /rooms
+// never lists — so the series keyed on it must not claim to be a room. Both
+// openapi.yaml and README tell clients to join a room series' `room` to /rooms,
+// and this is the single series for which that join is guaranteed to miss.
+//
+// The sibling case already reads this way: the unmonitored catch-all reports an
+// empty room because it belongs to no place, and a whole-property device's series
+// belongs to no place for exactly the same reason.
+func TestAssembleByRoomLeavesTheHouseKeyRoomless(t *testing.T) {
+	buckets := twoBuckets(t)
+	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), GroupByRoom, nil)
+
+	var found bool
+	for _, s := range out {
+		if s.Key != houseCoverageKey {
+			continue
+		}
+		found = true
+		if s.Room != "" {
+			t.Errorf("house series reports room = %q, want empty: %q is a coverage scope "+
+				"that /rooms never lists, so joining it to the room catalog cannot resolve", s.Room, s.Room)
+		}
+	}
+	if !found {
+		t.Fatalf("no house series to check: %+v", out)
+	}
+}
+
+// Same guard, second half: a floorplan that published a room record with the
+// reserved id would otherwise relabel this series with a name for a group /rooms
+// does not list. Vanishingly unlikely, and one condition covers both.
+func TestAssembleGroupedNeverRelabelsTheHouseKey(t *testing.T) {
+	buckets := twoBuckets(t)
+	labels := map[string]string{houseCoverageKey: "The Whole House"}
+
+	for _, groupBy := range []string{GroupByRoom, GroupByFloor} {
+		out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), groupBy, labels)
+		for _, s := range out {
+			if s.Key == houseCoverageKey && s.Label != houseCoverageKey {
+				t.Errorf("group_by=%s: house series labelled %q, want the reserved key itself",
+					groupBy, s.Label)
+			}
+		}
+	}
+}
