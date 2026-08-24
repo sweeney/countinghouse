@@ -61,6 +61,9 @@ func main() {
 		Tokens:           tokens,
 		Logger:           logger,
 		DevicesNamespace: cfg.Site.DevicesNamespace,
+		// Optional: unset, the floorplan is simply never fetched and /floors,
+		// /rooms and grouped-series labels report names as unknown.
+		FloorplanNamespace: cfg.Site.FloorplanNamespace,
 	}
 	if cfg.RemoteConfig.BaseURL == "" {
 		logger.Warn("remote config base_url is empty; serving empty device/tariff snapshots")
@@ -82,24 +85,27 @@ func main() {
 	location := cfg.House.Location()
 
 	server := &httpapi.Server{
-		Listen:           cfg.HTTP.Listen,
-		Influx:           influxClient,
-		Bucket:           cfg.Influx.Bucket,
-		Clock:            testutil.RealClock{},
-		Loc:              location,
-		Config:           fetcher,
-		RemoteConfig:     fetcher,
-		IdentityURL:      cfg.Identity.BaseURL,
-		PublicURL:        cfg.HTTP.PublicURL,
-		Version:          version,
-		SiteID:           cfg.Site.ID,
-		DevicesNamespace: cfg.Site.DevicesNamespace,
-		Logger:           logger,
+		Listen:             cfg.HTTP.Listen,
+		Influx:             influxClient,
+		Bucket:             cfg.Influx.Bucket,
+		Clock:              testutil.RealClock{},
+		Loc:                location,
+		Config:             fetcher,
+		RemoteConfig:       fetcher,
+		IdentityURL:        cfg.Identity.BaseURL,
+		PublicURL:          cfg.HTTP.PublicURL,
+		Version:            version,
+		SiteID:             cfg.Site.ID,
+		DevicesNamespace:   cfg.Site.DevicesNamespace,
+		FloorplanNamespace: cfg.Site.FloorplanNamespace,
+		Floorplan:          fetcher,
+		Logger:             logger,
 	}
 
 	logger.Info("starting", "config", *configPath, "http", cfg.HTTP.Listen,
 		"influx", cfg.Influx.URL, "timezone", cfg.House.Timezone, "version", version,
-		"site", cfg.Site.ID, "devices_namespace", cfg.Site.DevicesNamespace)
+		"site", cfg.Site.ID, "devices_namespace", cfg.Site.DevicesNamespace,
+		"floorplan_namespace", cfg.Site.FloorplanNamespace)
 
 	ctx, cancel := signalContext()
 	defer cancel()

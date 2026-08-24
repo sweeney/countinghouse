@@ -312,6 +312,57 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /floors:
+    get:
+      summary: Floor catalog
+      description: >
+        The building's floors, and the discoverable vocabulary behind the
+        `floors=` filter and `group_by=floor`. Lists exactly the floors at least
+        one BILLED device declares (metered, excluding the whole-house meter),
+        which is exactly the set `floors=` accepts — so a picker filled from this
+        endpoint cannot build a request /series rejects. A floorplan record for a
+        floor with no metered device is therefore not listed, and a floor devices
+        declare that the floorplan has no record for IS listed, with its name
+        empty and order null. Sorted by declared storey order ascending, then by
+        id; floors with no declared order sort last. Reads the same floorplan
+        namespace greenhouse serves /floors from, so both services answer in one
+        vocabulary.
+      operationId: getFloors
+      tags: [data]
+      responses:
+        "200":
+          description: Floor catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FloorsCatalog"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /rooms:
+    get:
+      summary: Room catalog
+      description: >
+        The building's rooms, and the discoverable vocabulary behind the `rooms=`
+        filter and `group_by=room`. Listed on the same rule as /floors: exactly
+        the rooms at least one billed device is attributed to. `category` is
+        relayed RAW rather than reduced to a flag — a plant room's consumption is
+        infrastructure rather than household usage, but which rooms "count" is a
+        per-dashboard policy question. The reserved "house" key (a coverage
+        scope, not a room) never appears. Sorted by floor storey order, then by
+        room id; rooms whose floor is unknown sort last.
+      operationId: getRooms
+      tags: [data]
+      responses:
+        "200":
+          description: Room catalog
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomsCatalog"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   /devices/{id}/events:
     get:
       summary: Device event timeline
@@ -679,6 +730,13 @@ components:
           description: >
             Floorplan room id. Empty for a device whose readings describe the whole
             property rather than a room; see covers.
+        floor:
+          type: string
+          description: >
+            Floor id as DECLARED by the devices namespace, e.g. "floor2". Empty
+            when the namespace declares none — never derived from the room id's
+            "<floor>.<slug>" shape, since the floorplan owns that fact. Join to
+            /floors for its name, storey order and elevation.
         covers:
           type: string
           description: >
@@ -1102,6 +1160,13 @@ components:
           description: >
             Floorplan room id. Empty for a device whose readings describe the whole
             property rather than a room; see covers.
+        floor:
+          type: string
+          description: >
+            Floor id as DECLARED by the devices namespace, e.g. "floor2". Empty
+            when the namespace declares none — never derived from the room id's
+            "<floor>.<slug>" shape, since the floorplan owns that fact. Join to
+            /floors for its name, storey order and elevation.
         covers:
           type: string
           description: >
@@ -1115,7 +1180,7 @@ components:
             type: string
             enum: [energy, events]
           description: Derived capability hints ("energy" for metered classes, "events" for event-bearing classes — binary_state_device, fire_alarm).
-      required: [id, display_name, room, class, capabilities]
+      required: [id, display_name, room, floor, class, capabilities]
 
     DevicesCatalog:
       type: object
@@ -1125,6 +1190,105 @@ components:
           items:
             $ref: "#/components/schemas/DeviceCatalogEntry"
       required: [devices]
+
+    FloorCatalogEntry:
+      type: object
+      description: One floor catalog row.
+      properties:
+        id:
+          type: string
+          description: Floor id — the value to pass back as floors=, and the value devices carry in their `floor` property.
+          example: floor1
+        name:
+          type: string
+          description: >
+            The floorplan's display label, empty when it declares none. Reported
+            empty rather than title-cased from the id.
+          example: Floor One
+        order:
+          type: integer
+          nullable: true
+          description: >
+            Storey position, ascending from the lowest. NULL when the floorplan
+            declares none — nullable rather than defaulted because 0 is a
+            legitimate order (a basement), so it cannot double as "undeclared".
+            Floor ids do not sort into building order, so without this every
+            client hardcodes its own storey sequence.
+          example: 1
+        elevation:
+          type: number
+          format: double
+          nullable: true
+          description: Metres above the site datum, null when undeclared (0.0 is a real elevation).
+          example: 0.0
+        device_count:
+          type: integer
+          description: Metered devices declaring this floor. Always >= 1 — a floor with none is not listed.
+      required: [id, name, order, elevation, device_count]
+
+    FloorsCatalog:
+      type: object
+      properties:
+        floors:
+          type: array
+          items:
+            $ref: "#/components/schemas/FloorCatalogEntry"
+      required: [floors]
+
+    RoomCatalogEntry:
+      type: object
+      description: One room catalog row.
+      properties:
+        id:
+          type: string
+          description: >
+            Floorplan room id — the value to pass back as rooms=, and the value
+            devices carry in their `room` property. It is the key: NAMES ARE NOT
+            UNIQUE, since two rooms on different floors may share one.
+          example: floor1.room-a
+        name:
+          type: string
+          description: The floorplan's display label, empty when it declares none.
+          example: Room A
+        floor:
+          type: string
+          description: >
+            Floor id the floorplan puts this room on, empty when it declares
+            none. Relayed from the ROOM record — never read out of the id's
+            "<floor>.<slug>" shape, and never inferred from the floors this
+            room's devices declare. NOT guaranteed to appear in /floors: that
+            listing is built from the floors DEVICES declare, and countinghouse
+            does not arbitrate between two upstream declarations. A client
+            joining the two must handle a miss.
+          example: floor1
+        category:
+          type: string
+          description: >
+            The room's purpose as the floorplan classifies it (e.g. "kitchen",
+            "circulation", "plant"), empty when it declares none. Relayed raw and
+            deliberately not reduced to a computed flag: which rooms "count" is a
+            per-dashboard policy question, and a breakdown, a coverage view and a
+            heat-loss view answer it differently.
+          example: utility
+        area:
+          type: number
+          format: double
+          nullable: true
+          description: Floor area in square metres, null when undeclared.
+          example: 12.4
+        device_count:
+          type: integer
+          description: Metered devices attributed to this room. Always >= 1 — a room with none is not listed.
+      required: [id, name, floor, category, area, device_count]
+
+    RoomsCatalog:
+      type: object
+      properties:
+        rooms:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoomCatalogEntry"
+      required: [rooms]
 
     HealthResponse:
       type: object
@@ -1164,6 +1328,15 @@ components:
             devices_namespace:
               type: string
               example: devices_home
+            floorplan_namespace:
+              type: string
+              description: >-
+                The optional floorplan namespace (floors, rooms), omitted on an
+                instance that names none. Reported so an operator can tell "not
+                configured" from "configured but not yet fetched" — a distinction
+                remote_config cannot draw, since it only records namespaces
+                something tried to fetch.
+              example: floorplan_home
         remote_config:
           type: object
           description: >-
@@ -1174,8 +1347,9 @@ components:
             literal namespace therefore stops matching when a site migrates, and a
             missing key reads as healthy in most check expressions. Alert on the
             top-level `status` field instead, which degrades regardless of the key.
-            `energy_tariffs` is fixed. Omitted when no remote-config fetcher is
-            wired.
+            `energy_tariffs` is fixed, and `site.floorplan_namespace` appears only
+            when one is configured — it is optional, so its absence is not a
+            fault. Omitted when no remote-config fetcher is wired.
           additionalProperties:
             type: object
             properties:

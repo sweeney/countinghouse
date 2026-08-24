@@ -15,9 +15,27 @@
 # than erroring. Naming no namespace is refused at startup for the same reason. The
 # mirror case (a namespace with no id) only warns: it serves correct numbers and merely
 # cannot say which property they belong to.
+#   floorplan_namespace  the config namespace holding this site's floor and room
+#                      records — the same document greenhouse reads. Published by
+#                      /floors and /rooms, and used to label grouped series with
+#                      names instead of ids. The document holds ARRAYS, unlike the
+#                      devices namespace's map keyed by id:
+#                        {"floors": [{"id": "floor1", "name": "Floor One",
+#                                     "order": 1, "elevation": 0.0}, ...],
+#                         "rooms":  [{"id": "floor1.room-a", "name": "Room A",
+#                                     "floor": "floor1", "category": "utility",
+#                                     "area": 12.4}, ...]}
+#                      (the devices-style {"<id>": {...}} form is also accepted, and
+#                      carries floors only). OPTIONAL, unlike devices_namespace: a
+#                      floorplan carries names, storey order and room category —
+#                      presentation. Unset, /floors and /rooms still list every floor
+#                      and room holding a metered device, with names and order
+#                      reported as unknown, and every kWh and cost is unaffected.
 site:
   id: home
   devices_namespace: devices_home
+  # Optional. Omit it and /floors, /rooms and grouped series report names as unknown.
+  floorplan_namespace: floorplan_home
 
 # Countinghouse local configuration.
 # Device inventory and tariffs are fetched from the remote config service

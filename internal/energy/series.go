@@ -16,6 +16,13 @@ const (
 	// GroupByRoom groups by floorplan room id.
 	GroupByRoom  = "room"
 	GroupByClass = "class"
+	// GroupByFloor groups by the floor a device DECLARES
+	// (config.DeviceConfig.Floor), never one read out of the room id's
+	// "<floor>.<slug>" shape: the floorplan owns that fact. Energy is additive,
+	// so a floor is simply the sum of its rooms — there is no argument about
+	// whether the combining statistic is meaningful, which is what made the
+	// climate version of this grouping contentious (issue #19).
+	GroupByFloor = "floor"
 	GroupByHouse = "house"
 
 	// GroupBySelf is the single-device assembly behind GET /devices/{id}/series.
@@ -368,6 +375,81 @@ func assembleByDevice(
 		out = append(out, s)
 	}
 	return out
+}
+
+// GroupKeyFor returns the function mapping a device to its series key under
+// groupBy, or nil when groupBy gives every device its own series (device/self)
+// or does not group devices at all (house).
+//
+// One definition of "which devices share a series", used by the assembly step,
+// by the rooms=/floors= filters, and by the /rooms and /floors catalogs. Two
+// implementations of that question would drift, and what drifts is which
+// consumption lands in which series — a silently wrong bill rather than a loud
+// one. It is also what guarantees a catalog never advertises a group the
+// matching filter rejects.
+func GroupKeyFor(groupBy string) func(config.DeviceConfig) string {
+	switch groupBy {
+	case GroupByRoom:
+		// Coverage is consulted before place so that a legacy `location: house` and
+		// a migrated `room` + `covers: house` group identically: republishing the
+		// namespace must not move energy between series.
+		return func(d config.DeviceConfig) string {
+			if d.CoversWholeSite() {
+				return houseCoverageKey
+			}
+			return d.Place()
+		}
+	case GroupByFloor:
+		// Same rule, same reason: a device whose readings describe the whole
+		// property belongs to no storey, and attributing an immersion heater
+		// wired house-wide to the floor its box hangs on would be exactly the
+		// conflation the floorplan taxonomy removes — relocated from `location`
+		// to `floor`.
+		return func(d config.DeviceConfig) string {
+			if d.CoversWholeSite() {
+				return houseCoverageKey
+			}
+			return d.Floor
+		}
+	case GroupByClass:
+		return func(d config.DeviceConfig) string { return d.Class }
+	default:
+		return nil
+	}
+}
+
+// CountByGroupKey counts the devices in each group under groupBy: the metered,
+// non-meter devices that a fleet grouping actually emits series for, keyed by
+// GroupKeyFor.
+//
+// It backs the device_count on /rooms and /floors, and defines WHICH groups
+// those catalogs list — so they list exactly what the matching filter accepts.
+// Two keys are excluded, both because they are not places:
+//
+//   - the empty key (UNKNOWN membership: no room or no declared floor), which
+//     rooms=/floors= can never match;
+//   - houseCoverageKey, a coverage SCOPE and a reserved series key. Listing it
+//     would advertise "house" as a room id, which the taxonomy forbids.
+//
+// A grouping that gives every device its own series (device) or none (house)
+// has no groups to count and yields an empty map.
+func CountByGroupKey(devices map[string]config.DeviceConfig, groupBy string) map[string]int {
+	keyOf := GroupKeyFor(groupBy)
+	counts := map[string]int{}
+	if keyOf == nil {
+		return counts
+	}
+	for _, d := range devices {
+		if !isMetered(d.Class) || IsWholeHouseTotal(d) {
+			continue
+		}
+		k := keyOf(d)
+		if k == "" || k == houseCoverageKey {
+			continue
+		}
+		counts[k]++
+	}
+	return counts
 }
 
 // assembleGrouped yields one series per distinct non-empty key over metered,
