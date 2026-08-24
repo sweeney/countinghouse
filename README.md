@@ -332,3 +332,15 @@ Prod host is `garibaldi` (systemd). Deploy only when asked:
 One-time host setup is in `deploy/install.sh` (creates the user/dirs/config/unit) and
 `deploy/sudoers.sh`. See `PLAN.md` §14 for the deploy-time prerequisites (Influx read token,
 identity client credentials).
+
+**When a deploy ends with the service down**, the script does not just dump the journal: it
+renders the service's own refusal (including the config block to add), classifies the
+cause, and says whether it will fix itself. The distinction that matters at 3am is
+self-healing vs not — an unreachable config service recovers on the unit's 5s restart
+loop, while a missing config key or a 404 namespace never will. It also prints the
+rollback command for the previous build, with the caveat that fits the cause: after a
+cold-namespace failure, rolling back is the *wrong* move, because an older build boots
+happily and serves the empty snapshots this one refuses to.
+
+There is deliberately **no preflight check** on the host's config. A deploy that would
+fail is allowed to fail; it just has to explain itself.
