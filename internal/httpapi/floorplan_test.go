@@ -356,3 +356,19 @@ func TestRooms_NeverListsTheReservedHouseKey(t *testing.T) {
 		}
 	}
 }
+
+// Both catalogs are data routes: they describe the property, so they sit behind
+// the same Bearer check as /devices rather than beside /healthz.
+func TestFloorplanCatalogsRequireAuth(t *testing.T) {
+	for _, path := range []string{"/floors", "/rooms"} {
+		s := floorplanSetup(t, nil)
+		s.IdentityURL = "https://id.example.com"
+		mux := newMux(s)
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s without a token = %d, want 401", path, w.Code)
+		}
+	}
+}
