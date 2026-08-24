@@ -11,7 +11,7 @@ import (
 // fixed name — which is exactly what happened.
 func TestSiteBlockNamesTheDevicesNamespace(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.yaml")
-	body := "site:\n  id: home\n  devices_namespace: devices_home\n"
+	body := "site:\n  id: home\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -3,9 +3,11 @@ package httpapi
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
@@ -184,7 +186,8 @@ func (s *Server) resolveSeriesParams(w http.ResponseWriter, r *http.Request) (en
 // average stays comparable across endpoints.
 func (s *Server) buildSeries(r *http.Request, win energy.Window, iv energy.Interval, groupBy string, includeUnmonitored, unclamped bool, devices map[string]config.DeviceConfig, tariff config.Tariff) (energy.SeriesResponse, error) {
 	start := time.Now()
-	resp, err := energy.BuildSeries(r.Context(), s.Influx, s.Bucket, win, iv, groupBy, includeUnmonitored, unclamped, devices, tariff, s.loc())
+	resp, err := energy.BuildSeries(r.Context(), s.Influx, s.Bucket, win, iv, groupBy,
+		includeUnmonitored, unclamped, devices, tariff, s.groupLabels(groupBy), s.loc())
 	s.queryCount.Add(1)
 	s.influxNanos.Add(int64(time.Since(start)))
 	if err != nil {
@@ -217,11 +220,204 @@ func (s *Server) recordDrift(win energy.Window, d energy.DriftStats) {
 // validGroupBy reports whether g is an accepted group_by mode.
 func validGroupBy(g string) bool {
 	switch g {
-	case energy.GroupByDevice, energy.GroupByRoom, energy.GroupByClass, energy.GroupByHouse:
+	case energy.GroupByDevice, energy.GroupByRoom, energy.GroupByFloor,
+		energy.GroupByClass, energy.GroupByHouse:
 		return true
 	default:
 		return false
 	}
+}
+
+// resolveDeviceFilter narrows the inventory a /series request covers, honouring
+// the optional rooms= and floors= CSV query filters. They compose as AND: a
+// device must satisfy both to survive, and with neither present the full
+// inventory is returned (the prior behaviour, byte for byte).
+//
+// Both were previously accepted and IGNORED, which is the failure this fixes: a
+// client asking for one room got a 200 carrying the whole house while believing
+// it had filtered. That is the from/to complaint in another costume, and it gets
+// the same resolution — reject the contradiction rather than answer it wrongly.
+//
+// Validation writes a 400 (and returns ok=false) when rooms= or floors= names a
+// group that holds no billed device. That set is exactly what /rooms and /floors
+// list and exactly what group_by=room/floor emits, because all three come from
+// energy.CountByGroupKey — so a picker filled from a catalog cannot produce a
+// rejected request, and a typo cannot masquerade as an empty chart. A valid pair
+// of filters whose intersection is empty is NOT an error: it yields an empty
+// series list (200), consistent with a window that simply has no data.
+func (s *Server) resolveDeviceFilter(w http.ResponseWriter, r *http.Request, groupBy string, includeUnmonitored bool) (map[string]config.DeviceConfig, bool) {
+	all := s.Config.Devices()
+	q := r.URL.Query()
+
+	rooms, ok := splitFilterCSV(w, q, "rooms")
+	if !ok {
+		return nil, false
+	}
+	floors, ok := splitFilterCSV(w, q, "floors")
+	if !ok {
+		return nil, false
+	}
+	if len(rooms) == 0 && len(floors) == 0 {
+		return all, true
+	}
+
+	// The unmonitored catch-all is the whole-house meter minus ALL monitored
+	// devices. Against a filtered inventory it would silently absorb every device
+	// the filter excluded and publish that as "rest of home" — a wrong number
+	// wearing the shape of a right one, which is precisely what this service must
+	// not do. Same arithmetic, same refusal, for group_by=house: filtering shrinks
+	// `monitored` while the meter stays whole, inflating `unmonitored` by the
+	// excluded consumption.
+	conflict := ""
+	if includeUnmonitored || groupBy == energy.GroupByHouse {
+		conflict = "'rooms'/'floors' select a subset of devices, but the unmonitored series is " +
+			"the whole-house meter minus ALL monitored devices — against a filtered set " +
+			"it would absorb the excluded devices and report them as rest-of-home. Drop " +
+			"the filter, or drop include_unmonitored/group_by=house."
+	}
+
+	// Ids are validated FIRST so a request that is both invalid and contradictory
+	// reports both. Leading with the conflict alone sends the caller off to fix one
+	// thing, retry, and meet a second 400 for a typo that was visible all along.
+	if bad := unknownGroupValue(all, energy.GroupByRoom, rooms); bad != "" {
+		writeError(w, http.StatusBadRequest, withConflict("unknown room in 'rooms': "+bad, conflict))
+		return nil, false
+	}
+	if bad := unknownGroupValue(all, energy.GroupByFloor, floors); bad != "" {
+		writeError(w, http.StatusBadRequest, withConflict("unknown floor in 'floors': "+bad, conflict))
+		return nil, false
+	}
+	if conflict != "" {
+		writeError(w, http.StatusBadRequest, conflict)
+		return nil, false
+	}
+
+	roomOf := energy.GroupKeyFor(energy.GroupByRoom)
+	floorOf := energy.GroupKeyFor(energy.GroupByFloor)
+	roomSet, floorSet := toSet(rooms), toSet(floors)
+
+	out := make(map[string]config.DeviceConfig, len(all))
+	for id, d := range all {
+		if roomSet != nil {
+			if _, ok := roomSet[roomOf(d)]; !ok {
+				continue
+			}
+		}
+		if floorSet != nil {
+			if _, ok := floorSet[floorOf(d)]; !ok {
+				continue
+			}
+		}
+		out[id] = d
+	}
+	return out, true
+}
+
+// withConflict appends the contradiction to a validation error when both apply, so
+// one response carries every problem the caller has to fix.
+func withConflict(msg, conflict string) string {
+	if conflict == "" {
+		return msg
+	}
+	return msg + " (also: " + conflict + ")"
+}
+
+// splitFilterCSV parses one CSV filter param, rejecting a value that is PRESENT but
+// contains nothing but separators and whitespace.
+//
+// A bare `rooms=` is "no filter": a client building the value from an empty
+// selection means exactly that, and gets the unfiltered answer it asked for. But
+// `rooms=,,` is a client bug — almost always a join that produced nothing — and
+// reading it as "no filter" answers with the whole house, which is the same silent
+// widening these 400s exist to remove.
+func splitFilterCSV(w http.ResponseWriter, q url.Values, name string) ([]string, bool) {
+	raw := q.Get(name)
+	values := splitCSV(raw)
+	// Only a value that is EXACTLY empty means "no filter". Whitespace is treated
+	// like a separator: `rooms=%20` carries no id either, and a client that sent
+	// one meant something by it.
+	if len(values) == 0 && raw != "" {
+		writeError(w, http.StatusBadRequest,
+			"'"+name+"' contains no ids, only separators: send a list, or omit the parameter "+
+				"entirely for the whole house")
+		return nil, false
+	}
+	return values, true
+}
+
+// unknownGroupValue returns the first filter value naming a group that holds no
+// billed device, or "" when every value is known. The accepted set comes from
+// energy.CountByGroupKey, the same function behind the /rooms and /floors catalogs
+// — so what a catalog lists and what a filter accepts cannot drift apart. The
+// reserved "house" key is not in it: a coverage scope is not a place, so
+// `rooms=house` is rejected like any other unknown id.
+func unknownGroupValue(devices map[string]config.DeviceConfig, groupBy string, values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	known := energy.CountByGroupKey(devices, groupBy)
+	for _, v := range values {
+		if _, ok := known[v]; !ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// splitCSV splits a comma-separated query value into trimmed, non-empty parts.
+// An empty input yields nil (no filter requested).
+func splitCSV(v string) []string {
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// toSet turns a slice into a membership set, or nil for an empty slice (so
+// callers can treat nil as "no filter").
+func toSet(items []string) map[string]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	m := make(map[string]struct{}, len(items))
+	for _, it := range items {
+		m[it] = struct{}{}
+	}
+	return m
+}
+
+// groupLabels maps each group key to the floorplan's display name for it, for
+// whichever grouping the request asked for. Keys the floorplan does not name are
+// absent, and assembly then labels those series by id.
+//
+// Built per request from the live snapshot rather than cached, so a SIGHUP
+// reload is reflected immediately. Labels are cosmetic, so no attempt is made to
+// pin them to the same instant as the device snapshot: the worst a reload racing
+// a request can produce is a series labelled by its id for one response.
+func (s *Server) groupLabels(groupBy string) map[string]string {
+	out := map[string]string{}
+	switch groupBy {
+	case energy.GroupByRoom:
+		for id, r := range s.rooms() {
+			if r.Name != "" {
+				out[id] = r.Name
+			}
+		}
+	case energy.GroupByFloor:
+		for id, f := range s.floors() {
+			if f.Name != "" {
+				out[id] = f.Name
+			}
+		}
+	}
+	return out
 }
 
 // handleSeries serves GET /series: a multi-series, columnar energy time-series
@@ -232,7 +428,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		groupBy = energy.GroupByDevice
 	}
 	if !validGroupBy(groupBy) {
-		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want one of device, room, class, house)")
+		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want one of device, room, floor, class, house)")
 		return
 	}
 	shape := r.URL.Query().Get("shape")
@@ -248,6 +444,10 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	devices, ok := s.resolveDeviceFilter(w, r, groupBy, includeUnmonitored)
+	if !ok {
+		return
+	}
 
 	win, iv, ok := s.resolveSeriesParams(w, r)
 	if !ok {
@@ -260,7 +460,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.buildSeries(r, win, iv, groupBy, includeUnmonitored, unclamped, s.Config.Devices(), tariff)
+	resp, err := s.buildSeries(r, win, iv, groupBy, includeUnmonitored, unclamped, devices, tariff)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return

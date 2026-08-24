@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,14 +32,15 @@ type NamespaceStatus struct {
 	Error     string    `json:"error,omitempty"`
 }
 
-// Fetcher fetches the two remote config namespaces countinghouse depends on
-// (statehouse_devices and energy_tariffs) and HOLDS them as live snapshots.
+// Fetcher fetches the three remote config namespaces countinghouse depends on —
+// this site's devices namespace, energy_tariffs, and this site's floorplan
+// namespace — and HOLDS them as live snapshots.
 //
 // Unlike statehouse — which merges remote config into a local Config struct —
 // countinghouse is read-side and stateless: the Fetcher is the authoritative
 // in-memory view that the HTTP handlers query via the ConfigProvider interface
-// (Devices()/Tariffs()). main.go refreshes it once at startup and again on
-// SIGHUP.
+// (Devices()/Tariffs()/Floors()/Rooms()). main.go refreshes it once at startup
+// and again on SIGHUP.
 //
 // Refresh is FAIL-OPEN: any error (token, transport, non-200, decode) is logged
 // as a warning and the last-known-good snapshot for that namespace is kept. A
@@ -56,10 +58,27 @@ type Fetcher struct {
 	// exactly as it did before devices were split per site.
 	DevicesNamespace string
 
+	// FloorplanNamespace names the namespace holding this site's floor and room
+	// records, published by /floors and /rooms and used to label grouped series.
+	// Load requires it, so an empty value here means a Fetcher built by hand; the
+	// fetch is then skipped with a warning rather than requesting /api/v1/config/,
+	// exactly as the devices fetch handles the same mistake.
+	FloorplanNamespace string
+
 	mu       sync.RWMutex
 	devices  map[string]DeviceConfig
+	floors   map[string]FloorConfig
+	rooms    map[string]RoomConfig
 	tariffs  EnergyTariffs
 	statuses map[string]NamespaceStatus
+
+	// landed records the namespaces that have been fetched successfully at least
+	// once, which is what separates STALE from COLD. It is not derivable from
+	// statuses: a namespace that landed and then failed has OK=false there, and is
+	// exactly the case fail-open exists to protect. Nor is it derivable from the
+	// snapshots — an empty document is a successful fetch of "nothing here", which
+	// is an answer rather than an absence.
+	landed map[string]bool
 }
 
 // defaultFetchClient is used when Fetcher.HTTPClient is nil.
@@ -91,6 +110,86 @@ func (f *Fetcher) Tariffs() EnergyTariffs {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.tariffs
+}
+
+// Floors returns a copy of the current floor-record snapshot keyed by floor id.
+// Safe for concurrent use. Implements httpapi.FloorplanProvider.
+//
+// An empty map means either that no floorplan namespace is configured or that
+// none has been fetched yet. Both are UNKNOWN rather than "there are no floors":
+// callers enrich what they have and report the rest empty, never inferring that
+// a floor does not exist because its record is missing.
+func (f *Fetcher) Floors() map[string]FloorConfig {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make(map[string]FloorConfig, len(f.floors))
+	for k, v := range f.floors {
+		out[k] = v
+	}
+	return out
+}
+
+// Rooms returns a copy of the current room-record snapshot keyed by floorplan
+// room id. Safe for concurrent use. Implements httpapi.FloorplanProvider.
+//
+// An empty map means no floorplan namespace is configured, none has been fetched
+// yet, or the document is the legacy floors-only map shape. All three are
+// UNKNOWN rather than "there are no rooms".
+func (f *Fetcher) Rooms() map[string]RoomConfig {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make(map[string]RoomConfig, len(f.rooms))
+	for k, v := range f.rooms {
+		out[k] = v
+	}
+	return out
+}
+
+// Cold returns the namespaces this Fetcher is configured to read that have NEVER
+// been fetched successfully, sorted for a deterministic message.
+//
+// Cold is the state fail-open cannot cover. Every other failure keeps a
+// last-known snapshot, so the service carries on serving the truth it had; with
+// nothing ever fetched it falls open onto emptiness instead — no devices, no
+// tariffs, no floor names — and every endpoint then answers zero, or ids where
+// names belong, in the confident shape of a correct response. That is the same
+// silence requireDevicesNamespace and requireFloorplanNamespace refuse at config
+// level, arriving one layer later.
+//
+// So main.go refuses to boot on a non-empty result: boot needs truth, running
+// keeps the last truth. It is deliberately a QUERY rather than an error returned
+// by Refresh, because the two callers want opposite things — startup must refuse,
+// and the SIGHUP reload must not, since by then a snapshot exists.
+//
+// A Fetcher with no BaseURL attempts nothing and so reports every configured
+// namespace; main.go treats an empty base_url as an explicit local-dev opt-out and
+// only consults Cold when a config service is named.
+func (f *Fetcher) Cold() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []string
+	for _, ns := range f.configuredNamespaces() {
+		if !f.landed[ns] {
+			out = append(out, ns)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// configuredNamespaces lists the namespaces this Fetcher reads. An unnamed one is
+// skipped rather than reported: Load requires both site namespaces, so an empty
+// name means a Fetcher built by hand, and reporting "" as cold would name nothing
+// an operator could act on.
+func (f *Fetcher) configuredNamespaces() []string {
+	out := []string{nsTariffs}
+	if ns := f.devicesNamespace(); ns != "" {
+		out = append(out, ns)
+	}
+	if f.FloorplanNamespace != "" {
+		out = append(out, f.FloorplanNamespace)
+	}
+	return out
 }
 
 // Statuses returns a snapshot of the last fetch result for each namespace.
@@ -125,10 +224,57 @@ func (f *Fetcher) Refresh(ctx context.Context) {
 		f.warn("remote config: identity token fetch failed, keeping last-known snapshots", "error", err)
 		f.recordStatus(f.devicesNamespace(), err)
 		f.recordStatus(nsTariffs, err)
+		if f.FloorplanNamespace != "" {
+			f.recordStatus(f.FloorplanNamespace, err)
+		}
 		return
 	}
 	f.refreshDevices(ctx, token)
 	f.refreshTariffs(ctx, token)
+	f.refreshFloorplan(ctx, token)
+}
+
+// refreshFloorplan fetches the floorplan namespace, which carries both the
+// building's floors and its rooms.
+//
+// Fail-open like the other two: a failing fetch keeps the last-known records and
+// records a status, so an operator can see the names are not arriving, while the
+// endpoints that bill carry on unaffected. That resilience is why the NAME is
+// required at load time and the DOCUMENT is not: countinghouse insists an
+// operator says where the records live, then tolerates the config service being
+// down.
+func (f *Fetcher) refreshFloorplan(ctx context.Context, token string) {
+	if f.FloorplanNamespace == "" {
+		// Load refuses a config naming no floorplan namespace, so reaching here
+		// means a Fetcher built by hand. Concatenating an empty name would request
+		// /api/v1/config/ — a different endpoint, failing for a reason that says
+		// nothing about the actual mistake — so say so instead of guessing.
+		f.warn("remote config: no floorplan namespace configured, skipping the floorplan " +
+			"fetch (a Fetcher built without going through config.Load)")
+		return
+	}
+	var doc floorplanDocument
+	if err := f.fetch(ctx, token, f.FloorplanNamespace, &doc); err != nil {
+		f.warn("remote config: floorplan namespace unavailable, keeping last-known",
+			"namespace", f.FloorplanNamespace, "error", err)
+		f.recordStatus(f.FloorplanNamespace, err)
+		return
+	}
+	floors, rooms := doc.Floors, doc.Rooms
+	if floors == nil {
+		floors = map[string]FloorConfig{}
+	}
+	if rooms == nil {
+		rooms = map[string]RoomConfig{}
+	}
+	normaliseFloors(floors)
+	normaliseRooms(rooms)
+	// Swapped together: they come from one document, so a reader must never see
+	// this fetch's rooms beside the previous fetch's floors.
+	f.mu.Lock()
+	f.floors, f.rooms = floors, rooms
+	f.mu.Unlock()
+	f.recordStatus(f.FloorplanNamespace, nil)
 }
 
 func (f *Fetcher) refreshDevices(ctx context.Context, token string) {
@@ -184,6 +330,16 @@ func (f *Fetcher) recordStatus(ns string, err error) {
 		f.statuses = make(map[string]NamespaceStatus)
 	}
 	f.statuses[ns] = s
+	if err == nil {
+		if f.landed == nil {
+			f.landed = make(map[string]bool)
+		}
+		// Latched, never cleared: a namespace that has landed once has a snapshot
+		// to fall back on for the rest of the process's life, so a later failure is
+		// stale rather than cold. Clearing it here would let a transient
+		// config-service blip promote a healthy instance into a refusal.
+		f.landed[ns] = true
+	}
 	f.mu.Unlock()
 }
 

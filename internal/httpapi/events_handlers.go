@@ -268,6 +268,11 @@ type catalogEntry struct {
 	ID          string `json:"id"`
 	DisplayName string `json:"display_name"`
 	Room        string `json:"room"`
+	// Floor is the floor the devices namespace declares for this device, passed
+	// through as-is. Empty when the namespace declares none, which the catalog
+	// reports as UNKNOWN rather than splitting the room id on its first dot: the
+	// floorplan owns that fact (see config.DeviceConfig.Floor).
+	Floor string `json:"floor"`
 	// Covers is set when the device's readings describe the whole property rather
 	// than the room it sits in, which is why its room may legitimately be empty.
 	Covers       string   `json:"covers,omitempty"`
@@ -303,6 +308,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, _ *http.Request) {
 			ID:           id,
 			DisplayName:  dev.DisplayName,
 			Room:         dev.Place(),
+			Floor:        dev.Floor,
 			Covers:       coverageOf(dev),
 			Class:        dev.Class,
 			Capabilities: caps,

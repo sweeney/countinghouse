@@ -34,8 +34,14 @@ Sibling/reference service: `../statehouse` (mirror its conventions).
 - Config is remote at `config.swee.net` (`GET /api/v1/config/{namespace}`), not local files.
   Namespaces: the site's devices namespace (named by `site.devices_namespace` in local
   config — `devices_home` here; the old shared `statehouse_devices` was deleted upstream
-  and there is no default, so a config naming none refuses to start), and `energy_tariffs`
-  (countinghouse defines it).
+  and there is no default, so a config naming none refuses to start), `energy_tariffs`
+  (countinghouse defines it), and the floorplan namespace (`site.floorplan_namespace` —
+  `floorplan_home` here) shared with greenhouse, behind `/floors`, `/rooms` and grouped
+  series labels. Both site namespaces are REQUIRED — a config naming either none refuses
+  to start, since an unnamed floorplan degrades to ids-as-labels, which is silence that
+  reads as data. **Boot needs truth, running keeps the last truth:** a namespace that has
+  never been fetched aborts startup (`Fetcher.Cold()` → `requireWarmSnapshots`); every
+  later failure, SIGHUP included, is fail-open and merely degrades `/healthz`.
 - Auth via `github.com/sweeney/identity/common`: JWKS verify inbound, `client_credentials`
   `TokenSource` outbound. **Accept service tokens** (`ParseServiceToken`) as well as user
   tokens — statehouse's gap of rejecting service tokens must not be inherited.

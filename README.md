@@ -33,13 +33,15 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 |---|---|
 | `GET /healthz` | Health: aggregated `status` (`ok` / `degraded` = a remote-config fetch failing / `unavailable` = Influx unreachable), version, uptime, Influx reachability, remote-config status. Always HTTP 200. Public. |
 | `GET /openapi.json` | This API as JSON (served from `internal/httpapi/openapi.yaml`). Public. |
-| `GET /devices` | Device catalog (id, display_name, room, `covers`, class, `capabilities`: `energy`/`events`). Includes a synthetic `unmonitored` (rest-of-home) energy device when a whole-house meter is configured. |
+| `GET /devices` | Device catalog (id, display_name, room, `floor`, `covers`, class, `capabilities`: `energy`/`events`). Includes a synthetic `unmonitored` (rest-of-home) energy device when a whole-house meter is configured. |
+| `GET /floors` | Floor catalog (id, name, order, elevation, device_count) — the vocabulary behind `floors=` and `group_by=floor`. |
+| `GET /rooms` | Room catalog (id, name, floor, category, area, device_count) — the vocabulary behind `rooms=` and `group_by=room`. |
 | `GET /devices/{id}/energy?window=&from=&to=` | Windowed kWh for one device (`source`: counter/integral). |
 | `GET /devices/{id}/cost?window=…` | Windowed kWh + VAT-inclusive cost at the effective tariff. |
 | `GET /devices/{id}/series?window=&interval=&shape=` | Single-device time-series (kWh / cost / avg W per bucket), for any energy-capable device **including the whole-house meter** (excluded from `/series?group_by=device`, but a request for one device cannot double-count). Reserved id `unmonitored` serves the rest-of-home series in the same shape (404 when no meter is configured). |
 | `GET /devices/{id}/events?window=` | State-transition events (for vertical-line overlays). |
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
-| `GET /series?window=&interval=&group_by=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`class` groupings so the parts sum to the meter. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
+| `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter. `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
 | `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Current tariffs keyed by fuel (electricity, gas). |
@@ -125,11 +127,52 @@ same token reasoning makes the wildcard safe here: a page with no token can only
 time its own 401, and a page with one is already reading the body it is measuring.
 
 
-## Rooms
+## Rooms and floors
 
 `location` used to mean two different things across these services — a geographic site
 and a room — so rooms are now `room`, sites are `site`, and floors are `floor`. Room ids
 are `<floor>.<slug>`: `groundfloor.kitchen`, `basement.network-cabinet`.
+
+**The floorplan is relayed, never derived.** A device's `floor` is a first-class property
+of the devices namespace, so countinghouse passes it through rather than splitting the
+room id on its first dot. `GET /floors` and `GET /rooms` relay the floorplan namespace's
+own records — name, storey order, elevation, category, area — and report what it does not
+declare as unknown (empty name, `null` order/area) rather than title-casing an id or
+inventing a position. This is the same namespace and the same shape [greenhouse](../greenhouse)
+serves, so a page talking to both services about one house gets one vocabulary.
+
+Both catalogs list exactly what the matching filter accepts: the floors and rooms holding
+at least one **billed** device (metered, excluding the whole-house meter). A floorplan
+record for a room with nothing metered in it is not listed — it exists in the building,
+but not as far as the energy API is concerned — and a room devices declare that the
+floorplan has no record for is listed with empty fields. A picker filled from either
+catalog therefore cannot build a request `/series` rejects.
+
+`category` is relayed **raw**, deliberately not reduced to a computed flag: a plant room's
+consumption is infrastructure rather than household usage, but which rooms "count" is a
+per-dashboard policy question — a breakdown, a coverage view and a heat-loss view each
+answer it differently.
+
+**Grouped series are labelled with the floorplan's name.** `group_by=room` and
+`group_by=floor` set `label` to the published name (`"Room A"`) and fall back to the id
+when none is published; `key` is always the id. A room-grouped series also reports its
+`room`, so it can be joined to `/rooms` — except the reserved `house` series, which
+reports an empty `room` and keeps its key as its label, because a coverage scope is not a
+place and `/rooms` never lists it.
+
+**`group_by=floor`** sums a floor's rooms — energy is additive, so sum is the only sane
+statistic and there is no `group_fn`. With `include_unmonitored=true` the rest-of-home
+residual is returned as its own series and is never attributed to a floor: it is
+house-scoped and belongs to no storey.
+
+**`rooms=` / `floors=` filters** (CSV) narrow the device set for `/series`, composing as
+AND. They were previously accepted and ignored — a client asking for one room got a 200
+carrying the whole house — so an unknown id is now a `400` rather than a silently
+unfiltered answer, as is a value carrying only separators (`rooms=,,`, almost always a
+join that produced nothing). A bare `rooms=` still means "no filter". They cannot be combined with `include_unmonitored=true` or
+`group_by=house`: the unmonitored series is the meter minus **all** monitored devices, so
+against a filtered set it would quietly absorb the excluded devices and publish them as
+rest-of-home. `/devices/{id}/series` ignores them — the path has already selected.
 
 The deprecated `location` spelling has been removed: `group_by=location` and the
 `location` response field are both gone. Use `group_by=room` and `room`.
@@ -138,8 +181,9 @@ The deprecated `location` spelling has been removed: `group_by=location` and the
 hot water report an empty `room` and `covers: "house"` — on `/devices` and in the
 `/bill` breakdown — so an empty room is legible rather than mysterious.
 
-A device may also declare `covers`. Under `group_by=room` a device covering the whole
-property is grouped under a **`house`** key rather than the room it sits in — putting
+A device may also declare `covers`. Under `group_by=room` and `group_by=floor` a device
+covering the whole property is grouped under a **`house`** key rather than the place it
+sits in — putting
 whole-property consumption in one room would be the same conflation under a new name,
 and dropping it would break the guarantee that the grouped parts plus `unmonitored`
 sum to the meter.
@@ -159,7 +203,51 @@ The devices namespace is named by config, so a site reads its own:
 site:
   id: home
   devices_namespace: devices_home
+  floorplan_namespace: floorplan_home
 ```
+
+**`floorplan_namespace` is required too**, for a quieter version of the same reason.
+Omitting it breaks nothing: `/floors` and `/rooms` still list every floor and room
+holding a metered device, and every kWh and cost is exactly right. Only the **names** are
+lost — so those endpoints answer with ids where labels belong and `null` where storey
+order belongs, which is precisely what a floorplan publishing nothing would produce.
+Nothing distinguishes "not configured" from "configured and empty", and the omission
+surfaces days later as a chart legend reading `floor1.room-c` to a human. So it is
+declared or the service refuses to start. (This is stricter than greenhouse, which treats
+the same namespace as optional.)
+
+### Boot needs truth, running keeps the last truth
+
+Remote-config fetches are **fail-open** — a failure keeps the last-known snapshot — with
+one exception: **a namespace that has never been fetched at all aborts startup.** At boot
+there is nothing to fall back to, so fail-open would fall open onto emptiness, and the
+service would come up answering every question with zero kWh, no tariff, or floor and
+room ids where names belong — in the confident shape of a correct response. That is the
+same silence the required-namespace checks refuse, one layer later, where a named
+namespace turns out to fetch nothing.
+
+```
+ERROR remote config: no snapshot was fetched for floorplan_home — refusing to start
+      rather than serving empty devices, no tariff, or floor and room ids where names
+      belong. cold_namespaces=[floorplan_home]
+```
+
+This costs availability if the config service is down exactly when countinghouse
+restarts, and that trade is deliberate: a read-side service that is visibly down beats
+one that is invisibly wrong, systemd's restart loop recovers the moment config returns,
+and the failure is legible in the unit status rather than in a chart legend.
+
+Once a namespace has landed, the rule inverts. A later failure — including a **SIGHUP**
+reload — is *stale*, not *cold*: the last-known snapshot is served, `/healthz` reports
+the failing namespace and its `status` goes `degraded`, and the process keeps running.
+Killing a healthy instance over a transient config blip would turn fail-open inside out.
+`remote_config.<namespace>.ok = false` on a running instance therefore always means
+stale, never empty.
+
+`remote_config.base_url` being empty is the one opt-out: nothing is fetched, the cold
+check is skipped, and empty snapshots are served — an operator who names no config
+service has said they expect that (local dev). `/healthz` reports both site namespaces,
+so you can see which property's devices and floorplan an instance believes it serves.
 
 **`devices_namespace` is required, and the service refuses to start without it.** It
 briefly defaulted to `statehouse_devices`, the shared namespace every service read
@@ -247,3 +335,15 @@ Prod host is `garibaldi` (systemd). Deploy only when asked:
 One-time host setup is in `deploy/install.sh` (creates the user/dirs/config/unit) and
 `deploy/sudoers.sh`. See `PLAN.md` §14 for the deploy-time prerequisites (Influx read token,
 identity client credentials).
+
+**When a deploy ends with the service down**, the script does not just dump the journal: it
+renders the service's own refusal (including the config block to add), classifies the
+cause, and says whether it will fix itself. The distinction that matters at 3am is
+self-healing vs not — an unreachable config service recovers on the unit's 5s restart
+loop, while a missing config key or a 404 namespace never will. It also prints the
+rollback command for the previous build, with the caveat that fits the cause: after a
+cold-namespace failure, rolling back is the *wrong* move, because an older build boots
+happily and serves the empty snapshots this one refuses to.
+
+There is deliberately **no preflight check** on the host's config. A deploy that would
+fail is allowed to fail; it just has to explain itself.

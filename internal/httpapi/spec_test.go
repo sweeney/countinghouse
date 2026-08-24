@@ -31,6 +31,8 @@ var registeredPaths = []string{
 	"/healthz",
 	"/openapi.json",
 	"/devices",
+	"/floors",
+	"/rooms",
 	"/devices/{id}/energy",
 	"/devices/{id}/cost",
 	"/devices/{id}/series",

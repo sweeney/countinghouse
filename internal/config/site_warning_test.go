@@ -20,7 +20,7 @@ func writeConfig(t *testing.T, body string) string {
 // cannot say which property it serves, which is the question the block exists to
 // answer.
 func TestNamespaceWithoutASiteIDIsWarnedAbout(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  devices_namespace: devices_home\n"))
+	cfg, err := Load(writeConfig(t, "site:\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestNamespaceWithoutASiteIDIsWarnedAbout(t *testing.T) {
 // which is the failure mode of every warning that cries wolf. "No site block at all"
 // is no longer among the silent cases: it names no namespace, so it refuses to load.
 func TestCorrectlyConfiguredSitesAreSilent(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  devices_namespace: devices_home\n"))
+	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

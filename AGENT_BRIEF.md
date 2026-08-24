@@ -158,6 +158,11 @@ e.g. `https://config.swee.net/api/v1/config/statehouse_devices`.
 token and retry. Fetches are **fail-open**: on error, log a warning and keep last-known/
 local values; record per-namespace status and expose it on `/healthz`.
 
+**Exception — the first fetch.** Fail-open needs something to fall back to. A namespace
+that has NEVER been fetched has nothing, so countinghouse refuses to start rather than
+serving empty devices, no tariff, or floor/room ids where names belong. Every later
+failure (SIGHUP included) keeps the last-known snapshot and only degrades `/healthz`.
+
 Reference: `internal/config/remote.go` (`Fetcher.fetch`, `applyDevices`),
 `internal/identity/tokensource.go`, `cmd/statehouse/main.go:52-66` (load) and SIGHUP
 reload at `:239-252`.
@@ -188,6 +193,24 @@ type DeviceConfig struct {
 Countinghouse can derive each device's query path from `Class`: plug classes → counter
 query; `ups_sensor` → integral query. (`EnergyStrategy` is statehouse's per-cycle hint;
 countinghouse can ignore it or use it as a fallback signal.)
+
+### `floorplan_<site>` (exists today — shared with greenhouse)
+
+The floor and room records for a site: names, storey order, elevation, room category and
+area. Named by `site.floorplan_namespace` in local config. Published as arrays wrapping
+records that each carry their own id (`{"floors": [...], "rooms": [...]}`); the
+devices-style map keyed by id is also accepted, and carries floors only.
+
+Countinghouse **relays** it — `GET /floors`, `GET /rooms`, and the `label` on grouped
+series — and never derives from it: a device's floor comes from the devices namespace's
+own `floor` property, not from splitting the room id. Greenhouse reads the same document
+the same way, which is the point: a page talking to both services about one house gets
+one vocabulary (issue #19).
+
+Like the devices namespace it is **required** in local config: an instance naming none
+still bills correctly and simply reports every name and storey order as unknown — which
+is indistinguishable from a floorplan that publishes nothing, so the omission is
+invisible until someone reads a legend. The fetch itself stays fail-open.
 
 ### `energy_tariffs` (does NOT exist yet — countinghouse defines it)
 

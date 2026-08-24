@@ -77,7 +77,7 @@ func TestTheRefusalShowsTheBlockToAdd(t *testing.T) {
 
 // The deployed shape must keep working, or this is an outage rather than a guard.
 func TestLoadAcceptsAFullyNamedSite(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  devices_namespace: devices_home\n"))
+	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
 	if err != nil {
 		t.Fatalf("the deployed config must keep loading: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestLoadAcceptsAFullyNamedSite(t *testing.T) {
 // /healthz cannot say which property it serves. Refusing to start over that would take
 // down a working instance to fix a label.
 func TestNamespaceWithoutASiteIDRemainsOnlyAWarning(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  devices_namespace: devices_home\n"))
+	cfg, err := Load(writeConfig(t, "site:\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
 	if err != nil {
 		t.Fatalf("a working-but-unlabelled instance must still start: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestFetcherIssuesNoRequestWhenTheNamespaceIsUnnamed(t *testing.T) {
 
 // Nothing anywhere may still spell the deleted namespace, in a default or a message.
 func TestTheDeletedNamespaceIsNotReferencedAsADefault(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  devices_namespace: devices_home\n"))
+	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -37,6 +37,27 @@ type ConfigProvider interface {
 	Tariffs() config.EnergyTariffs
 }
 
+// FloorplanProvider supplies the floorplan snapshot behind /floors and /rooms,
+// and the display names grouped series are labelled with. The Fetcher satisfies
+// it; tests inject a fake.
+//
+// Server.Floorplan may be nil — tests wire it that way, and so would a Server
+// built by hand — and both catalogs then still list everything that holds a
+// metered device, with names, storey order and category reported as unknown, and
+// grouped series stay labelled by id. That degradation is what keeps a floorplan
+// outage from becoming a billing outage; it is NOT an invitation to run without
+// one, which config.Load refuses.
+//
+// One interface rather than two because both collections come from one document
+// in one namespace: splitting them would let a caller hold half a floorplan and
+// suggest the halves can be configured independently, which they cannot.
+type FloorplanProvider interface {
+	// Floors returns the current floor records keyed by floor id.
+	Floors() map[string]config.FloorConfig
+	// Rooms returns the current room records keyed by floorplan room id.
+	Rooms() map[string]config.RoomConfig
+}
+
 // ConfigStatus surfaces the remote-config fetcher's per-namespace status for
 // /healthz. The Fetcher satisfies it; tests inject a fake. May be nil (then
 // /healthz omits remote_config).
@@ -78,6 +99,12 @@ type Server struct {
 	SiteID           string
 	DevicesNamespace string
 
+	// FloorplanNamespace is the floorplan namespace this instance reads floor and
+	// room records from, reported on /healthz beside the devices one so an
+	// operator can see which property's floorplan it believes it serves. Load
+	// requires it, so it is empty only on a Server built by hand.
+	FloorplanNamespace string
+
 	// Bucket is the Influx bucket the data handlers query (e.g. "statehouse").
 	// main.go sets it from config.
 	Bucket string
@@ -94,6 +121,12 @@ type Server struct {
 	// milestone 7's Fetcher; tests inject a fake. May be nil only for the
 	// public-route tests (data handlers require it).
 	Config ConfigProvider
+
+	// Floorplan supplies floor and room records for /floors, /rooms and the
+	// labels on grouped series. The real impl is the Fetcher; tests inject a fake
+	// or leave it nil — the catalogs then report names, order and category as
+	// unknown, and grouped series stay labelled by id, rather than failing.
+	Floorplan FloorplanProvider
 
 	// RemoteConfig surfaces per-namespace remote-config fetch status on
 	// /healthz. The real impl is the Fetcher (which satisfies ConfigStatus);
@@ -126,6 +159,24 @@ func (s *Server) clock() testutil.Clock {
 		return s.Clock
 	}
 	return testutil.RealClock{}
+}
+
+// floors returns the current floor records, or nil when no floorplan provider is
+// configured. A nil map reads as empty, so /floors degrades to "every floor is
+// unknown" rather than panicking on an instance with no floorplan namespace.
+func (s *Server) floors() map[string]config.FloorConfig {
+	if s.Floorplan == nil {
+		return nil
+	}
+	return s.Floorplan.Floors()
+}
+
+// rooms returns the current room records, nil-safe for the same reason as floors.
+func (s *Server) rooms() map[string]config.RoomConfig {
+	if s.Floorplan == nil {
+		return nil
+	}
+	return s.Floorplan.Rooms()
 }
 
 // loc returns the configured timezone, defaulting to UTC.
@@ -164,6 +215,8 @@ func newMux(s *Server) *http.ServeMux {
 	// tests). Building it here also wires s.verifier.
 	auth := s.authMiddleware()
 	mux.Handle("GET /devices", auth(http.HandlerFunc(s.handleDevices)))
+	mux.Handle("GET /floors", auth(http.HandlerFunc(s.handleFloors)))
+	mux.Handle("GET /rooms", auth(http.HandlerFunc(s.handleRooms)))
 	mux.Handle("GET /devices/{id}/energy", auth(http.HandlerFunc(s.handleDeviceEnergy)))
 	mux.Handle("GET /devices/{id}/cost", auth(http.HandlerFunc(s.handleDeviceCost)))
 	mux.Handle("GET /devices/{id}/series", auth(http.HandlerFunc(s.handleDeviceSeries)))
@@ -224,6 +277,12 @@ func (s *Server) Start(ctx context.Context) error {
 type siteHealth struct {
 	ID               string `json:"id,omitempty"`
 	DevicesNamespace string `json:"devices_namespace,omitempty"`
+	// FloorplanNamespace answers a question the remote_config block cannot: that
+	// block distinguishes "configured and failing" from "configured and fine"
+	// only AFTER a fetch attempt, so an operator seeing blank room names cannot
+	// otherwise tell "first fetch hasn't landed" from "the records are genuinely
+	// unnamed upstream". omitempty covers a Server built without one.
+	FloorplanNamespace string `json:"floorplan_namespace,omitempty"`
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -243,8 +302,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		StartedAgo: int((time.Since(s.started) + 500*time.Millisecond) / time.Second),
 		Goroutines: runtime.NumGoroutine(),
 	}
-	if s.SiteID != "" || s.DevicesNamespace != "" {
-		h.Site = &siteHealth{ID: s.SiteID, DevicesNamespace: s.DevicesNamespace}
+	if s.SiteID != "" || s.DevicesNamespace != "" || s.FloorplanNamespace != "" {
+		h.Site = &siteHealth{
+			ID:                 s.SiteID,
+			DevicesNamespace:   s.DevicesNamespace,
+			FloorplanNamespace: s.FloorplanNamespace,
+		}
 	}
 	if s.Influx != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
