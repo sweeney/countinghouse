@@ -39,7 +39,9 @@ Sibling/reference service: `../statehouse` (mirror its conventions).
   `floorplan_home` here) shared with greenhouse, behind `/floors`, `/rooms` and grouped
   series labels. Both site namespaces are REQUIRED — a config naming either none refuses
   to start, since an unnamed floorplan degrades to ids-as-labels, which is silence that
-  reads as data. The runtime stays fail-open for both.
+  reads as data. **Boot needs truth, running keeps the last truth:** a namespace that has
+  never been fetched aborts startup (`Fetcher.Cold()` → `requireWarmSnapshots`); every
+  later failure, SIGHUP included, is fail-open and merely degrades `/healthz`.
 - Auth via `github.com/sweeney/identity/common`: JWKS verify inbound, `client_credentials`
   `TokenSource` outbound. **Accept service tokens** (`ParseServiceToken`) as well as user
   tokens — statehouse's gap of rejecting service tokens must not be inherited.

@@ -1376,6 +1376,9 @@ components:
             fetch is failing (remote_config.*.ok = false); unavailable = Influx
             is unreachable (data routes will 502). The HTTP status is 200 in all
             three cases — /healthz reports health, it does not itself fail.
+            On a running instance, degraded always means STALE and never EMPTY: a
+            namespace that has never been fetched aborts startup instead, so any
+            snapshot being served has landed at least once.
           example: ok
         version:
           type: string

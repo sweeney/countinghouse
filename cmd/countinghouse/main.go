@@ -1,9 +1,10 @@
 // Command countinghouse runs the read-side energy cost/accounting HTTP service.
 //
 // Startup: load local config, build the outbound identity TokenSource and the
-// remote-config Fetcher (refreshed once with a timeout, fail-open), build the
-// Influx query client, then serve the HTTP API until SIGINT/SIGTERM. SIGHUP
-// re-refreshes remote config in place without a restart.
+// remote-config Fetcher (refreshed once with a timeout), build the Influx query
+// client, then serve the HTTP API until SIGINT/SIGTERM. A namespace that fetched
+// nothing at startup aborts the boot — see requireWarmSnapshots — while every later
+// refresh is fail-open. SIGHUP re-refreshes remote config in place without a restart.
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,32 +48,33 @@ func main() {
 	}
 
 	// Build the outbound client_credentials token source and the remote-config
-	// fetcher. The fetcher HOLDS the live device/tariff snapshots that the HTTP
-	// handlers query, so we always construct it (even when remote_config.base_url
-	// is empty) to avoid a nil ConfigProvider in the handlers — it then serves
-	// empty snapshots. Refresh is fail-open: a config-service outage at startup
-	// leaves empty snapshots rather than aborting the process.
+	// fetcher. The fetcher HOLDS the live device/tariff/floorplan snapshots that the
+	// HTTP handlers query, so we always construct it (even when
+	// remote_config.base_url is empty) to avoid a nil ConfigProvider in the
+	// handlers — it then serves empty snapshots.
 	tokens := &auth.TokenSource{
 		BaseURL:      cfg.Identity.BaseURL,
 		ClientID:     cfg.Identity.ClientID,
 		ClientSecret: cfg.Identity.ClientSecret,
 	}
 	fetcher := &config.Fetcher{
-		BaseURL:          cfg.RemoteConfig.BaseURL,
-		Tokens:           tokens,
-		Logger:           logger,
-		DevicesNamespace: cfg.Site.DevicesNamespace,
-		// Optional: unset, the floorplan is simply never fetched and /floors,
-		// /rooms and grouped-series labels report names as unknown.
+		BaseURL:            cfg.RemoteConfig.BaseURL,
+		Tokens:             tokens,
+		Logger:             logger,
+		DevicesNamespace:   cfg.Site.DevicesNamespace,
 		FloorplanNamespace: cfg.Site.FloorplanNamespace,
 	}
 	if cfg.RemoteConfig.BaseURL == "" {
-		logger.Warn("remote config base_url is empty; serving empty device/tariff snapshots")
+		// Explicit local-dev opt-out: nothing is fetched, so the cold check below is
+		// skipped rather than failed. An operator who names no config service has
+		// said they expect empty snapshots; one who names it has not.
+		logger.Warn("remote config base_url is empty; serving empty device/tariff/floorplan snapshots")
 	} else {
 		logger.Info("refreshing remote config", "url", cfg.RemoteConfig.BaseURL)
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		fetcher.Refresh(refreshCtx)
 		cancel()
+		requireWarmSnapshots(fetcher, logger)
 	}
 
 	influxClient := influx.New(influx.Config{
@@ -120,6 +123,40 @@ func main() {
 	logger.Info("shutting down")
 }
 
+// requireWarmSnapshots aborts startup when any configured namespace has never been
+// fetched: BOOT NEEDS TRUTH, RUNNING KEEPS THE LAST TRUTH.
+//
+// Refresh is fail-open, which is right for every refresh after the first: there is a
+// last-known snapshot, so a config-service outage costs freshness rather than
+// correctness. At startup there is nothing to fall back to, and fail-open falls open
+// onto emptiness — no devices, no tariffs, no floor names. The service then boots
+// "successfully" and answers every question with zero kWh, no tariff, or ids where
+// names belong, in the confident shape of a correct response. That is a wrong answer
+// wearing the shape of a right one, which is the failure mode this service refuses
+// everywhere else: it is why both site namespaces must be NAMED in config, and this is
+// the same refusal one layer later, where the name turns out to fetch nothing.
+//
+// Refusing costs availability during a config-service outage that coincides with a
+// restart, and that trade is deliberate: countinghouse is a read-side service, so being
+// visibly down is strictly better than being invisibly wrong. systemd's restart loop
+// then recovers the instant the config service returns, and the failure is legible in
+// the unit's status rather than in a chart legend somebody eventually squints at.
+//
+// A SIGHUP reload deliberately does NOT go through here — see watchSIGHUP.
+func requireWarmSnapshots(fetcher *config.Fetcher, logger *slog.Logger) {
+	cold := fetcher.Cold()
+	if len(cold) == 0 {
+		return
+	}
+	logger.Error("remote config: no snapshot was fetched for "+strings.Join(cold, ", ")+
+		" — refusing to start rather than serving empty devices, no tariff, or floor and "+
+		"room ids where names belong. Fix the config service or the namespace names, then "+
+		"restart; a namespace that has landed once survives later outages on its "+
+		"last-known snapshot.",
+		"cold_namespaces", cold)
+	os.Exit(1)
+}
+
 // signalContext returns a context cancelled on SIGINT or SIGTERM, triggering
 // the HTTP server's graceful (5s) shutdown.
 func signalContext() (context.Context, context.CancelFunc) {
@@ -136,6 +173,12 @@ func signalContext() (context.Context, context.CancelFunc) {
 // watchSIGHUP re-refreshes the remote-config snapshots on each SIGHUP, without
 // restarting the process. Refresh is fail-open: a failed reload keeps the
 // last-known-good snapshots.
+//
+// It does NOT apply the startup cold check, and the asymmetry is the point: by the
+// time a SIGHUP arrives the process holds a snapshot for every namespace, so a failed
+// reload is STALE, not cold. Killing a healthy instance over a transient config-service
+// blip would turn fail-open's whole purpose inside out. /healthz reports the failing
+// namespace and degrades; that is the signal for a stale reload.
 func watchSIGHUP(fetcher *config.Fetcher, logger *slog.Logger) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGHUP)

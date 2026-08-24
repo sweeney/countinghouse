@@ -213,11 +213,38 @@ surfaces days later as a chart legend reading `floor1.room-c` to a human. So it 
 declared or the service refuses to start. (This is stricter than greenhouse, which treats
 the same namespace as optional.)
 
-The **runtime** stays fail-open: a namespace that is named but unfetchable keeps the
-last-known records and degrades to unknown names rather than refusing to serve. Requiring
-the name asserts that an operator said where the records live, not that the config
-service is up. `/healthz` reports both namespaces so you can see which property's
-floorplan an instance believes it serves.
+### Boot needs truth, running keeps the last truth
+
+Remote-config fetches are **fail-open** — a failure keeps the last-known snapshot — with
+one exception: **a namespace that has never been fetched at all aborts startup.** At boot
+there is nothing to fall back to, so fail-open would fall open onto emptiness, and the
+service would come up answering every question with zero kWh, no tariff, or floor and
+room ids where names belong — in the confident shape of a correct response. That is the
+same silence the required-namespace checks refuse, one layer later, where a named
+namespace turns out to fetch nothing.
+
+```
+ERROR remote config: no snapshot was fetched for floorplan_home — refusing to start
+      rather than serving empty devices, no tariff, or floor and room ids where names
+      belong. cold_namespaces=[floorplan_home]
+```
+
+This costs availability if the config service is down exactly when countinghouse
+restarts, and that trade is deliberate: a read-side service that is visibly down beats
+one that is invisibly wrong, systemd's restart loop recovers the moment config returns,
+and the failure is legible in the unit status rather than in a chart legend.
+
+Once a namespace has landed, the rule inverts. A later failure — including a **SIGHUP**
+reload — is *stale*, not *cold*: the last-known snapshot is served, `/healthz` reports
+the failing namespace and its `status` goes `degraded`, and the process keeps running.
+Killing a healthy instance over a transient config blip would turn fail-open inside out.
+`remote_config.<namespace>.ok = false` on a running instance therefore always means
+stale, never empty.
+
+`remote_config.base_url` being empty is the one opt-out: nothing is fetched, the cold
+check is skipped, and empty snapshots are served — an operator who names no config
+service has said they expect that (local dev). `/healthz` reports both site namespaces,
+so you can see which property's devices and floorplan an instance believes it serves.
 
 **`devices_namespace` is required, and the service refuses to start without it.** It
 briefly defaulted to `statehouse_devices`, the shared namespace every service read

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,14 @@ type Fetcher struct {
 	rooms    map[string]RoomConfig
 	tariffs  EnergyTariffs
 	statuses map[string]NamespaceStatus
+
+	// landed records the namespaces that have been fetched successfully at least
+	// once, which is what separates STALE from COLD. It is not derivable from
+	// statuses: a namespace that landed and then failed has OK=false there, and is
+	// exactly the case fail-open exists to protect. Nor is it derivable from the
+	// snapshots — an empty document is a successful fetch of "nothing here", which
+	// is an answer rather than an absence.
+	landed map[string]bool
 }
 
 // defaultFetchClient is used when Fetcher.HTTPClient is nil.
@@ -132,6 +141,53 @@ func (f *Fetcher) Rooms() map[string]RoomConfig {
 	out := make(map[string]RoomConfig, len(f.rooms))
 	for k, v := range f.rooms {
 		out[k] = v
+	}
+	return out
+}
+
+// Cold returns the namespaces this Fetcher is configured to read that have NEVER
+// been fetched successfully, sorted for a deterministic message.
+//
+// Cold is the state fail-open cannot cover. Every other failure keeps a
+// last-known snapshot, so the service carries on serving the truth it had; with
+// nothing ever fetched it falls open onto emptiness instead — no devices, no
+// tariffs, no floor names — and every endpoint then answers zero, or ids where
+// names belong, in the confident shape of a correct response. That is the same
+// silence requireDevicesNamespace and requireFloorplanNamespace refuse at config
+// level, arriving one layer later.
+//
+// So main.go refuses to boot on a non-empty result: boot needs truth, running
+// keeps the last truth. It is deliberately a QUERY rather than an error returned
+// by Refresh, because the two callers want opposite things — startup must refuse,
+// and the SIGHUP reload must not, since by then a snapshot exists.
+//
+// A Fetcher with no BaseURL attempts nothing and so reports every configured
+// namespace; main.go treats an empty base_url as an explicit local-dev opt-out and
+// only consults Cold when a config service is named.
+func (f *Fetcher) Cold() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	var out []string
+	for _, ns := range f.configuredNamespaces() {
+		if !f.landed[ns] {
+			out = append(out, ns)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// configuredNamespaces lists the namespaces this Fetcher reads. An unnamed one is
+// skipped rather than reported: Load requires both site namespaces, so an empty
+// name means a Fetcher built by hand, and reporting "" as cold would name nothing
+// an operator could act on.
+func (f *Fetcher) configuredNamespaces() []string {
+	out := []string{nsTariffs}
+	if ns := f.devicesNamespace(); ns != "" {
+		out = append(out, ns)
+	}
+	if f.FloorplanNamespace != "" {
+		out = append(out, f.FloorplanNamespace)
 	}
 	return out
 }
@@ -274,6 +330,16 @@ func (f *Fetcher) recordStatus(ns string, err error) {
 		f.statuses = make(map[string]NamespaceStatus)
 	}
 	f.statuses[ns] = s
+	if err == nil {
+		if f.landed == nil {
+			f.landed = make(map[string]bool)
+		}
+		// Latched, never cleared: a namespace that has landed once has a snapshot
+		// to fall back on for the rest of the process's life, so a later failure is
+		// stale rather than cold. Clearing it here would let a transient
+		// config-service blip promote a healthy instance into a refusal.
+		f.landed[ns] = true
+	}
 	f.mu.Unlock()
 }
 

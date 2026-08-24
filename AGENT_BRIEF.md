@@ -158,6 +158,11 @@ e.g. `https://config.swee.net/api/v1/config/statehouse_devices`.
 token and retry. Fetches are **fail-open**: on error, log a warning and keep last-known/
 local values; record per-namespace status and expose it on `/healthz`.
 
+**Exception — the first fetch.** Fail-open needs something to fall back to. A namespace
+that has NEVER been fetched has nothing, so countinghouse refuses to start rather than
+serving empty devices, no tariff, or floor/room ids where names belong. Every later
+failure (SIGHUP included) keeps the last-known snapshot and only degrades `/healthz`.
+
 Reference: `internal/config/remote.go` (`Fetcher.fetch`, `applyDevices`),
 `internal/identity/tokensource.go`, `cmd/statehouse/main.go:52-66` (load) and SIGHUP
 reload at `:239-252`.
