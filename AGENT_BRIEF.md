@@ -189,7 +189,7 @@ Countinghouse can derive each device's query path from `Class`: plug classes →
 query; `ups_sensor` → integral query. (`EnergyStrategy` is statehouse's per-cycle hint;
 countinghouse can ignore it or use it as a fallback signal.)
 
-### `floorplan_<site>` (exists today, OPTIONAL — shared with greenhouse)
+### `floorplan_<site>` (exists today — shared with greenhouse)
 
 The floor and room records for a site: names, storey order, elevation, room category and
 area. Named by `site.floorplan_namespace` in local config. Published as arrays wrapping
@@ -202,9 +202,10 @@ own `floor` property, not from splitting the room id. Greenhouse reads the same 
 the same way, which is the point: a page talking to both services about one house gets
 one vocabulary (issue #19).
 
-Unlike the devices namespace it is optional. It carries presentation detail, so an
-instance without one still bills correctly and simply reports names, order and category
-as unknown.
+Like the devices namespace it is **required** in local config: an instance naming none
+still bills correctly and simply reports every name and storey order as unknown — which
+is indistinguishable from a floorplan that publishes nothing, so the omission is
+invisible until someone reads a legend. The fetch itself stays fail-open.
 
 ### `energy_tariffs` (does NOT exist yet — countinghouse defines it)
 

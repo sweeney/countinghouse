@@ -40,6 +40,7 @@ func TestLoadOverridesDefaults(t *testing.T) {
 site:
   id: "test"
   devices_namespace: "devices_test"
+  floorplan_namespace: "floorplan_test"
 http:
   listen: ":9090"
   public_url: "https://countinghouse.example"
@@ -91,6 +92,7 @@ func TestLoadTokenFileFallback(t *testing.T) {
 site:
   id: "test"
   devices_namespace: "devices_test"
+  floorplan_namespace: "floorplan_test"
 influx:
   url: "http://influx:8086"
   token_file: "`+tokPath+`"
@@ -111,6 +113,7 @@ func TestLoadInlineTokenWinsOverFile(t *testing.T) {
 site:
   id: "test"
   devices_namespace: "devices_test"
+  floorplan_namespace: "floorplan_test"
 influx:
   token: "from-inline"
   token_file: "`+tokPath+`"
@@ -152,6 +155,7 @@ func TestLoadValidTimezonePasses(t *testing.T) {
 site:
   id: "test"
   devices_namespace: "devices_test"
+  floorplan_namespace: "floorplan_test"
 house:
   timezone: "Europe/London"
 `)

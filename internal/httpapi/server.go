@@ -41,11 +41,12 @@ type ConfigProvider interface {
 // and the display names grouped series are labelled with. The Fetcher satisfies
 // it; tests inject a fake.
 //
-// It is OPTIONAL — Server.Floorplan may be nil, and then both catalogs still
-// list everything that holds a metered device, with names, storey order and
-// category reported as unknown, and grouped series stay labelled by id. A
-// floorplan is presentation, so a missing one must never stop a billing service
-// billing.
+// Server.Floorplan may be nil — tests wire it that way, and so would a Server
+// built by hand — and both catalogs then still list everything that holds a
+// metered device, with names, storey order and category reported as unknown, and
+// grouped series stay labelled by id. That degradation is what keeps a floorplan
+// outage from becoming a billing outage; it is NOT an invitation to run without
+// one, which config.Load refuses.
 //
 // One interface rather than two because both collections come from one document
 // in one namespace: splitting them would let a caller hold half a floorplan and
@@ -98,11 +99,10 @@ type Server struct {
 	SiteID           string
 	DevicesNamespace string
 
-	// FloorplanNamespace is the optional floorplan namespace, reported on
-	// /healthz so an operator can tell "not configured" from "configured but not
-	// yet fetched" without reading the host's config file — a distinction the
-	// remote_config block cannot draw, since it only records namespaces something
-	// tried to fetch. Empty on an instance that names none, which is not a fault.
+	// FloorplanNamespace is the floorplan namespace this instance reads floor and
+	// room records from, reported on /healthz beside the devices one so an
+	// operator can see which property's floorplan it believes it serves. Load
+	// requires it, so it is empty only on a Server built by hand.
 	FloorplanNamespace string
 
 	// Bucket is the Influx bucket the data handlers query (e.g. "statehouse").
@@ -123,10 +123,9 @@ type Server struct {
 	Config ConfigProvider
 
 	// Floorplan supplies floor and room records for /floors, /rooms and the
-	// labels on grouped series. The real impl is the Fetcher; tests inject a
-	// fake. May be nil (and is, whenever no floorplan namespace is configured) —
-	// the catalogs then report names, order and category as unknown, and grouped
-	// series stay labelled by id, rather than failing.
+	// labels on grouped series. The real impl is the Fetcher; tests inject a fake
+	// or leave it nil — the catalogs then report names, order and category as
+	// unknown, and grouped series stay labelled by id, rather than failing.
 	Floorplan FloorplanProvider
 
 	// RemoteConfig surfaces per-namespace remote-config fetch status on
@@ -281,8 +280,8 @@ type siteHealth struct {
 	// FloorplanNamespace answers a question the remote_config block cannot: that
 	// block distinguishes "configured and failing" from "configured and fine"
 	// only AFTER a fetch attempt, so an operator seeing blank room names cannot
-	// otherwise tell "no floorplan namespace configured" from "configured, first
-	// fetch hasn't landed". omitempty keeps it invisible on instances with none.
+	// otherwise tell "first fetch hasn't landed" from "the records are genuinely
+	// unnamed upstream". omitempty covers a Server built without one.
 	FloorplanNamespace string `json:"floorplan_namespace,omitempty"`
 }
 

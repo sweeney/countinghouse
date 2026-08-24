@@ -35,9 +35,11 @@ Sibling/reference service: `../statehouse` (mirror its conventions).
   Namespaces: the site's devices namespace (named by `site.devices_namespace` in local
   config — `devices_home` here; the old shared `statehouse_devices` was deleted upstream
   and there is no default, so a config naming none refuses to start), `energy_tariffs`
-  (countinghouse defines it), and the OPTIONAL floorplan namespace (`site.floorplan_namespace`
-  — `floorplan_home` here) shared with greenhouse, behind `/floors`, `/rooms` and grouped
-  series labels. Optional because it is presentation: without it the service still bills.
+  (countinghouse defines it), and the floorplan namespace (`site.floorplan_namespace` —
+  `floorplan_home` here) shared with greenhouse, behind `/floors`, `/rooms` and grouped
+  series labels. Both site namespaces are REQUIRED — a config naming either none refuses
+  to start, since an unnamed floorplan degrades to ids-as-labels, which is silence that
+  reads as data. The runtime stays fail-open for both.
 - Auth via `github.com/sweeney/identity/common`: JWKS verify inbound, `client_credentials`
   `TokenSource` outbound. **Accept service tokens** (`ParseServiceToken`) as well as user
   tokens — statehouse's gap of rejecting service tokens must not be inherited.

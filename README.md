@@ -200,15 +200,24 @@ The devices namespace is named by config, so a site reads its own:
 site:
   id: home
   devices_namespace: devices_home
-  floorplan_namespace: floorplan_home   # optional
+  floorplan_namespace: floorplan_home
 ```
 
-**`floorplan_namespace` is optional**, and the asymmetry is deliberate: devices are what
-countinghouse bills, while a floorplan carries names, storey order and room category.
-Unset, `/floors` and `/rooms` still list every floor and room holding a metered device
-with their names reported as unknown, grouped series stay labelled by id, and every kWh
-and cost is unaffected. `/healthz` reports which floorplan namespace (if any) is
-configured, so "not configured" is distinguishable from "not yet fetched".
+**`floorplan_namespace` is required too**, for a quieter version of the same reason.
+Omitting it breaks nothing: `/floors` and `/rooms` still list every floor and room
+holding a metered device, and every kWh and cost is exactly right. Only the **names** are
+lost — so those endpoints answer with ids where labels belong and `null` where storey
+order belongs, which is precisely what a floorplan publishing nothing would produce.
+Nothing distinguishes "not configured" from "configured and empty", and the omission
+surfaces days later as a chart legend reading `floor1.room-c` to a human. So it is
+declared or the service refuses to start. (This is stricter than greenhouse, which treats
+the same namespace as optional.)
+
+The **runtime** stays fail-open: a namespace that is named but unfetchable keeps the
+last-known records and degrades to unknown names rather than refusing to serve. Requiring
+the name asserts that an operator said where the records live, not that the config
+service is up. `/healthz` reports both namespaces so you can see which property's
+floorplan an instance believes it serves.
 
 **`devices_namespace` is required, and the service refuses to start without it.** It
 briefly defaulted to `statehouse_devices`, the shared namespace every service read

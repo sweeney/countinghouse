@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -212,9 +213,12 @@ func TestDeviceConfig_FloorIsDecoded(t *testing.T) {
 	}
 }
 
-// The floorplan namespace is named in local config, alongside the devices one.
-// Unlike devices_namespace it is OPTIONAL: an instance that names none still
-// bills correctly and simply reports every floor and room name as unknown.
+// The floorplan namespace is named in local config alongside the devices one, and
+// is REQUIRED like it. Both are documents that either exist or do not, and an
+// instance that names neither cannot say so: it serves ids where names belong and
+// reports every storey order as unknown, which is indistinguishable from a
+// floorplan that publishes nothing. Naming it is one line; discovering it is
+// missing means reading a chart legend and noticing it looks wrong.
 func TestLoad_FloorplanNamespace(t *testing.T) {
 	dir := t.TempDir()
 	p := writeFile(t, dir, "config.yaml", `
@@ -230,20 +234,48 @@ site:
 	if cfg.Site.FloorplanNamespace != "floorplan_test" {
 		t.Errorf("floorplan_namespace = %q, want floorplan_test", cfg.Site.FloorplanNamespace)
 	}
-
-	q := writeFile(t, dir, "no-floorplan.yaml", `
-site:
-  id: "test"
-  devices_namespace: "devices_test"
-`)
-	cfg, err = Load(q)
-	if err != nil {
-		t.Fatalf("load without a floorplan namespace: %v", err)
-	}
-	if cfg.Site.FloorplanNamespace != "" {
-		t.Errorf("floorplan_namespace = %q, want empty", cfg.Site.FloorplanNamespace)
-	}
 	if len(cfg.Warnings()) != 0 {
-		t.Errorf("warnings = %v, want none: the floorplan is optional", cfg.Warnings())
+		t.Errorf("warnings = %v, want none from a fully named site", cfg.Warnings())
+	}
+}
+
+func TestLoad_RefusesASiteThatNamesNoFloorplanNamespace(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "config.yaml", `
+site:
+  id: "cottage"
+  devices_namespace: "devices_cottage"
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("a site naming no floorplan_namespace must refuse to load")
+	}
+	if !strings.Contains(err.Error(), "floorplan_namespace") {
+		t.Errorf("the error must name the missing key; got %q", err)
+	}
+	// An operator running two instances needs to know which config to edit, and
+	// what to write in it, without finding the README first.
+	if !strings.Contains(err.Error(), "cottage") {
+		t.Errorf("the error must name the site it is refusing; got %q", err)
+	}
+	for _, want := range []string{"site:", "id:", "floorplan_namespace:"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal must show the block to add, missing %q in:\n%s", want, err)
+		}
+	}
+}
+
+// A config missing BOTH namespaces reports the devices one: it is the namespace
+// that decides whether any answer is right at all, and an operator fixing one key
+// at a time should be sent to that one first.
+func TestLoad_MissingBothNamespacesReportsDevicesFirst(t *testing.T) {
+	dir := t.TempDir()
+	p := writeFile(t, dir, "config.yaml", "site:\n  id: \"cottage\"\n")
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	if !strings.Contains(err.Error(), "devices_namespace") {
+		t.Errorf("want the devices_namespace refusal first; got %q", err)
 	}
 }

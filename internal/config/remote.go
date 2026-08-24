@@ -31,9 +31,9 @@ type NamespaceStatus struct {
 	Error     string    `json:"error,omitempty"`
 }
 
-// Fetcher fetches the remote config namespaces countinghouse depends on — this
-// site's devices namespace and energy_tariffs, plus the OPTIONAL floorplan
-// namespace when one is configured — and HOLDS them as live snapshots.
+// Fetcher fetches the three remote config namespaces countinghouse depends on —
+// this site's devices namespace, energy_tariffs, and this site's floorplan
+// namespace — and HOLDS them as live snapshots.
 //
 // Unlike statehouse — which merges remote config into a local Config struct —
 // countinghouse is read-side and stateless: the Fetcher is the authoritative
@@ -59,10 +59,9 @@ type Fetcher struct {
 
 	// FloorplanNamespace names the namespace holding this site's floor and room
 	// records, published by /floors and /rooms and used to label grouped series.
-	// OPTIONAL: an empty value is not an error and records no status — the
-	// catalogs then report every name, storey order and category as UNKNOWN and
-	// grouped series stay labelled by id. Names are presentation detail, so a
-	// missing floorplan must never be able to stop a billing service billing.
+	// Load requires it, so an empty value here means a Fetcher built by hand; the
+	// fetch is then skipped with a warning rather than requesting /api/v1/config/,
+	// exactly as the devices fetch handles the same mistake.
 	FloorplanNamespace string
 
 	mu       sync.RWMutex
@@ -179,16 +178,23 @@ func (f *Fetcher) Refresh(ctx context.Context) {
 	f.refreshFloorplan(ctx, token)
 }
 
-// refreshFloorplan fetches the optional floorplan namespace, which carries both
-// the building's floors and its rooms.
+// refreshFloorplan fetches the floorplan namespace, which carries both the
+// building's floors and its rooms.
 //
-// Fail-open like the other two, and additionally OPTIONAL: an unset namespace is
-// silent and records no status, because there is nothing configured to be
-// unhealthy about. A configured-but-failing namespace does record one, so an
-// operator who asked for floor records can see they are not arriving — but it
-// still never blocks the devices snapshot or the endpoints that bill.
+// Fail-open like the other two: a failing fetch keeps the last-known records and
+// records a status, so an operator can see the names are not arriving, while the
+// endpoints that bill carry on unaffected. That resilience is why the NAME is
+// required at load time and the DOCUMENT is not: countinghouse insists an
+// operator says where the records live, then tolerates the config service being
+// down.
 func (f *Fetcher) refreshFloorplan(ctx context.Context, token string) {
 	if f.FloorplanNamespace == "" {
+		// Load refuses a config naming no floorplan namespace, so reaching here
+		// means a Fetcher built by hand. Concatenating an empty name would request
+		// /api/v1/config/ — a different endpoint, failing for a reason that says
+		// nothing about the actual mistake — so say so instead of guessing.
+		f.warn("remote config: no floorplan namespace configured, skipping the floorplan " +
+			"fetch (a Fetcher built without going through config.Load)")
 		return
 	}
 	var doc floorplanDocument

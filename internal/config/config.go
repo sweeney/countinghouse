@@ -55,12 +55,21 @@ type SiteConfig struct {
 	// records — the same document greenhouse reads, published by /floors and /rooms
 	// and used to label grouped series with names instead of ids.
 	//
-	// OPTIONAL, unlike DevicesNamespace, and the asymmetry is deliberate: devices are
-	// what countinghouse bills, so an unfetchable devices namespace makes every answer
-	// wrong-but-plausible. A floorplan carries names, storey order and room category —
-	// presentation. Unset, /floors and /rooms still list every floor and room that
-	// holds a metered device, with names and order reported as unknown, and every kWh
-	// and every cost is unaffected.
+	// REQUIRED, like DevicesNamespace. It is a document that either exists or does
+	// not, and an instance that names none cannot say so: /floors and /rooms answer
+	// with ids where names belong and every storey order null, which is exactly what
+	// a floorplan publishing nothing would produce. The failure therefore surfaces as
+	// a chart legend somebody eventually notices looks wrong, rather than at startup.
+	// Naming it is one line; the alternative is a silence that reads as data.
+	//
+	// This is stricter than greenhouse, which treats the same namespace as optional.
+	// Deliberately: both services must be given the name to serve names at all, and
+	// refusing at startup is the only place the omission is visible.
+	//
+	// The RUNTIME remains fail-open — a namespace that is named but unfetchable keeps
+	// the last-known records and degrades to unknown names rather than refusing to
+	// serve. Requiring the name asserts that an operator declared where the records
+	// live, not that the config service is up.
 	FloorplanNamespace string `yaml:"floorplan_namespace"`
 }
 
@@ -177,7 +186,13 @@ func Load(path string) (Config, error) {
 		}
 	}
 	cfg.warnings = siteWarnings(cfg.Site)
+	// Devices first: it is the namespace that decides whether any answer is right at
+	// all, so an operator fixing one key at a time is sent to that one before the
+	// namespace that only decides what things are called.
 	if err := requireDevicesNamespace(cfg.Site); err != nil {
+		return cfg, err
+	}
+	if err := requireFloorplanNamespace(cfg.Site); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
@@ -214,6 +229,51 @@ func requireDevicesNamespace(s SiteConfig) error {
 			"to it would fetch nothing and serve zero devices while looking healthy. Name it:"+
 			"\n\nsite:\n  id: %s\n  devices_namespace: <the namespace published for this site>",
 		subject, id)
+}
+
+// requireFloorplanNamespace refuses a config that does not name the namespace its floor
+// and room records live in.
+//
+// The argument is the one requireDevicesNamespace makes, applied to a quieter failure.
+// An unnamed floorplan is not an error at any layer: the fetch never happens, /floors
+// and /rooms still list every floor and room holding a metered device, grouped series
+// still carry keys, and every kWh and cost is exactly right. What is lost is only the
+// names — so the endpoints answer with ids where labels belong and null where storey
+// order belongs, which is indistinguishable from a floorplan namespace that publishes
+// nothing. Nothing anywhere reports the difference between "not configured" and
+// "configured and empty", and the omission surfaces as a chart legend reading
+// "floor1.room-c" to a human, days later, if anyone looks.
+//
+// So it is declared or it is refused. Like the devices namespace it is NOT derived from
+// the site id: guessing `floorplan_<id>` would turn a typo into a successful fetch of
+// nothing, which is the failure this refusal removes rather than relocates.
+func requireFloorplanNamespace(s SiteConfig) error {
+	if s.FloorplanNamespace != "" {
+		return nil
+	}
+	subject, id := "this instance", s.ID
+	if s.ID != "" {
+		subject = fmt.Sprintf("site %q", s.ID)
+	} else {
+		id = "<this site's id from the sites namespace>"
+	}
+	return fmt.Errorf(
+		"%s names no floorplan_namespace, so /floors, /rooms and every grouped series "+
+			"would answer with ids where names belong and null where storey order belongs "+
+			"— indistinguishable from a floorplan that publishes nothing, and visible only "+
+			"as a legend somebody eventually notices looks wrong. Name it (it is the same "+
+			"document greenhouse reads):"+
+			"\n\nsite:\n  id: %s\n  devices_namespace: %s\n  floorplan_namespace: <the floorplan namespace published for this site>",
+		subject, id, orPlaceholder(s.DevicesNamespace, "<this site's devices namespace>"))
+}
+
+// orPlaceholder returns v, or placeholder when v is empty — so a refusal can echo the
+// keys the operator already set instead of blanking them out of the block it prints.
+func orPlaceholder(v, placeholder string) string {
+	if v != "" {
+		return v
+	}
+	return placeholder
 }
 
 // siteWarnings reports a half-filled site block that is legal and works.

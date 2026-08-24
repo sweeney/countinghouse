@@ -1405,11 +1405,12 @@ components:
             floorplan_namespace:
               type: string
               description: >-
-                The optional floorplan namespace (floors, rooms), omitted on an
-                instance that names none. Reported so an operator can tell "not
-                configured" from "configured but not yet fetched" — a distinction
-                remote_config cannot draw, since it only records namespaces
-                something tried to fetch.
+                The floorplan namespace (floors, rooms) this instance reads. Like
+                devices_namespace it is required, so a running instance always has
+                one. Reported so an operator can see which property's floorplan it
+                serves, and so blank names are attributable — remote_config cannot
+                draw that distinction, since it only records the outcome of a
+                fetch.
               example: floorplan_home
         remote_config:
           type: object
@@ -1421,9 +1422,9 @@ components:
             literal namespace therefore stops matching when a site migrates, and a
             missing key reads as healthy in most check expressions. Alert on the
             top-level `status` field instead, which degrades regardless of the key.
-            `energy_tariffs` is fixed, and `site.floorplan_namespace` appears only
-            when one is configured — it is optional, so its absence is not a
-            fault. Omitted when no remote-config fetcher is wired.
+            `energy_tariffs` is fixed, and the floorplan key follows
+            `site.floorplan_namespace`, which is required too. Omitted when no
+            remote-config fetcher is wired.
           additionalProperties:
             type: object
             properties:
