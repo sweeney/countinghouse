@@ -50,6 +50,18 @@ type SiteConfig struct {
 	// exist buys a silent empty snapshot rather than a diagnostic. Load refuses a
 	// config that leaves it unset.
 	DevicesNamespace string `yaml:"devices_namespace"`
+
+	// FloorplanNamespace is the config namespace holding this site's floor and room
+	// records — the same document greenhouse reads, published by /floors and /rooms
+	// and used to label grouped series with names instead of ids.
+	//
+	// OPTIONAL, unlike DevicesNamespace, and the asymmetry is deliberate: devices are
+	// what countinghouse bills, so an unfetchable devices namespace makes every answer
+	// wrong-but-plausible. A floorplan carries names, storey order and room category —
+	// presentation. Unset, /floors and /rooms still list every floor and room that
+	// holds a metered device, with names and order reported as unknown, and every kWh
+	// and every cost is unaffected.
+	FloorplanNamespace string `yaml:"floorplan_namespace"`
 }
 
 // UnmarshalYAML accepts either the block form or a bare id:

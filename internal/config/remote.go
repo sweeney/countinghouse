@@ -31,14 +31,15 @@ type NamespaceStatus struct {
 	Error     string    `json:"error,omitempty"`
 }
 
-// Fetcher fetches the two remote config namespaces countinghouse depends on
-// (statehouse_devices and energy_tariffs) and HOLDS them as live snapshots.
+// Fetcher fetches the remote config namespaces countinghouse depends on — this
+// site's devices namespace and energy_tariffs, plus the OPTIONAL floorplan
+// namespace when one is configured — and HOLDS them as live snapshots.
 //
 // Unlike statehouse — which merges remote config into a local Config struct —
 // countinghouse is read-side and stateless: the Fetcher is the authoritative
 // in-memory view that the HTTP handlers query via the ConfigProvider interface
-// (Devices()/Tariffs()). main.go refreshes it once at startup and again on
-// SIGHUP.
+// (Devices()/Tariffs()/Floors()/Rooms()). main.go refreshes it once at startup
+// and again on SIGHUP.
 //
 // Refresh is FAIL-OPEN: any error (token, transport, non-200, decode) is logged
 // as a warning and the last-known-good snapshot for that namespace is kept. A
@@ -56,8 +57,18 @@ type Fetcher struct {
 	// exactly as it did before devices were split per site.
 	DevicesNamespace string
 
+	// FloorplanNamespace names the namespace holding this site's floor and room
+	// records, published by /floors and /rooms and used to label grouped series.
+	// OPTIONAL: an empty value is not an error and records no status — the
+	// catalogs then report every name, storey order and category as UNKNOWN and
+	// grouped series stay labelled by id. Names are presentation detail, so a
+	// missing floorplan must never be able to stop a billing service billing.
+	FloorplanNamespace string
+
 	mu       sync.RWMutex
 	devices  map[string]DeviceConfig
+	floors   map[string]FloorConfig
+	rooms    map[string]RoomConfig
 	tariffs  EnergyTariffs
 	statuses map[string]NamespaceStatus
 }
@@ -93,6 +104,39 @@ func (f *Fetcher) Tariffs() EnergyTariffs {
 	return f.tariffs
 }
 
+// Floors returns a copy of the current floor-record snapshot keyed by floor id.
+// Safe for concurrent use. Implements httpapi.FloorplanProvider.
+//
+// An empty map means either that no floorplan namespace is configured or that
+// none has been fetched yet. Both are UNKNOWN rather than "there are no floors":
+// callers enrich what they have and report the rest empty, never inferring that
+// a floor does not exist because its record is missing.
+func (f *Fetcher) Floors() map[string]FloorConfig {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make(map[string]FloorConfig, len(f.floors))
+	for k, v := range f.floors {
+		out[k] = v
+	}
+	return out
+}
+
+// Rooms returns a copy of the current room-record snapshot keyed by floorplan
+// room id. Safe for concurrent use. Implements httpapi.FloorplanProvider.
+//
+// An empty map means no floorplan namespace is configured, none has been fetched
+// yet, or the document is the legacy floors-only map shape. All three are
+// UNKNOWN rather than "there are no rooms".
+func (f *Fetcher) Rooms() map[string]RoomConfig {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make(map[string]RoomConfig, len(f.rooms))
+	for k, v := range f.rooms {
+		out[k] = v
+	}
+	return out
+}
+
 // Statuses returns a snapshot of the last fetch result for each namespace.
 // Implements httpapi.ConfigStatus.
 func (f *Fetcher) Statuses() map[string]NamespaceStatus {
@@ -125,10 +169,50 @@ func (f *Fetcher) Refresh(ctx context.Context) {
 		f.warn("remote config: identity token fetch failed, keeping last-known snapshots", "error", err)
 		f.recordStatus(f.devicesNamespace(), err)
 		f.recordStatus(nsTariffs, err)
+		if f.FloorplanNamespace != "" {
+			f.recordStatus(f.FloorplanNamespace, err)
+		}
 		return
 	}
 	f.refreshDevices(ctx, token)
 	f.refreshTariffs(ctx, token)
+	f.refreshFloorplan(ctx, token)
+}
+
+// refreshFloorplan fetches the optional floorplan namespace, which carries both
+// the building's floors and its rooms.
+//
+// Fail-open like the other two, and additionally OPTIONAL: an unset namespace is
+// silent and records no status, because there is nothing configured to be
+// unhealthy about. A configured-but-failing namespace does record one, so an
+// operator who asked for floor records can see they are not arriving — but it
+// still never blocks the devices snapshot or the endpoints that bill.
+func (f *Fetcher) refreshFloorplan(ctx context.Context, token string) {
+	if f.FloorplanNamespace == "" {
+		return
+	}
+	var doc floorplanDocument
+	if err := f.fetch(ctx, token, f.FloorplanNamespace, &doc); err != nil {
+		f.warn("remote config: floorplan namespace unavailable, keeping last-known",
+			"namespace", f.FloorplanNamespace, "error", err)
+		f.recordStatus(f.FloorplanNamespace, err)
+		return
+	}
+	floors, rooms := doc.Floors, doc.Rooms
+	if floors == nil {
+		floors = map[string]FloorConfig{}
+	}
+	if rooms == nil {
+		rooms = map[string]RoomConfig{}
+	}
+	normaliseFloors(floors)
+	normaliseRooms(rooms)
+	// Swapped together: they come from one document, so a reader must never see
+	// this fetch's rooms beside the previous fetch's floors.
+	f.mu.Lock()
+	f.floors, f.rooms = floors, rooms
+	f.mu.Unlock()
+	f.recordStatus(f.FloorplanNamespace, nil)
 }
 
 func (f *Fetcher) refreshDevices(ctx context.Context, token string) {

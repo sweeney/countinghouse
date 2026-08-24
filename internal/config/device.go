@@ -42,6 +42,21 @@ type DeviceConfig struct {
 	// "groundfloor.kitchen". It replaces Location.
 	Room string `yaml:"room" json:"room,omitempty"`
 
+	// Floor is the floor this device sits on, e.g. "floor2". The devices
+	// namespace declares it as a first-class property alongside Room, so
+	// countinghouse reads it rather than deriving it from the room id: the
+	// floorplan owns the fact, and splitting the room id on its first dot would
+	// be a second implementation of someone else's taxonomy that silently
+	// disagrees the moment a room id is spelled unexpectedly. Greenhouse relays
+	// it on the same argument, so both services say the same thing about the
+	// same device (issue #19).
+	//
+	// Empty means the namespace did not declare one, which countinghouse treats
+	// as UNKNOWN rather than guessing: an undeclared floor is never matched by
+	// the floors= filter, never grouped under group_by=floor, and is reported as
+	// "" by the device catalog.
+	Floor string `yaml:"floor" json:"floor,omitempty"`
+
 	// Covers is what this device's readings describe, when that is NOT the room
 	// it sits in. Either the literal "house" or another room id; absent means it
 	// covers its own room.
