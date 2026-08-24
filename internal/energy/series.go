@@ -42,8 +42,9 @@ const (
 
 // house series keys.
 const (
-	// houseCoverageKey is the room-grouping key for devices whose readings describe
-	// the whole property rather than the room they sit in.
+	// houseCoverageKey is the key the PLACE groupings (room, floor) give devices
+	// whose readings describe the whole property rather than the place they sit
+	// in.
 	//
 	// They need a key of their own. Dropping them breaks the partition that
 	// withUnmonitoredCatchAll documents — houseParts counts every metered device in
@@ -274,6 +275,8 @@ func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 //     whole-house exclusion — a one-device request is not a fleet and cannot
 //     double-count. Identical to device for every other class.
 //   - room: device kWh/cost/avgW summed per room (meter excluded).
+//   - floor: the same, over the floor each device DECLARES. Energy is additive,
+//     so a floor is simply the sum of its rooms.
 //   - class: summed per Class (meter excluded).
 //   - house: THREE series — "monitored" = sum of ALL non-meter devices;
 //     "unmonitored" = clamp(meter − monitored) per bucket; "meter" = the energy
@@ -288,6 +291,15 @@ func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 // (see deriveUnmonitored). Totals are the summed rounded per-bucket values.
 // Rounding: kWh 3dp, cost 4dp, W 1dp. bucketHours is the per-bucket wall-clock
 // length (only the house path consumes it; other groupings may pass nil).
+//
+// groupLabels maps a group key to the floorplan's display name for it, for the
+// grouped place modes only (room, floor). A key with no entry, or an empty
+// entry, keeps the key itself as the label: countinghouse relays the floorplan's
+// names and falls back to the id rather than deriving a label from it. The KEY
+// is always the id — only Label varies — so a caller matching on identity is
+// unaffected by whether a name happens to be published. Per-device series take
+// their label from DisplayName and ignore it entirely, and so does class
+// grouping: a class is not a place and the floorplan does not name one.
 func AssembleSeries(
 	buckets []time.Time,
 	bucketHours []float64,
@@ -296,22 +308,13 @@ func AssembleSeries(
 	powerByDevice map[string][]float64,
 	tariff config.Tariff,
 	groupBy string,
+	groupLabels map[string]string,
 ) []Series {
 	get := paddedGetter(len(buckets))
 
 	switch groupBy {
-	case GroupByRoom:
-		// Coverage is consulted before place so that a legacy `location: house` and a
-		// migrated `room` + `covers: house` group identically: republishing the
-		// namespace must not move energy between series.
-		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string {
-			if d.CoversWholeSite() {
-				return houseCoverageKey
-			}
-			return d.Place()
-		})
-	case GroupByClass:
-		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, func(d config.DeviceConfig) string { return d.Class })
+	case GroupByRoom, GroupByFloor, GroupByClass:
+		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, groupBy, groupLabels)
 	case GroupByHouse:
 		return assembleHouse(buckets, bucketHours, devices, energyByDevice, powerByDevice, tariff, get)
 	case GroupBySelf:
@@ -453,15 +456,19 @@ func CountByGroupKey(devices map[string]config.DeviceConfig, groupBy string) map
 }
 
 // assembleGrouped yields one series per distinct non-empty key over metered,
-// non-meter devices, summing member energy and power bucket-wise.
+// non-meter devices, summing member energy and power bucket-wise. The key comes
+// from GroupKeyFor, so a grouping, its filter and its catalog can never disagree
+// about which devices share a series.
 func assembleGrouped(
 	buckets []time.Time,
 	devices map[string]config.DeviceConfig,
 	energyByDevice, powerByDevice map[string][]float64,
 	tariff config.Tariff,
 	get getter,
-	keyOf func(config.DeviceConfig) string,
+	groupBy string,
+	groupLabels map[string]string,
 ) []Series {
+	keyOf := GroupKeyFor(groupBy)
 	members := map[string][]string{}
 	for id, d := range devices {
 		if !isMetered(d.Class) || IsWholeHouseTotal(d) {
@@ -489,7 +496,29 @@ func assembleGrouped(
 			es = append(es, get(energyByDevice, id))
 			ps = append(ps, get(powerByDevice, id))
 		}
-		out = append(out, buildSeries(k, k, "", "", buckets, es, ps, tariff))
+		// A series that IS a room reports that room, so a client can join it to
+		// the /rooms catalog. A floor or class series belongs to no single room,
+		// so `room` stays empty rather than carrying a floor id in a field named
+		// room.
+		room := ""
+		if groupBy == GroupByRoom {
+			room = k
+		}
+		// The floorplan's name when it publishes one, the id otherwise. Never a
+		// label derived from the id: that transform is the client-side guesswork
+		// this exists to remove, and moving it here would not make it less of a
+		// guess. A legend rendering `label || key` therefore shows "Room A" once
+		// the floorplan names it and "floor1.room-a" until then.
+		label := k
+		// Only the PLACE groupings take floorplan names. A class is not a place:
+		// the floorplan does not name one, and a floorplan key that happened to
+		// collide with a class name must not relabel it.
+		if groupBy == GroupByRoom || groupBy == GroupByFloor {
+			if name := groupLabels[k]; name != "" {
+				label = name
+			}
+		}
+		out = append(out, buildSeries(k, label, room, "", buckets, es, ps, tariff))
 	}
 	return out
 }
@@ -862,7 +891,8 @@ func sortedDeviceIDs(devices map[string]config.DeviceConfig) []string {
 // The query count is independent of device count: each builder fans out across
 // a device set via contains(set: [...]). bucket is the Influx bucket name; win
 // the resolved window; iv the resolved interval; groupBy the grouping mode;
-// devices the inventory; tariff the pricing; loc the timezone.
+// devices the inventory; tariff the pricing; groupLabels the floorplan display
+// names for grouped series keys; loc the timezone.
 func BuildSeries(
 	ctx context.Context,
 	q influx.Querier,
@@ -874,6 +904,7 @@ func BuildSeries(
 	unclamped bool,
 	devices map[string]config.DeviceConfig,
 	tariff config.Tariff,
+	groupLabels map[string]string,
 	loc *time.Location,
 ) (SeriesResponse, error) {
 	if loc == nil {
@@ -935,7 +966,7 @@ func BuildSeries(
 		demux(rows, idx, powerByDevice, len(buckets), func(v float64, _ int) float64 { return v })
 	}
 
-	series := AssembleSeries(buckets, hrs, devices, energyByDevice, powerByDevice, tariff, groupBy)
+	series := AssembleSeries(buckets, hrs, devices, energyByDevice, powerByDevice, tariff, groupBy, groupLabels)
 
 	// R2: opt the single unmonitored catch-all into a device/room/class
 	// grouping so the parts sum to the whole house. group_by=house already carries

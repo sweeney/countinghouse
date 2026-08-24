@@ -49,7 +49,7 @@ func floorplanDevices() map[string]config.DeviceConfig {
 			Room: "floor1.room-c", Floor: "floor1", Covers: "house",
 		},
 		"immersion": {
-			Class: "binary_state_device", DisplayName: "Immersion Heater",
+			Class: "continuous_power_device", DisplayName: "Immersion Heater",
 			Room: "floor1.room-c", Floor: "floor1", Covers: "house",
 		},
 	}

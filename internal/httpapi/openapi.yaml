@@ -126,7 +126,12 @@ paths:
       description: >
         Multi-series energy time-series over the window: per-series kWh, cost and
         avg_w. group_by selects device (default, one series per metered device,
-        excluding the whole-house meter), room, class, or house. house yields
+        excluding the whole-house meter), room, floor, class, or house. A floor is
+        the sum of its rooms — energy is additive, so sum is the only combining
+        statistic and there is no group_fn. Grouped place series (room, floor) are
+        labelled with the floorplan's NAME when it publishes one and by their id
+        otherwise; the key is always the id. rooms= and floors= narrow which
+        devices the response covers. house yields
         three series in order: "monitored" = sum of devices, "unmonitored" =
         clamp(meter − monitored) per bucket (the rest-of-home energy no monitored
         device accounts for), and "meter" = the whole-house meter. Stacking every
@@ -148,6 +153,8 @@ paths:
         - $ref: "#/components/parameters/To"
         - $ref: "#/components/parameters/Interval"
         - $ref: "#/components/parameters/GroupBy"
+        - $ref: "#/components/parameters/RoomsFilter"
+        - $ref: "#/components/parameters/FloorsFilter"
         - $ref: "#/components/parameters/IncludeUnmonitored"
         - $ref: "#/components/parameters/Unclamped"
         - $ref: "#/components/parameters/Shape"
@@ -185,7 +192,10 @@ paths:
         one series and group_by reads "device"; a build that produced none is an
         internal inconsistency and returns 500 rather than 200 with an empty
         series list. The shape param chooses columnar (default) or row-oriented
-        output.
+        output. rooms= and floors= are IGNORED here rather than rejected: they
+        SELECT devices, and the path segment has already selected one, so they are
+        redundant rather than contradictory (matching greenhouse's single-device
+        endpoint).
         The reserved id "unmonitored" is a synthetic device serving the house
         "unmonitored" series (rest of home = clamp(meter − monitored)) through this
         same single-series shape; it returns 404 when no whole-house meter is
@@ -543,21 +553,61 @@ components:
       name: group_by
       in: query
       required: false
-      description: How to group series. Defaults to "device".
+      description: >
+        How to group series. Defaults to "device". "floor" groups by the floor a
+        device DECLARES (never one derived from its room id) and sums it, since
+        energy is additive. A device whose readings describe the whole property
+        groups under the reserved "house" key in both place groupings (room and
+        floor) rather than being attributed to a place it does not describe.
       schema:
         type: string
-        enum: [device, room, class, house]
+        enum: [device, room, floor, class, house]
         default: device
+    RoomsFilter:
+      name: rooms
+      in: query
+      required: false
+      description: >
+        Comma-separated floorplan room ids; only devices in those rooms are
+        covered. Composes with floors= as AND. A room holding no billed device is
+        rejected with 400 rather than silently returning an unfiltered or empty
+        answer — the accepted set is exactly what GET /rooms lists, so a picker
+        filled from that catalog cannot produce a rejected request. The reserved
+        "house" key is a coverage scope, not a room, and is rejected. CANNOT be
+        combined with include_unmonitored=true or group_by=house (400): the
+        unmonitored series is the meter minus ALL monitored devices, so against a
+        filtered set it would absorb the excluded devices and report them as
+        rest-of-home.
+      schema:
+        type: string
+        example: floor1.room-a,floor2.room-b
+    FloorsFilter:
+      name: floors
+      in: query
+      required: false
+      description: >
+        Comma-separated floor ids; only devices declaring those floors are
+        covered. The coarse sibling of rooms=, with the same rules: AND
+        composition, 400 on a floor holding no billed device (the accepted set is
+        exactly what GET /floors lists), and rejected alongside
+        include_unmonitored=true or group_by=house.
+      schema:
+        type: string
+        example: floor1
     IncludeUnmonitored:
       name: include_unmonitored
       in: query
       required: false
       description: >
-        When true, a device/room/class grouping gains exactly one extra
+        When true, a device/room/floor/class grouping gains exactly one extra
         "unmonitored" (rest-of-home) series so the parts sum to the whole-house
         meter. Never subdivided (one series regardless of grouping); a no-op when
         no meter is configured. Ignored for group_by=house (which always includes
-        it). Default false — the response is otherwise unchanged.
+        it). Under group_by=floor it is returned as its own series and is never
+        attributed to a floor — the residual is house-scoped and belongs to no
+        storey. Rejected with 400 alongside rooms= or floors=, since the residual
+        is defined against the whole monitored fleet. Default false — the response
+        is otherwise unchanged.
       schema:
         type: boolean
         default: false
@@ -828,12 +878,24 @@ components:
       properties:
         key:
           type: string
-          description: Series identity (device id, room id, class, or "monitored"/"unmonitored"/"meter").
+          description: >
+            Series identity (device id, room id, floor id, class, the reserved
+            "house" coverage key, or "monitored"/"unmonitored"/"meter"). Always an
+            id — only label varies with what the floorplan publishes.
         label:
           type: string
+          description: >
+            Display label. For a device, its display_name (id as fallback). For a
+            grouped place series (room, floor), the floorplan's NAME when it
+            publishes one and the key itself otherwise — never a label derived
+            from the id.
         room:
           type: string
-          description: Floorplan room id.
+          description: >
+            Floorplan room id. Set for a per-device series (the room the device
+            sits in) and for a group_by=room series (the room it IS, so it can be
+            joined to GET /rooms). Empty for floor, class and house series, which
+            belong to no single room.
         class:
           type: string
         kwh:
@@ -922,12 +984,24 @@ components:
       properties:
         key:
           type: string
-          description: Series identity (device id, room id, class, or "monitored"/"unmonitored"/"meter").
+          description: >
+            Series identity (device id, room id, floor id, class, the reserved
+            "house" coverage key, or "monitored"/"unmonitored"/"meter"). Always an
+            id — only label varies with what the floorplan publishes.
         label:
           type: string
+          description: >
+            Display label. For a device, its display_name (id as fallback). For a
+            grouped place series (room, floor), the floorplan's NAME when it
+            publishes one and the key itself otherwise — never a label derived
+            from the id.
         room:
           type: string
-          description: Floorplan room id.
+          description: >
+            Floorplan room id. Set for a per-device series (the room the device
+            sits in) and for a group_by=room series (the room it IS, so it can be
+            joined to GET /rooms). Empty for floor, class and house series, which
+            belong to no single room.
         class:
           type: string
         total_kwh:

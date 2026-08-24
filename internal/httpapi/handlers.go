@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
@@ -184,7 +185,8 @@ func (s *Server) resolveSeriesParams(w http.ResponseWriter, r *http.Request) (en
 // average stays comparable across endpoints.
 func (s *Server) buildSeries(r *http.Request, win energy.Window, iv energy.Interval, groupBy string, includeUnmonitored, unclamped bool, devices map[string]config.DeviceConfig, tariff config.Tariff) (energy.SeriesResponse, error) {
 	start := time.Now()
-	resp, err := energy.BuildSeries(r.Context(), s.Influx, s.Bucket, win, iv, groupBy, includeUnmonitored, unclamped, devices, tariff, s.loc())
+	resp, err := energy.BuildSeries(r.Context(), s.Influx, s.Bucket, win, iv, groupBy,
+		includeUnmonitored, unclamped, devices, tariff, s.groupLabels(groupBy), s.loc())
 	s.queryCount.Add(1)
 	s.influxNanos.Add(int64(time.Since(start)))
 	if err != nil {
@@ -217,11 +219,159 @@ func (s *Server) recordDrift(win energy.Window, d energy.DriftStats) {
 // validGroupBy reports whether g is an accepted group_by mode.
 func validGroupBy(g string) bool {
 	switch g {
-	case energy.GroupByDevice, energy.GroupByRoom, energy.GroupByClass, energy.GroupByHouse:
+	case energy.GroupByDevice, energy.GroupByRoom, energy.GroupByFloor,
+		energy.GroupByClass, energy.GroupByHouse:
 		return true
 	default:
 		return false
 	}
+}
+
+// resolveDeviceFilter narrows the inventory a /series request covers, honouring
+// the optional rooms= and floors= CSV query filters. They compose as AND: a
+// device must satisfy both to survive, and with neither present the full
+// inventory is returned (the prior behaviour, byte for byte).
+//
+// Both were previously accepted and IGNORED, which is the failure this fixes: a
+// client asking for one room got a 200 carrying the whole house while believing
+// it had filtered. That is the from/to complaint in another costume, and it gets
+// the same resolution — reject the contradiction rather than answer it wrongly.
+//
+// Validation writes a 400 (and returns ok=false) when rooms= or floors= names a
+// group that holds no billed device. That set is exactly what /rooms and /floors
+// list and exactly what group_by=room/floor emits, because all three come from
+// energy.CountByGroupKey — so a picker filled from a catalog cannot produce a
+// rejected request, and a typo cannot masquerade as an empty chart. A valid pair
+// of filters whose intersection is empty is NOT an error: it yields an empty
+// series list (200), consistent with a window that simply has no data.
+func (s *Server) resolveDeviceFilter(w http.ResponseWriter, r *http.Request, groupBy string, includeUnmonitored bool) (map[string]config.DeviceConfig, bool) {
+	all := s.Config.Devices()
+	q := r.URL.Query()
+	rooms := splitCSV(q.Get("rooms"))
+	floors := splitCSV(q.Get("floors"))
+	if len(rooms) == 0 && len(floors) == 0 {
+		return all, true
+	}
+
+	// The unmonitored catch-all is the whole-house meter minus ALL monitored
+	// devices. Against a filtered inventory it would silently absorb every device
+	// the filter excluded and publish that as "rest of home" — a wrong number
+	// wearing the shape of a right one, which is precisely what this service must
+	// not do. Same arithmetic, same refusal, for group_by=house: filtering shrinks
+	// `monitored` while the meter stays whole, inflating `unmonitored` by the
+	// excluded consumption. Refused rather than silently unfiltered, so the
+	// mistake surfaces as an actionable 400.
+	if includeUnmonitored || groupBy == energy.GroupByHouse {
+		writeError(w, http.StatusBadRequest,
+			"'rooms'/'floors' select a subset of devices, but the unmonitored series is "+
+				"the whole-house meter minus ALL monitored devices — against a filtered set "+
+				"it would absorb the excluded devices and report them as rest-of-home. Drop "+
+				"the filter, or drop include_unmonitored/group_by=house.")
+		return nil, false
+	}
+
+	if !s.validateGroupFilter(w, all, energy.GroupByRoom, "rooms", rooms) {
+		return nil, false
+	}
+	if !s.validateGroupFilter(w, all, energy.GroupByFloor, "floors", floors) {
+		return nil, false
+	}
+
+	roomOf := energy.GroupKeyFor(energy.GroupByRoom)
+	floorOf := energy.GroupKeyFor(energy.GroupByFloor)
+	roomSet, floorSet := toSet(rooms), toSet(floors)
+
+	out := make(map[string]config.DeviceConfig, len(all))
+	for id, d := range all {
+		if roomSet != nil {
+			if _, ok := roomSet[roomOf(d)]; !ok {
+				continue
+			}
+		}
+		if floorSet != nil {
+			if _, ok := floorSet[floorOf(d)]; !ok {
+				continue
+			}
+		}
+		out[id] = d
+	}
+	return out, true
+}
+
+// validateGroupFilter rejects a filter value naming a group that holds no billed
+// device, writing a 400. The accepted set comes from energy.CountByGroupKey, the
+// same function behind the /rooms and /floors catalogs — so what a catalog lists
+// and what a filter accepts cannot drift apart. The reserved "house" key is not
+// in it: a coverage scope is not a place, so `rooms=house` is rejected like any
+// other unknown id.
+func (s *Server) validateGroupFilter(w http.ResponseWriter, devices map[string]config.DeviceConfig, groupBy, param string, values []string) bool {
+	if len(values) == 0 {
+		return true
+	}
+	known := energy.CountByGroupKey(devices, groupBy)
+	for _, v := range values {
+		if _, ok := known[v]; !ok {
+			writeError(w, http.StatusBadRequest, "unknown "+groupBy+" in '"+param+"': "+v)
+			return false
+		}
+	}
+	return true
+}
+
+// splitCSV splits a comma-separated query value into trimmed, non-empty parts.
+// An empty input yields nil (no filter requested).
+func splitCSV(v string) []string {
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// toSet turns a slice into a membership set, or nil for an empty slice (so
+// callers can treat nil as "no filter").
+func toSet(items []string) map[string]struct{} {
+	if len(items) == 0 {
+		return nil
+	}
+	m := make(map[string]struct{}, len(items))
+	for _, it := range items {
+		m[it] = struct{}{}
+	}
+	return m
+}
+
+// groupLabels maps each group key to the floorplan's display name for it, for
+// whichever grouping the request asked for. Keys the floorplan does not name are
+// absent, and assembly then labels those series by id.
+//
+// Built per request from the live snapshot rather than cached, so a SIGHUP
+// reload is reflected immediately. Labels are cosmetic, so no attempt is made to
+// pin them to the same instant as the device snapshot: the worst a reload racing
+// a request can produce is a series labelled by its id for one response.
+func (s *Server) groupLabels(groupBy string) map[string]string {
+	out := map[string]string{}
+	switch groupBy {
+	case energy.GroupByRoom:
+		for id, r := range s.rooms() {
+			if r.Name != "" {
+				out[id] = r.Name
+			}
+		}
+	case energy.GroupByFloor:
+		for id, f := range s.floors() {
+			if f.Name != "" {
+				out[id] = f.Name
+			}
+		}
+	}
+	return out
 }
 
 // handleSeries serves GET /series: a multi-series, columnar energy time-series
@@ -232,7 +382,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		groupBy = energy.GroupByDevice
 	}
 	if !validGroupBy(groupBy) {
-		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want one of device, room, class, house)")
+		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want one of device, room, floor, class, house)")
 		return
 	}
 	shape := r.URL.Query().Get("shape")
@@ -248,6 +398,10 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	devices, ok := s.resolveDeviceFilter(w, r, groupBy, includeUnmonitored)
+	if !ok {
+		return
+	}
 
 	win, iv, ok := s.resolveSeriesParams(w, r)
 	if !ok {
@@ -260,7 +414,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := s.buildSeries(r, win, iv, groupBy, includeUnmonitored, unclamped, s.Config.Devices(), tariff)
+	resp, err := s.buildSeries(r, win, iv, groupBy, includeUnmonitored, unclamped, devices, tariff)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
