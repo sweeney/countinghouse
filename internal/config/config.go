@@ -222,11 +222,12 @@ func requireDevicesNamespace(s SiteConfig) error {
 	} else {
 		id = "<this site's id from the sites namespace>"
 	}
+	// Terse on purpose: this is read by someone whose service is down. The reasoning
+	// lives in this function's doc comment and in README.md; the error says what is
+	// missing and what to write.
 	// No trailing newline: staticcheck ST1005, and the logger quotes the value anyway.
 	return fmt.Errorf(
-		"%s names no devices_namespace, and there is no shared namespace left to fall "+
-			"back to: statehouse_devices was deleted from the config service, so defaulting "+
-			"to it would fetch nothing and serve zero devices while looking healthy. Name it:"+
+		"%s names no devices_namespace, so it would fetch nothing and serve zero devices. Add:"+
 			"\n\nsite:\n  id: %s\n  devices_namespace: <the namespace published for this site>",
 		subject, id)
 }
@@ -257,13 +258,12 @@ func requireFloorplanNamespace(s SiteConfig) error {
 	} else {
 		id = "<this site's id from the sites namespace>"
 	}
+	// Terse for the same reason as requireDevicesNamespace: the why is in the doc
+	// comment above, the fix is in the message.
 	return fmt.Errorf(
-		"%s names no floorplan_namespace, so /floors, /rooms and every grouped series "+
-			"would answer with ids where names belong and null where storey order belongs "+
-			"— indistinguishable from a floorplan that publishes nothing, and visible only "+
-			"as a legend somebody eventually notices looks wrong. Name it (it is the same "+
-			"document greenhouse reads):"+
-			"\n\nsite:\n  id: %s\n  devices_namespace: %s\n  floorplan_namespace: <the floorplan namespace published for this site>",
+		"%s names no floorplan_namespace, so /floors, /rooms and grouped series would "+
+			"serve ids where names belong. Add (it is the namespace greenhouse reads):"+
+			"\n\nsite:\n  id: %s\n  devices_namespace: %s\n  floorplan_namespace: <the namespace published for this site>",
 		subject, id, orPlaceholder(s.DevicesNamespace, "<this site's devices namespace>"))
 }
 

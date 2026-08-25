@@ -227,9 +227,8 @@ same silence the required-namespace checks refuse, one layer later, where a name
 namespace turns out to fetch nothing.
 
 ```
-ERROR remote config: no snapshot was fetched for floorplan_home — refusing to start
-      rather than serving empty devices, no tariff, or floor and room ids where names
-      belong. cold_namespaces=[floorplan_home]
+ERROR remote config: refusing to start, nothing was ever fetched for floorplan_home
+      cold_namespaces=[floorplan_home]
 ```
 
 This costs availability if the config service is down exactly when countinghouse
