@@ -217,8 +217,21 @@ ssh "$REMOTE" "ln -sfn $REMOTE_BIN $DEPLOY_DIR/$BINARY"
 # one. A cursor is preferred over a timestamp; see journal_since for why. Both are
 # captured so the fallback is available if this journalctl prints no cursor. The
 # timestamp is LOCAL time, because that is how journalctl reads an unqualified one.
-CURSOR=$(ssh "$REMOTE" "sudo journalctl -u $SERVICE -n 0 --show-cursor 2>/dev/null | sed -n 's/^-- cursor: //p'" 2>/dev/null || true)
+#
+# `-n 1`, not `-n 0`: --show-cursor is documented as printing the cursor AFTER the
+# entries shown, so a version that takes that literally prints none when none are
+# shown — leaving CURSOR empty and the timestamp fallback quietly doing the work
+# every time. systemd 257 on the current host prints a cursor either way (checked),
+# so this is portability rather than a live bug. The sed keeps only the cursor
+# line, so the one log entry `-n 1` prints is discarded and nothing else changes.
+CURSOR=$(ssh "$REMOTE" "sudo journalctl -u $SERVICE -n 1 --show-cursor --no-pager 2>/dev/null | sed -n 's/^-- cursor: //p'" 2>/dev/null || true)
 SINCE=$(ssh "$REMOTE" "date +'%Y-%m-%d %H:%M:%S'")
+if [ -z "$CURSOR" ]; then
+    # Say so rather than degrade quietly: the fallback is correct, but a preferred
+    # path that is silently dead is how the timezone bug survived in the first place.
+    echo "  note: no journal cursor available (unit has no entries, or journalctl does"
+    echo "        not print one) — a failed start will be diagnosed from a timestamp window"
+fi
 
 echo "=== Restarting $SERVICE ==="
 ssh "$REMOTE" "sudo systemctl restart $SERVICE"
