@@ -127,8 +127,10 @@ fail_with_diagnosis() {
         printf '%s\n' "$rendered"
     else
         echo "    (nothing structured — it did not get as far as logging)"
-        echo ""
     fi
+    # Command substitution strips trailing newlines, so render_errors' own spacing
+    # is lost by the time it lands here. One blank line, added on both paths.
+    echo ""
 
     # The caveat on rolling back differs per cause, and getting it wrong is worse
     # than omitting it: for a missing config key the rollback works but the next
@@ -139,14 +141,12 @@ fail_with_diagnosis() {
     echo "  ── what to do ──────────────────────────────────────────────────────"
     if printf '%s' "$log" | grep -q "names no devices_namespace\|names no floorplan_namespace"; then
         # Local config is missing a required key. This never fixes itself.
-        echo "    The host's config is missing a required key — this build refuses to"
-        echo "    start without it, rather than serving empty devices or ids where"
-        echo "    names belong. The block above shows exactly what to add."
+        echo "    A required key is missing from the host's config. Will not fix itself;"
+        echo "    the block above is what to add."
         echo ""
         echo "      ssh $REMOTE 'sudo nano /etc/countinghouse/config.yaml'"
         echo "      ssh $REMOTE 'sudo systemctl restart $SERVICE'"
-        caveat="    (that reverts the binary, not the cause: the key is still missing, so
-     the next deploy fails identically until you add it.)"
+        caveat="    (reverts the binary, not the cause — the key is still missing.)"
     elif printf '%s' "$log" | grep -q "no snapshot was fetched"; then
         # A namespace was named but never landed. The distinction that matters to
         # whoever is reading this at 3am is whether it will fix ITSELF: an
@@ -155,34 +155,29 @@ fail_with_diagnosis() {
         # by which step reported it — "identity token fetch failed" covers both a
         # rejected credential and an identity service that is simply down.
         if printf '%s' "$log" | grep -q "invalid_client\|unauthorized"; then
-            echo "    Identity REJECTED this instance's credentials, so no namespace could"
-            echo "    be fetched. This will not fix itself."
+            echo "    Identity rejected these credentials, so nothing could be fetched."
+            echo "    Will not fix itself."
             echo ""
             echo "      ssh $REMOTE 'sudo grep client_ /etc/countinghouse/config.yaml'"
             echo "      # fix identity.client_secret, then:"
             echo "      ssh $REMOTE 'sudo systemctl restart $SERVICE'"
         elif printf '%s' "$log" | grep -q "unexpected status 404"; then
-            echo "    A namespace was named but the config service does not have it (404)."
-            echo "    Either the name is wrong in /etc/countinghouse/config.yaml or the"
-            echo "    document has not been published yet. This will not fix itself."
+            echo "    A namespace was named but the config service returns 404: wrong name,"
+            echo "    or not published yet. Will not fix itself."
             echo ""
             echo "      ssh $REMOTE 'sudo grep _namespace /etc/countinghouse/config.yaml'"
         elif printf '%s' "$log" | grep -qE "connection refused|no such host|i/o timeout|deadline exceeded|TLS handshake"; then
-            echo "    A dependency was unreachable (identity or config.swee.net), so a"
-            echo "    namespace has no snapshot at all and this build will not serve empty"
-            echo "    ones. Nothing on the host is broken: the unit retries every 5s and"
-            echo "    comes up by itself once the dependency answers."
+            echo "    Identity or config.swee.net was unreachable, so a namespace has no"
+            echo "    snapshot. Nothing on the host is broken — the unit retries every 5s"
+            echo "    and comes up on its own once the dependency answers."
             echo ""
             echo "      ssh $REMOTE 'systemctl status $SERVICE'   # watch it recover"
         else
-            echo "    A namespace was named but never fetched, for a reason not seen"
-            echo "    before — the log above is the whole story. Until it lands, this"
-            echo "    build refuses to serve empty devices, no tariff, or ids where names"
-            echo "    belong."
+            echo "    A namespace was named but never fetched, for a reason not seen before"
+            echo "    — the log above is the whole story."
         fi
-        caveat="    (rolling back is the WRONG move here: an older build boots without a
-     snapshot and serves empty devices and unnamed rooms, which is exactly
-     what this one refuses to do. Fix the fetch, or wait for it.)"
+        caveat="    (wrong move here: an older build starts without a snapshot and serves
+     the empty data this one refuses. Fix the fetch, or wait for it.)"
     else
         echo "    Not a known startup refusal. Full log for this boot:"
         echo ""

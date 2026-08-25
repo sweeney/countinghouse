@@ -148,12 +148,10 @@ func requireWarmSnapshots(fetcher *config.Fetcher, logger *slog.Logger) {
 	if len(cold) == 0 {
 		return
 	}
-	logger.Error("remote config: no snapshot was fetched for "+strings.Join(cold, ", ")+
-		" — refusing to start rather than serving empty devices, no tariff, or floor and "+
-		"room ids where names belong. Fix the config service or the namespace names, then "+
-		"restart; a namespace that has landed once survives later outages on its "+
-		"last-known snapshot.",
-		"cold_namespaces", cold)
+	// Terse on purpose — see the config package's refusals. The why is in this
+	// function's doc comment and README.md; the log says what never arrived.
+	logger.Error("remote config: refusing to start, nothing was ever fetched for "+
+		strings.Join(cold, ", "), "cold_namespaces", cold)
 	os.Exit(1)
 }
 
