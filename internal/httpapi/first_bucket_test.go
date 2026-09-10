@@ -1,10 +1,8 @@
 package httpapi
 
 import (
-	"fmt"
 	"math"
 	"net/http"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -21,133 +19,16 @@ import (
 // total while /energy correctly fell.
 // ---------------------------------------------------------------------------
 
-// counterFixture is a deterministic stand-in for Influx over one device's
-// cumulative energy_kwh counter. It answers BOTH Flux shapes countinghouse
-// issues — increase()|>last() for the whole-window and partial-head builders,
-// and increase()|>aggregateWindow(...)|>difference() for the series builder —
-// honouring range() bounds and the local-midnight aggregation grid the way the
-// database does.
-//
-// Both endpoints under test therefore read the SAME underlying counter through
-// the SAME arithmetic the real database applies, which is what makes an
-// agreement assertion between them mean something.
-type counterFixture struct {
-	deviceID string
-	loc      *time.Location
-	at       []time.Time
-	kwh      []float64
-}
-
-// newCounterFixture samples a steady `watts` load every `cadence` across
-// [from, to].
-func newCounterFixture(deviceID string, loc *time.Location, from, to time.Time, cadence time.Duration, watts float64) *counterFixture {
-	c := &counterFixture{deviceID: deviceID, loc: loc}
-	for ts := from; !ts.After(to); ts = ts.Add(cadence) {
-		c.at = append(c.at, ts)
-		c.kwh = append(c.kwh, watts*ts.Sub(from).Hours()/1000)
-	}
-	return c
-}
-
-var (
-	fixtureRangeRe = regexp.MustCompile(`range\(start: (\S+), stop: (\S+)\)`)
-	fixtureEveryRe = regexp.MustCompile(`every: (\w+),`)
-)
-
-func (c *counterFixture) query(flux string) ([]influx.Row, error) {
-	if !strings.Contains(flux, `"energy_kwh"`) || !strings.Contains(flux, c.deviceID) {
-		return nil, nil
-	}
-	m := fixtureRangeRe.FindStringSubmatch(flux)
-	if m == nil {
-		return nil, fmt.Errorf("counterFixture: no range() in flux:\n%s", flux)
-	}
-	start, err := time.Parse(time.RFC3339, m[1])
-	if err != nil {
-		return nil, err
-	}
-	stop, err := time.Parse(time.RFC3339, m[2])
-	if err != nil {
-		return nil, err
-	}
-
-	// range() is half-open; increase() re-bases the running total at the first
-	// point inside it.
-	var idx []int
-	for i, ts := range c.at {
-		if !ts.Before(start) && ts.Before(stop) {
-			idx = append(idx, i)
-		}
-	}
-	if len(idx) == 0 {
-		return nil, nil
-	}
-	base := c.kwh[idx[0]]
-
-	if !strings.Contains(flux, "aggregateWindow") {
-		last := idx[len(idx)-1]
-		return []influx.Row{{DeviceID: c.deviceID, Value: c.kwh[last] - base, Time: c.at[last]}}, nil
-	}
-
-	em := fixtureEveryRe.FindStringSubmatch(flux)
-	if em == nil {
-		return nil, fmt.Errorf("counterFixture: no every: in flux:\n%s", flux)
-	}
-	every, err := time.ParseDuration(strings.Replace(em[1], "d", "h", 1))
-	if err != nil {
-		return nil, err
-	}
-	if strings.HasSuffix(em[1], "d") {
-		every *= 24
-	}
-
-	// aggregateWindow(location:) anchors its grid at local midnight, not at the
-	// range start.
-	ls := start.In(c.loc)
-	anchor := time.Date(ls.Year(), ls.Month(), ls.Day(), 0, 0, 0, 0, c.loc)
-	first := ls.Add(-(ls.Sub(anchor) % every))
-
-	type closeAt struct {
-		at  time.Time
-		val float64
-	}
-	var closes []closeAt
-	for w := first; w.Before(stop); w = w.Add(every) {
-		next := w.Add(every)
-		last := -1
-		for _, i := range idx {
-			if !c.at[i].Before(w) && c.at[i].Before(next) {
-				last = i
-			}
-		}
-		if last < 0 {
-			continue // createEmpty yields null; difference() has nothing to emit
-		}
-		closes = append(closes, closeAt{at: w, val: c.kwh[last] - base})
-	}
-	// difference() consumes the first window as its seed.
-	var rows []influx.Row
-	for i := 1; i < len(closes); i++ {
-		rows = append(rows, influx.Row{
-			DeviceID: c.deviceID,
-			Value:    closes[i].val - closes[i-1].val,
-			Time:     closes[i].at,
-		})
-	}
-	return rows, nil
-}
-
 // offGridFixtureSetup wires a Server whose Influx is the steady-1kW winefridge
 // counter, sampled every 10s from 12:00 to 18:00 local on 2026-06-11 (real
 // plugs report every 30s or faster).
 func offGridFixtureSetup(t *testing.T) *Server {
 	t.Helper()
 	s, _ := dataSetup(t)
-	fx := newCounterFixture("winefridge", s.Loc,
+	s.Influx = influx.NewCounterSim(s.Loc).AddSteady("winefridge",
 		time.Date(2026, 6, 11, 12, 0, 0, 0, s.Loc),
 		time.Date(2026, 6, 11, 18, 0, 0, 0, s.Loc),
 		10*time.Second, 1000)
-	s.Influx = &influx.FakeQuerier{PingOK: true, QueryFunc: fx.query}
 	return s
 }
 
