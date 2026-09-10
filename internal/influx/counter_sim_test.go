@@ -60,7 +60,7 @@ func TestCounterSimWholeWindowReduction(t *testing.T) {
 // series total still telescopes to the scalar answer.
 func TestCounterSimSingleSampleRangeIsZero(t *testing.T) {
 	sim, loc := steadySim(t)
-	rows, err := sim.Answer(BuildCounterHeadFlux("b", []string{"winefridge"},
+	rows, err := sim.Answer(BuildCounterFlux("b", "winefridge",
 		time.Date(2026, 6, 11, 14, 29, 0, 0, loc),
 		time.Date(2026, 6, 11, 14, 30, 0, 0, loc)))
 	if err != nil {
@@ -71,13 +71,12 @@ func TestCounterSimSingleSampleRangeIsZero(t *testing.T) {
 	}
 }
 
-// The bucketed shape: one row per grid window AFTER the first (difference()
-// consumes the first as its seed), stamped at the window's LEFT edge, carrying
-// that window's delta. The grid is anchored at local midnight, NOT at the range
-// start — which is the whole mechanism behind issue #27.
+// The bucketed shape: one row per grid window that HAS a reading, stamped at the
+// window's LEFT edge, carrying that window's closing RUNNING TOTAL measured from
+// the first reading in range — not a per-bucket delta, and with no seed window
+// consumed. The grid is anchored at local midnight, not at the range start.
 func TestCounterSimWindowedShape(t *testing.T) {
 	sim, loc := steadySim(t)
-	// padStart takes this back to 13:59, so the seed window is 13:30.
 	start := time.Date(2026, 6, 11, 14, 29, 0, 0, loc)
 	stop := time.Date(2026, 6, 11, 16, 0, 0, 0, loc)
 
@@ -92,22 +91,51 @@ func TestCounterSimWindowedShape(t *testing.T) {
 		time.Date(2026, 6, 11, 15, 30, 0, 0, loc),
 	}
 	if len(rows) != len(want) {
-		t.Fatalf("rows = %d (%+v), want %d", len(rows), rows, len(want))
+		t.Fatalf("rows = %d (%+v), want %d — no window is spent as a seed", len(rows), rows, len(want))
 	}
 	for i, w := range want {
 		if !rows[i].Time.Equal(w) {
 			t.Errorf("row %d stamped %v, want left edge %v", i, rows[i].Time, w)
 		}
 	}
-	// Every delta, bucket 0 included, is a full 30m interval at 1 kW. That is the
-	// defect issue #27 reports, faithfully reproduced: the seed window closes at
-	// 13:59 and bucket 0 closes at 14:29, so bucket 0 reports the whole
-	// [14:00, 14:30) grid interval and is indistinguishable from a full one —
-	// which is why the reported total did not move as `from` did.
-	for i, r := range rows {
-		if math.Abs(r.Value-0.5) > 1e-9 {
-			t.Errorf("delta %d = %v, want 0.5 (a full 30m grid interval at 1 kW)", i, r.Value)
+	// increase() re-bases at the first reading >= 14:29, so the 14:00 window
+	// closes at 14:29 with 0 accumulated, and each later window adds its half
+	// hour: 0, 0.5, 1.0, 1.5 at 1 kW.
+	for i, w := range []float64{0, 0.5, 1.0, 1.5} {
+		if math.Abs(rows[i].Value-w) > 1e-9 {
+			t.Errorf("row %d running total = %v, want %v", i, rows[i].Value, w)
 		}
+	}
+}
+
+// A window the device did not report in is OMITTED rather than emitted as a
+// zero, so the caller can carry the running total across a gap instead of
+// reading it as a counter reset.
+func TestCounterSimOmitsWindowsWithNoReading(t *testing.T) {
+	loc := simLondon(t)
+	base := time.Date(2026, 6, 11, 12, 0, 0, 0, loc)
+	var at []time.Time
+	var kwh []float64
+	for _, ts := range []time.Time{base, base.Add(90 * time.Minute)} {
+		at = append(at, ts)
+		kwh = append(kwh, 1000*ts.Sub(base).Hours()/1000)
+	}
+	sim := NewCounterSim(loc).AddSamples("winefridge", at, kwh)
+
+	rows, err := sim.Answer(BuildCounterSeriesFlux("b", []string{"winefridge"},
+		base, base.Add(2*time.Hour), "30m", "Europe/London"))
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	// Readings at 12:00 and 13:30 only: the 12:30 and 13:00 windows are absent.
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want 2 (the two windows holding a reading)", rows)
+	}
+	if !rows[0].Time.Equal(base) || !rows[1].Time.Equal(base.Add(90*time.Minute)) {
+		t.Errorf("rows stamped %v/%v, want 12:00 and 13:30", rows[0].Time, rows[1].Time)
+	}
+	if math.Abs(rows[1].Value-1.5) > 1e-9 {
+		t.Errorf("running total at 13:30 = %v, want 1.5 (90 min at 1 kW since the window opened)", rows[1].Value)
 	}
 }
 
@@ -120,7 +148,7 @@ func TestCounterSimFiltersDevicesAndField(t *testing.T) {
 		AddSteady("winefridge", from, to, time.Minute, 1000).
 		AddSteady("freezer", from, to, time.Minute, 200)
 
-	rows, err := sim.Answer(BuildCounterHeadFlux("b", []string{"freezer"}, from, to))
+	rows, err := sim.Answer(BuildCounterFlux("b", "freezer", from, to))
 	if err != nil {
 		t.Fatalf("Answer: %v", err)
 	}
@@ -140,7 +168,7 @@ func TestCounterSimFiltersDevicesAndField(t *testing.T) {
 // device does — not with a zero that would read as "measured, and it was zero".
 func TestCounterSimEmptyRangeYieldsNoRows(t *testing.T) {
 	sim, loc := steadySim(t)
-	rows, err := sim.Answer(BuildCounterHeadFlux("b", []string{"winefridge"},
+	rows, err := sim.Answer(BuildCounterFlux("b", "winefridge",
 		time.Date(2026, 6, 12, 3, 0, 0, 0, loc),
 		time.Date(2026, 6, 12, 4, 0, 0, 0, loc)))
 	if err != nil || rows != nil {
@@ -181,14 +209,18 @@ func TestCounterSimDailyGridStepsCalendarDaysAcrossDST(t *testing.T) {
 			t.Errorf("row %d stamped %v, want a local midnight", i, r.Time.In(loc))
 		}
 	}
-	// The 25th's window is 25 hours long, so it carries an extra kWh at 1 kW.
-	var dstDay float64
+	// Running totals, so the 25h London day shows up as the RISE across it: the
+	// 25th's close minus the 24th's is 25 kWh at 1 kW, not 24.
+	var d24, d25 float64
 	for _, r := range rows {
-		if d := r.Time.In(loc).Day(); d == 25 {
-			dstDay = r.Value
+		switch r.Time.In(loc).Day() {
+		case 24:
+			d24 = r.Value
+		case 25:
+			d25 = r.Value
 		}
 	}
-	if math.Abs(dstDay-25.0) > 1e-9 {
-		t.Errorf("the DST day's delta = %v kWh, want 25 (a 25h London day at 1 kW)", dstDay)
+	if math.Abs(d25-d24-25.0) > 1e-9 {
+		t.Errorf("the DST day's rise = %v kWh, want 25 (a 25h London day at 1 kW)", d25-d24)
 	}
 }

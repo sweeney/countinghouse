@@ -22,11 +22,11 @@ import (
 //     one row per device, the counter's rise between the first and last reading
 //     inside the range. increase() re-bases at the first point in range, so a
 //     range containing a single reading yields 0.
-//   - increase() |> aggregateWindow(...) |> difference()    — BuildCounterSeriesFlux:
-//     one row per grid window after the first, stamped at the window's LEFT edge
-//     (timeSrc: "_start"), carrying that window's delta. The first window is
-//     consumed as difference()'s seed, which is what the builder's padded range
-//     exists to supply.
+//   - increase() |> aggregateWindow(...)                     — BuildCounterSeriesFlux:
+//     one row per grid window that HAS a reading, stamped at the window's LEFT
+//     edge (timeSrc: "_start"), carrying that window's closing running total
+//     measured from the first reading in range. A window with no reading is
+//     omitted (createEmpty: false), so the caller can tell a gap from a zero.
 //
 // Why it earns its place: assertions that two ENDPOINTS agree are only
 // meaningful if both read one underlying counter through one model of the
@@ -73,9 +73,17 @@ func (c *CounterSim) AddSteady(deviceID string, from, to time.Time, cadence time
 }
 
 // AddSamples registers deviceID with explicit CUMULATIVE counter readings, for a
-// load that is not steady. at must be ascending and the two slices the same
-// length. It returns the sim so registrations can be chained.
+// load that is not steady. at must be ascending. It returns the sim so
+// registrations can be chained.
+//
+// Mismatched slice lengths panic here, naming the call site: the alternative is
+// an index panic later, from inside a query, pointing at the sim rather than at
+// the test that mis-built the fixture.
 func (c *CounterSim) AddSamples(deviceID string, at []time.Time, cumulativeKWh []float64) *CounterSim {
+	if len(at) != len(cumulativeKWh) {
+		panic(fmt.Sprintf("influx: CounterSim.AddSamples(%q): %d times but %d readings",
+			deviceID, len(at), len(cumulativeKWh)))
+	}
 	if c.series == nil {
 		c.series = map[string]counterSeries{}
 	}
@@ -138,7 +146,7 @@ func (c *CounterSim) Answer(flux string) ([]Row, error) {
 			continue
 		}
 		if bucketed {
-			rows = append(rows, in.windowDeltas(id, c.location(), every, stop)...)
+			rows = append(rows, in.windowCloses(id, c.location(), every, stop)...)
 			continue
 		}
 		rows = append(rows, Row{
@@ -187,23 +195,18 @@ func (s counterSeries) inRange(start, stop time.Time) counterSeries {
 	return out
 }
 
-// windowDeltas reproduces increase() |> aggregateWindow(every:, fn: last,
-// timeSrc: "_start", location:, createEmpty: true) |> difference() over an
-// already-range-narrowed counter.
+// windowCloses reproduces increase() |> aggregateWindow(every:, fn: last,
+// timeSrc: "_start", location:, createEmpty: false) over an already-range-narrowed
+// counter.
 //
-// Each grid window collapses to the counter at its LAST reading; difference()
-// then emits the rise between consecutive windows, consuming the first as its
-// seed. A window with no readings is a null that difference() cannot emit
-// against, so it is skipped and the next delta spans it — the same shape the
-// database produces for a gap.
-func (s counterSeries) windowDeltas(deviceID string, loc *time.Location, every time.Duration, stop time.Time) []Row {
-	type windowClose struct {
-		at  time.Time
-		val float64
-	}
+// Each grid window collapses to the counter at its LAST reading, expressed
+// relative to the first reading in range (that is increase()'s re-basing). A
+// window with no reading emits nothing, which is what lets the caller carry the
+// previous total forward rather than mistake a gap for a zero.
+func (s counterSeries) windowCloses(deviceID string, loc *time.Location, every time.Duration, stop time.Time) []Row {
 	base := s.kwh[0] // increase() re-bases at the first reading in range
 
-	var closes []windowClose
+	var rows []Row
 	for w := simGridStart(s.at[0], loc, every); w.Before(stop); w = simGridNext(w, loc, every) {
 		next := simGridNext(w, loc, every)
 		last := -1
@@ -215,16 +218,11 @@ func (s counterSeries) windowDeltas(deviceID string, loc *time.Location, every t
 		if last < 0 {
 			continue
 		}
-		closes = append(closes, windowClose{at: w, val: s.kwh[last] - base})
-	}
-
-	rows := make([]Row, 0, len(closes))
-	for i := 1; i < len(closes); i++ {
 		rows = append(rows, Row{
 			DeviceID: deviceID,
 			Field:    "energy_kwh",
-			Value:    closes[i].val - closes[i-1].val,
-			Time:     closes[i].at, // timeSrc: "_start"
+			Value:    s.kwh[last] - base,
+			Time:     w, // timeSrc: "_start"
 		})
 	}
 	return rows

@@ -914,79 +914,11 @@ func sortedDeviceIDs(devices map[string]config.DeviceConfig) []string {
 	return ids
 }
 
-// clipCounterHead clips the counter series' FIRST bucket to win.Start (issue
-// #27), leaving every other bucket untouched.
-//
-// It is a no-op unless win.Start is strictly after buckets[0] — the axis snaps
-// the first bucket start DOWN to the interval grid (issue #1), and only an
-// off-grid `from` puts the window start inside that bucket rather than on its
-// edge. When it does apply, exactly one extra query is issued (set-based, so
-// still device-count-independent) covering [win.Start, buckets[1]) — or the
-// whole window when the axis has only one bucket.
-//
-// The head query is AUTHORITATIVE for bucket 0: every counter device's bucket 0
-// is zeroed first, so a device whose counter did not move inside the head
-// reports 0 rather than keeping the padded query's full-grid delta.
-//
-// Why the totals then agree with the scalar endpoints exactly: the remaining
-// difference() deltas telescope to last(bucket n-1) − last(bucket 0), and the
-// head contributes last(bucket 0) − first(≥ win.Start), so the series total is
-// the same increase() over [win.Start, win.Stop) that BuildCounterFlux reduces.
-func clipCounterHead(
-	ctx context.Context,
-	q influx.Querier,
-	bucket string,
-	counterIDs []string,
-	win Window,
-	buckets []time.Time,
-	energyByDevice map[string][]float64,
-) error {
-	if len(buckets) == 0 || !win.Start.After(buckets[0]) {
-		return nil
-	}
-	headStop := win.Stop
-	if len(buckets) > 1 {
-		headStop = buckets[1]
-	}
-
-	rows, err := q.Query(ctx, influx.BuildCounterHeadFlux(bucket, counterIDs, win.Start, headStop))
-	if err != nil {
-		return err
-	}
-
-	// Zero first: the head query is authoritative, so a counter that did not move
-	// inside it must not keep the padded query's full-grid delta.
-	counter := make(map[string]bool, len(counterIDs))
-	for _, id := range counterIDs {
-		counter[id] = true
-		if arr := energyByDevice[id]; arr != nil {
-			arr[0] = 0
-		}
-	}
-	for _, r := range rows {
-		if !counter[r.DeviceID] {
-			continue
-		}
-		arr := energyByDevice[r.DeviceID]
-		if arr == nil {
-			arr = make([]float64, len(buckets))
-			energyByDevice[r.DeviceID] = arr
-		}
-		// increase() over one table yields one row per device; summing is just
-		// safe if a device's series ever arrives as more than one table (the
-		// fragments are disjoint accumulations, so they add — see
-		// DeviceWindowKWh).
-		arr[0] += r.Value
-	}
-	return nil
-}
-
 // BuildSeries is the orchestrator: it runs ~3 Influx queries (counter energy for
 // the counter set incl. meter; UPS mean-power→energy for the ups set; mean-power
 // for ALL metered devices), demuxes the bucketed rows onto the canonical axis
-// (dropping pad buckets), and calls AssembleSeries. A fourth counter query is
-// added only when the window opens inside its first grid bucket — see
-// clipCounterHead.
+// and calls AssembleSeries. The query count is three regardless of window
+// alignment or device count.
 //
 // The query count is independent of device count: each builder fans out across
 // a device set via contains(set: [...]). bucket is the Influx bucket name; win
@@ -1041,19 +973,10 @@ func BuildSeries(
 		if err != nil {
 			return SeriesResponse{}, err
 		}
-		demux(rows, idx, energyByDevice, len(buckets), func(v float64, _ int) float64 { return v })
-
-		// Query 1b (issue #27): repair bucket 0 when the window opens INSIDE it.
-		// aggregateWindow buckets on the local-midnight grid, so bucket 0's
-		// difference() delta is the full grid interval no matter where win.Start
-		// falls in it — the series would bill energy from before `from`, and
-		// disagree with /devices/{id}/energy over the very same window. A grid
-		// interval cannot be split after the fact, so the in-window head gets its
-		// own exact-range query and REPLACES bucket 0. Skipped entirely for a
-		// grid-aligned start (today/week/month/<N>d), which is the common case.
-		if err := clipCounterHead(ctx, q, bucket, counterIDs, win, buckets, energyByDevice); err != nil {
-			return SeriesResponse{}, err
-		}
+		// The counter series returns each bucket's CLOSING RUNNING TOTAL measured
+		// from the window start, not a per-bucket delta: the differencing happens
+		// here so a reading gap is explicit rather than smeared (issue #29).
+		demuxCounterTotals(rows, idx, energyByDevice, len(buckets))
 	}
 
 	// Query 2: UPS mean-power → energy (mean W × bucket-hours / 1000).
@@ -1162,12 +1085,7 @@ func demux(rows []influx.Row, idx map[int64]int, dst map[string][]float64, n int
 	if n == 0 {
 		return
 	}
-	// Build a sorted bucket-start list once for containment fallback.
-	starts := make([]int64, 0, len(idx))
-	for k := range idx {
-		starts = append(starts, k)
-	}
-	sort.Slice(starts, func(a, b int) bool { return starts[a] < starts[b] })
+	starts := sortedBucketStarts(idx)
 
 	for _, r := range rows {
 		i := resolveBucket(r.Time, idx, starts)
@@ -1180,6 +1098,88 @@ func demux(rows []influx.Row, idx map[int64]int, dst map[string][]float64, n int
 			dst[r.DeviceID] = arr
 		}
 		arr[i] += conv(r.Value, i)
+	}
+}
+
+// sortedBucketStarts returns the bucket-start keys ascending, for
+// resolveBucket's containment fallback.
+func sortedBucketStarts(idx map[int64]int) []int64 {
+	starts := make([]int64, 0, len(idx))
+	for k := range idx {
+		starts = append(starts, k)
+	}
+	sort.Slice(starts, func(a, b int) bool { return starts[a] < starts[b] })
+	return starts
+}
+
+// demuxCounterTotals folds the counter series' per-bucket CLOSING RUNNING TOTALS
+// onto the canonical axis and differences them here, in Go, rather than in Flux.
+//
+// Each row is "energy this device had accumulated by the end of this bucket,
+// measured from the window start" (see influx.BuildCounterSeriesFlux). A bucket
+// is worth the rise since the last bucket that CLOSED — not since the previous
+// bucket index — so the running total is carried across buckets the device did
+// not report in. Those buckets are worth 0, and the next real reading picks up
+// everything that accrued meanwhile.
+//
+// That carry is the whole point (issue #29). Flux's difference() could not do it:
+// it needs a prior window to subtract against, which the old design bought by
+// padding the range before the window — anchoring the series at a reading taken
+// BEFORE `from`, and, when the pad was empty, spending a real in-window bucket as
+// the seed instead. Anchoring at `from` makes the series' total identical to
+// BuildCounterFlux's reduction over the same range, so /series and
+// /devices/{id}/energy agree by definition.
+//
+// A device with no rows at all gets no entry, which AssembleSeries reads as
+// all-zero — correct for a device that reported nothing inside the window.
+func demuxCounterTotals(rows []influx.Row, idx map[int64]int, dst map[string][]float64, n int) {
+	if n == 0 {
+		return
+	}
+	starts := sortedBucketStarts(idx)
+
+	// The closing total per (device, bucket). aggregateWindow yields one row per
+	// bucket per device, but resolve defensively: the LAST row to land in a
+	// bucket is the one that closes it.
+	type bucketClose struct {
+		at  time.Time
+		val float64
+	}
+	closes := make(map[string]map[int]bucketClose)
+	for _, r := range rows {
+		i := resolveBucket(r.Time, idx, starts)
+		if i < 0 {
+			continue // outside the window
+		}
+		per := closes[r.DeviceID]
+		if per == nil {
+			per = make(map[int]bucketClose)
+			closes[r.DeviceID] = per
+		}
+		if prev, seen := per[i]; !seen || !r.Time.Before(prev.at) {
+			per[i] = bucketClose{at: r.Time, val: r.Value}
+		}
+	}
+
+	for id, per := range closes {
+		arr := dst[id]
+		if arr == nil {
+			arr = make([]float64, n)
+			dst[id] = arr
+		}
+		var running float64
+		for i := 0; i < n; i++ {
+			c, closed := per[i]
+			if !closed {
+				continue // no reading: carry `running` forward, this bucket is 0
+			}
+			// increase() is monotonic, so a fall should be impossible; clamp
+			// rather than publish negative energy, and still advance the anchor.
+			if d := c.val - running; d > 0 {
+				arr[i] += d
+			}
+			running = c.val
+		}
 	}
 }
 

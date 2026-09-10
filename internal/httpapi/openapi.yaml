@@ -912,8 +912,11 @@ components:
             the part of its bucket that lies INSIDE [from, to): the first and last
             buckets may therefore be partial (see `buckets`), and a partial bucket
             carries proportionally less energy than a full one. Summing kwh gives
-            total_kwh, which agrees with GET /devices/{id}/energy over the same
-            window.
+            total_kwh, which always equals GET /devices/{id}/energy kwh over the
+            same window — both are the same reset-safe counter reduction anchored
+            at the first reading at or after `from`. A bucket a counter device did
+            not report in is 0, and the energy accrued meanwhile appears in the
+            next bucket that has a reading.
         cost:
           type: array
           items:

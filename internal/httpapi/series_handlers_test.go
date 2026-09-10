@@ -53,11 +53,14 @@ func decodeSeries(t *testing.T, w *httptest.ResponseRecorder) seriesResp {
 }
 
 // seriesFakeQuerier returns a FakeQuerier whose QueryFunc programs bucketed rows
-// keyed on the Flux field and the device set. For the energy_kwh (counter) query
-// and the power_w (mean) query it places one row per device per bucket, with the
-// row Time on the bucket's right edge (the demux snaps right edges back to the
-// containing bucket). per maps device_id → constant value emitted in every
-// bucket; field selects which query (energy_kwh vs power_w) the rows answer.
+// keyed on the Flux field and the device set. `per` maps device_id → the
+// per-bucket quantity that device should end up reporting, in every bucket.
+//
+// The two series queries have different row semantics and this reproduces both:
+// the power_w mean is per-bucket and self-contained, while the energy_kwh counter
+// carries each bucket's closing RUNNING TOTAL since the window start, which the
+// energy layer differences (energy.demuxCounterTotals). So a counter device's
+// rows accumulate `per` across the axis while a power device's repeat it.
 //
 // The series builders fan out across a device SET (contains(..., set: [...])),
 // so we look at which device ids appear in the flux and emit rows only for those
@@ -98,7 +101,16 @@ func seriesFakeQuerier(buckets []time.Time, energyPer, powerPer map[string]float
 			for i := range buckets {
 				// Left-edge stamp: the bucket start. demux matches it exactly to
 				// the canonical axis (idx[start]).
-				rows = append(rows, influx.Row{DeviceID: id, Time: buckets[i], Value: v})
+				//
+				// The counter series carries each bucket's CLOSING RUNNING TOTAL
+				// measured from the window start, not its delta (the differencing
+				// happens in Go — see energy.demuxCounterTotals), so accumulate.
+				// The power mean is per-bucket and self-contained.
+				val := v
+				if isCounter {
+					val = v * float64(i+1)
+				}
+				rows = append(rows, influx.Row{DeviceID: id, Time: buckets[i], Value: val})
 			}
 		}
 		return rows, nil

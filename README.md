@@ -111,10 +111,19 @@ aggregation boundaries — e.g. `from=14:23` with `interval=1h` yields buckets s
 
 That first bucket is a **partial** bucket: it is *labelled* by the grid boundary it starts
 on, but its `kwh`/`cost`/`avg_w` cover only the part inside the window (`14:23` onwards),
-exactly as the last bucket covers only up to `to`. Both edges are clipped, so
-`total_kwh` always agrees with `GET /devices/{id}/energy` over the same window, and moving
-`from` later within the first bucket lowers the reported energy as it should. Summing
-`kwh` across buckets never bills electricity from before `from`.
+exactly as the last bucket covers only up to `to`. Both edges are clipped, so moving `from`
+later within the first bucket lowers the reported energy as it should, and summing `kwh`
+across buckets never bills electricity from before `from`.
+
+`total_kwh` **always** equals `GET /devices/{id}/energy` `kwh` over the same window, for
+every window and every device. Both are the same reset-safe `increase()` anchored at the
+first reading at or after `from`, so this holds by definition rather than by arithmetic
+coincidence — including when a device's readings have a gap around the window start, which
+used to move the two apart in either direction.
+
+A bucket a counter device reported nothing in is `0`, and the energy that accrued meanwhile
+lands in the next bucket that does have a reading. A device that reported nothing at all in
+the window is all zeroes, never a share of someone else's total.
 
 Which windows this affects: `window=custom` with an off-grid `from`, and `window=<N>h`
 (e.g. `24h`), whose start inherits the current minute and second. `today`, `week`, `month`
