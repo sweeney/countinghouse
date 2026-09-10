@@ -3,6 +3,11 @@
 Status: **research + options, no code.** Written 2026-09-10 for the move to Octopus
 Agile. Decisions marked **OPEN** need the user before implementation starts.
 
+> **Superseded in part.** The API shape below is now **verified live** (2026-09-10), with
+> corrections marked ✅/❌ inline. The *data model* — §3 (where prices live) and §4 (schema)
+> — is superseded by **`octopus-price-data-model.md`**, which recommends against Influx on
+> evidence this document assumed the other way.
+
 The ask: record the half-hourly Agile spot price for perpetuity, price the bill with
 it, and in time use the forward curve to shape usage.
 
@@ -32,6 +37,12 @@ authentication**:
 `tariff_code` is `E-1R-{product}-{GSP}`, e.g. `E-1R-AGILE-24-10-01-C` for London.
 The GSP is a single letter (A–P, 14 regions) derived from the postcode or the MPAN.
 
+> ❌ **Our region is `N` (South Scotland), not `C`.** Verified by resolving the site's
+> postcode through `/industry/grid-supply-points/`, which returns `_N`. Our tariff is
+> **`E-1R-AGILE-24-10-01-N`**, live from **2026-09-10** — today.
+> Note the endpoint returns `_N` *with* a leading underscore while tariff codes use bare `N`.
+> Region N's standing charge is **59.1606p/day ex-VAT**, not London's 37.6525p.
+
 Query parameters: `period_from`, `period_to` (ISO 8601, **always with a trailing `Z`** —
 local-time values are misread across the DST changeover), `page_size` (default 100,
 max 1500), `page`.
@@ -54,18 +65,26 @@ Notes that matter for us:
   open-ended rate (flat tariffs; not normally Agile).
 - Results come newest-first; the slot interval is a half-open `[valid_from, valid_to)`.
 - One month = 1488 slots = **2 pages** at `page_size=1500`. A year is ~17,520 rows.
+- ✅ `page_size` is **silently clamped** to 1500, not rejected: asking for 2000 returns 200
+  with 1500 rows and a `next` link. A client must follow `next` and never assume it got
+  what it asked for.
 - Rate limiting is undocumented for the public REST endpoints but real (429 with
   `Retry-After`; the GraphQL API documents a punitive escalating limiter). Our polling
   is a handful of requests a day, so this only constrains a naive
   fetch-on-every-request design.
 
-**Not verified live.** This session's egress policy blocks `api.octopus.energy`,
-`developer.octopus.energy` and `docs.octopus.energy`, so the above is from the API
-docs' published shape and two independent client libraries, not from a live call.
-Treat it exactly as AGENT_BRIEF §7 treated the Influx bucket: **confirm one real
-response before wiring queries** (`curl` from garibaldi is enough).
+**✅ Now verified live** (2026-09-10, direct calls). The response shape, pagination,
+`period_from`/`period_to` windowing, newest-first ordering and the pence/VAT fields are all
+exactly as described. Two corrections are marked above. One addition the schema must respect:
+**`(tariff_code, valid_from)` is not a unique key** — `payment_method` splits VAR tariffs
+into `DIRECT_DEBIT` and `NON_DIRECT_DEBIT` rows for the *same* slot. See the model doc §2.
 
 ### Optional: the account API
+
+✅ **Done — the key works and the cross-check passed.** Countinghouse's Influx-derived
+meter series matches Octopus's settled half-hourly consumption to **0.00% over August 2026**
+(mean per-slot error 1.9 Wh over 1,488 slots), so slot-resolution whole-house pricing rests
+on sound data. The account also supplied our exact agreement history (§3 of the model doc).
 
 With an account API key (HTTP Basic, key as username) `/v1/accounts/{number}/` reports
 the tariff the account is *actually* on, and
