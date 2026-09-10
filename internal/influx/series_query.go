@@ -34,26 +34,35 @@ func padStart(start time.Time, interval string) time.Time {
 	return start.Add(-padDuration(interval))
 }
 
+// intervalDurations maps each allowed Flux duration token to its Go duration.
+// It mirrors energy.intervals, which owns the allowed set; this package cannot
+// import that one (energy imports influx), so the table is kept minimal and
+// every consumer here treats an unknown token explicitly.
+var intervalDurations = map[string]time.Duration{
+	"5m":  5 * time.Minute,
+	"15m": 15 * time.Minute,
+	"30m": 30 * time.Minute,
+	"1h":  time.Hour,
+	"6h":  6 * time.Hour,
+	"1d":  24 * time.Hour,
+}
+
+// intervalDuration resolves a Flux duration token, reporting false for one
+// outside the allowed set. Note "1d" is its NOMINAL 24h: a calendar day across a
+// DST change is 23h or 25h, and callers that care step by calendar date instead.
+func intervalDuration(token string) (time.Duration, bool) {
+	d, ok := intervalDurations[token]
+	return d, ok
+}
+
 // padDuration maps a Flux duration token to a Go duration for the pad. It is
 // deliberately lenient: any unrecognised token falls back to one hour, which is
 // safe because the pad only needs to guarantee at least one prior datapoint.
 func padDuration(interval string) time.Duration {
-	switch interval {
-	case "5m":
-		return 5 * time.Minute
-	case "15m":
-		return 15 * time.Minute
-	case "30m":
-		return 30 * time.Minute
-	case "1h":
-		return time.Hour
-	case "6h":
-		return 6 * time.Hour
-	case "1d":
-		return 24 * time.Hour
-	default:
-		return time.Hour
+	if d, ok := intervalDuration(interval); ok {
+		return d
 	}
+	return time.Hour
 }
 
 // BuildCounterSeriesFlux builds the per-bucket energy series from the cumulative

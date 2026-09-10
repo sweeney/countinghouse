@@ -2,9 +2,7 @@ package energy
 
 import (
 	"context"
-	"fmt"
 	"math"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -349,132 +347,6 @@ func TestBuildSeriesCounterHeadWithNoDataZeroesBucketZero(t *testing.T) {
 
 // ---- the invariant that would have caught this -----------------------------
 
-// counterSample is one cumulative-counter reading.
-type counterSample struct {
-	t   time.Time
-	kwh float64
-}
-
-// counterSim is a deterministic stand-in for Influx over the energy_kwh counter.
-// It holds one device's cumulative counter at a fixed cadence and answers BOTH
-// Flux shapes countinghouse issues against it, honouring the range bounds and
-// the aggregation grid the way Influx does:
-//
-//   - increase() |> last()               (the whole-window / head builders)
-//   - increase() |> aggregateWindow(...) |> difference()  (the series builder)
-//
-// That is what makes the endpoint-agreement assertion below meaningful: both
-// answers come from the same underlying counter, through the same arithmetic
-// the real database would apply.
-type counterSim struct {
-	deviceID string
-	loc      *time.Location
-	samples  []counterSample
-}
-
-// newCounterSim builds a counter for a steady `watts` load sampled every
-// `cadence` over [from, to].
-func newCounterSim(deviceID string, loc *time.Location, from, to time.Time, cadence time.Duration, watts float64) *counterSim {
-	c := &counterSim{deviceID: deviceID, loc: loc}
-	for ts := from; !ts.After(to); ts = ts.Add(cadence) {
-		c.samples = append(c.samples, counterSample{
-			t:   ts,
-			kwh: watts * ts.Sub(from).Hours() / 1000,
-		})
-	}
-	return c
-}
-
-var (
-	simRangeRe = regexp.MustCompile(`range\(start: (\S+), stop: (\S+)\)`)
-	simEveryRe = regexp.MustCompile(`every: (\w+),`)
-)
-
-func (c *counterSim) query(flux string) ([]influx.Row, error) {
-	if !strings.Contains(flux, `"energy_kwh"`) {
-		return nil, nil // power_w queries: this sim has no power telemetry
-	}
-	m := simRangeRe.FindStringSubmatch(flux)
-	if m == nil {
-		return nil, fmt.Errorf("counterSim: no range() in flux:\n%s", flux)
-	}
-	start, err := time.Parse(time.RFC3339, m[1])
-	if err != nil {
-		return nil, err
-	}
-	stop, err := time.Parse(time.RFC3339, m[2])
-	if err != nil {
-		return nil, err
-	}
-
-	// range() is half-open [start, stop).
-	var in []counterSample
-	for _, s := range c.samples {
-		if !s.t.Before(start) && s.t.Before(stop) {
-			in = append(in, s)
-		}
-	}
-	if len(in) == 0 {
-		return nil, nil
-	}
-	// increase() re-bases the running total at the first point in range.
-	base := in[0].kwh
-
-	if !strings.Contains(flux, "aggregateWindow") {
-		// increase() |> last(): one row, the total rise across the range.
-		last := in[len(in)-1]
-		return []influx.Row{{
-			DeviceID: c.deviceID, Field: "energy_kwh",
-			Value: last.kwh - base, Time: last.t,
-		}}, nil
-	}
-
-	// aggregateWindow(every:, fn: last, timeSrc: "_start", location:) |> difference().
-	em := simEveryRe.FindStringSubmatch(flux)
-	if em == nil {
-		return nil, fmt.Errorf("counterSim: no every: in flux:\n%s", flux)
-	}
-	iv, ok := lookupInterval(em[1])
-	if !ok {
-		return nil, fmt.Errorf("counterSim: unknown interval %q", em[1])
-	}
-
-	// Grid anchored at the local midnight of the range start, exactly as
-	// location-aware aggregateWindow anchors its windows.
-	ls := start.In(c.loc)
-	anchor := time.Date(ls.Year(), ls.Month(), ls.Day(), 0, 0, 0, 0, c.loc)
-	first := ls.Add(-(ls.Sub(anchor) % iv.Duration))
-
-	type gridVal struct {
-		at  time.Time
-		val float64
-	}
-	var closes []gridVal
-	for w := first; w.Before(stop); w = w.Add(iv.Duration) {
-		next := w.Add(iv.Duration)
-		var last *counterSample
-		for i := range in {
-			if !in[i].t.Before(w) && in[i].t.Before(next) {
-				last = &in[i]
-			}
-		}
-		if last == nil {
-			continue // createEmpty yields null; difference() skips it
-		}
-		closes = append(closes, gridVal{at: w, val: last.kwh - base})
-	}
-
-	// difference() drops the first window (it is the seed) and emits deltas.
-	var rows []influx.Row
-	for i := 1; i < len(closes); i++ {
-		rows = append(rows, influx.Row{
-			DeviceID: c.deviceID, Field: "energy_kwh",
-			Value: closes[i].val - closes[i-1].val, Time: closes[i].at,
-		})
-	}
-	return rows, nil
-}
-
 // TestSeriesTotalAgreesWithDeviceEnergyOffGridWindow is the invariant issue #27
 // asks for, and the one that would have caught the bug: over the SAME window,
 // /series total_kwh and /devices/{id}/energy kwh must describe the same
@@ -486,7 +358,7 @@ func (c *counterSim) query(flux string) ([]influx.Row, error) {
 // window that opens at 14:29.
 func TestSeriesTotalAgreesWithDeviceEnergyOffGridWindow(t *testing.T) {
 	loc := mustLondon(t)
-	sim := newCounterSim("winefridge", loc,
+	sim := influx.NewCounterSim(loc).AddSteady("winefridge",
 		time.Date(2026, 6, 11, 12, 0, 0, 0, loc),
 		time.Date(2026, 6, 11, 18, 0, 0, 0, loc),
 		time.Minute, 1000)
@@ -500,7 +372,7 @@ func TestSeriesTotalAgreesWithDeviceEnergyOffGridWindow(t *testing.T) {
 	devices := map[string]config.DeviceConfig{
 		"winefridge": {Class: "continuous_power_device"},
 	}
-	q := &influx.FakeQuerier{QueryFunc: sim.query}
+	q := &influx.FakeQuerier{QueryFunc: sim.Answer}
 	ctx := context.Background()
 
 	scalar, _, err := DeviceWindowKWh(ctx, q, "statehouse", "winefridge", "continuous_power_device", win.Start, win.Stop)
@@ -536,7 +408,7 @@ func TestSeriesTotalAgreesWithDeviceEnergyOffGridWindow(t *testing.T) {
 // the first grid bucket returned a byte-identical total every time.
 func TestSeriesTotalFallsAsTheWindowStartMovesLater(t *testing.T) {
 	loc := mustLondon(t)
-	sim := newCounterSim("winefridge", loc,
+	sim := influx.NewCounterSim(loc).AddSteady("winefridge",
 		time.Date(2026, 6, 11, 12, 0, 0, 0, loc),
 		time.Date(2026, 6, 11, 18, 0, 0, 0, loc),
 		time.Minute, 1000)
@@ -551,7 +423,7 @@ func TestSeriesTotalFallsAsTheWindowStartMovesLater(t *testing.T) {
 			Stop:  time.Date(2026, 6, 11, 16, 43, 0, 0, loc),
 			Label: WindowCustom,
 		}
-		q := &influx.FakeQuerier{QueryFunc: sim.query}
+		q := &influx.FakeQuerier{QueryFunc: sim.Answer}
 		resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
 		if err != nil {
 			t.Fatalf("BuildSeries: %v", err)
