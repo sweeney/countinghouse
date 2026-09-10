@@ -185,14 +185,8 @@ type HouseStats struct {
 // for window=custom whose `from` is off the boundary (e.g. 14:23 with 1h snaps
 // to 14:00). Snapping makes every Influx row's _start stamp exact-match a
 // bucket, so the first partial window is no longer dropped and later buckets are
-// not shifted.
-//
-// The first bucket's TIMESTAMP therefore precedes `from`, but its VALUE does not
-// cover the pre-`from` slice: both value paths clip the head back to win.Start,
-// symmetrically with the tail clip at win.Stop (issue #27 — see bucketHours for
-// the power path and clipCounterHead for the counter path). Bucket 0 is a
-// partial bucket labelled by the grid boundary it starts on, exactly as the last
-// bucket is a partial bucket ending at win.Stop.
+// not shifted. The first bucket is therefore widened to its grid boundary (it
+// includes the pre-`from` slice, which carries no in-window data).
 //
 // Flux parity (anchoring): Influx's location-aware aggregateWindow anchors
 // windows to local midnight in the configured location and handles DST by
@@ -240,40 +234,26 @@ func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 	return out
 }
 
-// bucketHours returns, for each bucket i, the wall-clock length in hours of the
-// part of that bucket that lies INSIDE the window — clipped at BOTH ends:
-//
-//   - bucket 0 starts at win.Start, not at its grid boundary. The axis snaps
-//     that boundary DOWN below win.Start on purpose (issue #1, see BucketStarts),
-//     so the first bucket's grid interval can begin before the window does; the
-//     part before win.Start is not the caller's window and must not be billed.
-//   - the final bucket ends at win.Stop, which for a period-to-date window is
-//     "now" rather than a boundary.
-//
-// Either edge can therefore be partial, and a window contained entirely within
-// one grid interval is partial at both. Interior buckets are their full
-// wall-clock length, which is not the same as iv.Duration: a calendar-day bucket
-// spanning a DST change is 23h or 25h.
-//
-// This is what the UPS energy conversion (mean watts × hours / 1000) must use.
-// The head clip is load-bearing there: aggregateWindow computes bucket 0's mean
-// over the samples inside the QUERY RANGE, which begins at win.Start, so a mean
-// measured over one minute would otherwise be scaled across a whole 30-minute
-// interval (issue #27).
-func bucketHours(buckets []time.Time, start, stop time.Time) []float64 {
+// bucketHours returns, for each bucket i, the real wall-clock length of that
+// bucket in hours: buckets[i+1]-buckets[i] for interior buckets, and
+// win.Stop-buckets[last] for the final (possibly partial) bucket. This is what
+// the UPS energy conversion (mean watts × hours / 1000) must use, because a
+// calendar-day bucket spanning a DST change is 23h or 25h, and a period-to-date
+// final bucket ends at "now", not on a boundary.
+func bucketHours(buckets []time.Time, stop time.Time) []float64 {
 	hrs := make([]float64, len(buckets))
 	for i := range buckets {
-		from := buckets[i]
-		if from.Before(start) {
-			from = start
-		}
-		to := stop
+		var end time.Time
 		if i+1 < len(buckets) {
-			to = buckets[i+1]
+			end = buckets[i+1]
+		} else {
+			end = stop
 		}
-		if h := to.Sub(from).Hours(); h > 0 {
-			hrs[i] = h
+		h := end.Sub(buckets[i]).Hours()
+		if h < 0 {
+			h = 0
 		}
+		hrs[i] = h
 	}
 	return hrs
 }
@@ -661,10 +641,8 @@ func withUnmonitoredCatchAll(
 // would clamp to 0 — reporting "0 W" for a series consuming real energy (the
 // avg_w=0 bug, docs/bug-unmonitored-avg-w.md) — and would disagree with the
 // published kwh anyway, mirroring the C9 reasoning for cost. Using the actual
-// bucket_hours keeps a partial first OR last bucket correctly scaled: BOTH edges
-// are clipped to the window (issue #27), so bucket 0's residual energy is divided
-// by the hours it actually covers rather than by its full grid interval.
-// monitored may be nil (no monitored devices ⇒ the whole meter is unmonitored).
+// bucket_hours keeps a partial first/last bucket correctly scaled. monitored may
+// be nil (no monitored devices ⇒ the whole meter is unmonitored).
 //
 // Because meter and monitored carry already-rounded per-bucket values, the
 // visible invariant monitored.kwh + unmonitored.kwh == meter.kwh holds exactly at
@@ -914,79 +892,10 @@ func sortedDeviceIDs(devices map[string]config.DeviceConfig) []string {
 	return ids
 }
 
-// clipCounterHead clips the counter series' FIRST bucket to win.Start (issue
-// #27), leaving every other bucket untouched.
-//
-// It is a no-op unless win.Start is strictly after buckets[0] — the axis snaps
-// the first bucket start DOWN to the interval grid (issue #1), and only an
-// off-grid `from` puts the window start inside that bucket rather than on its
-// edge. When it does apply, exactly one extra query is issued (set-based, so
-// still device-count-independent) covering [win.Start, buckets[1]) — or the
-// whole window when the axis has only one bucket.
-//
-// The head query is AUTHORITATIVE for bucket 0: every counter device's bucket 0
-// is zeroed first, so a device whose counter did not move inside the head
-// reports 0 rather than keeping the padded query's full-grid delta.
-//
-// Why the totals then agree with the scalar endpoints exactly: the remaining
-// difference() deltas telescope to last(bucket n-1) − last(bucket 0), and the
-// head contributes last(bucket 0) − first(≥ win.Start), so the series total is
-// the same increase() over [win.Start, win.Stop) that BuildCounterFlux reduces.
-func clipCounterHead(
-	ctx context.Context,
-	q influx.Querier,
-	bucket string,
-	counterIDs []string,
-	win Window,
-	buckets []time.Time,
-	energyByDevice map[string][]float64,
-) error {
-	if len(buckets) == 0 || !win.Start.After(buckets[0]) {
-		return nil
-	}
-	headStop := win.Stop
-	if len(buckets) > 1 {
-		headStop = buckets[1]
-	}
-
-	rows, err := q.Query(ctx, influx.BuildCounterHeadFlux(bucket, counterIDs, win.Start, headStop))
-	if err != nil {
-		return err
-	}
-
-	// Zero first: the head query is authoritative, so a counter that did not move
-	// inside it must not keep the padded query's full-grid delta.
-	counter := make(map[string]bool, len(counterIDs))
-	for _, id := range counterIDs {
-		counter[id] = true
-		if arr := energyByDevice[id]; arr != nil {
-			arr[0] = 0
-		}
-	}
-	for _, r := range rows {
-		if !counter[r.DeviceID] {
-			continue
-		}
-		arr := energyByDevice[r.DeviceID]
-		if arr == nil {
-			arr = make([]float64, len(buckets))
-			energyByDevice[r.DeviceID] = arr
-		}
-		// increase() over one table yields one row per device; summing is just
-		// safe if a device's series ever arrives as more than one table (the
-		// fragments are disjoint accumulations, so they add — see
-		// DeviceWindowKWh).
-		arr[0] += r.Value
-	}
-	return nil
-}
-
 // BuildSeries is the orchestrator: it runs ~3 Influx queries (counter energy for
 // the counter set incl. meter; UPS mean-power→energy for the ups set; mean-power
 // for ALL metered devices), demuxes the bucketed rows onto the canonical axis
-// (dropping pad buckets), and calls AssembleSeries. A fourth counter query is
-// added only when the window opens inside its first grid bucket — see
-// clipCounterHead.
+// (dropping pad buckets), and calls AssembleSeries.
 //
 // The query count is independent of device count: each builder fans out across
 // a device set via contains(set: [...]). bucket is the Influx bucket name; win
@@ -1012,7 +921,7 @@ func BuildSeries(
 	}
 	buckets := BucketStarts(win, iv, loc)
 	idx := bucketIndex(buckets)
-	hrs := bucketHours(buckets, win.Start, win.Stop)
+	hrs := bucketHours(buckets, win.Stop)
 	tz := loc.String()
 
 	// Partition the metered inventory.
@@ -1042,18 +951,6 @@ func BuildSeries(
 			return SeriesResponse{}, err
 		}
 		demux(rows, idx, energyByDevice, len(buckets), func(v float64, _ int) float64 { return v })
-
-		// Query 1b (issue #27): repair bucket 0 when the window opens INSIDE it.
-		// aggregateWindow buckets on the local-midnight grid, so bucket 0's
-		// difference() delta is the full grid interval no matter where win.Start
-		// falls in it — the series would bill energy from before `from`, and
-		// disagree with /devices/{id}/energy over the very same window. A grid
-		// interval cannot be split after the fact, so the in-window head gets its
-		// own exact-range query and REPLACES bucket 0. Skipped entirely for a
-		// grid-aligned start (today/week/month/<N>d), which is the common case.
-		if err := clipCounterHead(ctx, q, bucket, counterIDs, win, buckets, energyByDevice); err != nil {
-			return SeriesResponse{}, err
-		}
 	}
 
 	// Query 2: UPS mean-power → energy (mean W × bucket-hours / 1000).

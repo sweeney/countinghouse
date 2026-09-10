@@ -648,12 +648,6 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 // boundaries, with every grid-stamped row landing on the exact-match path —
 // nothing dropped, nothing shifted. Mirrors TestBuildSeriesEndToEnd but with a
 // 14:23 start.
-//
-// Bucket 0 is the one exception, and it is issue #27's half of the same story:
-// its grid interval (14:00) opens before the window does, so its value comes
-// from the exact-range head query over [14:23, 15:00), not from the padded
-// series query's full-interval delta. The axis is unchanged; only the value the
-// first bucket carries is clipped to the window it claims.
 func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
 	loc := mustLondon(t)
 	start := time.Date(2026, 6, 11, 14, 23, 0, 0, loc)
@@ -690,9 +684,6 @@ func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
 		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.06, Time: grid[2]},
 		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.03, Time: grid[3]},
 	}
-	// The head query (increase()|>last(), no aggregateWindow) answers for the
-	// in-window part of bucket 0 only: 37 of the interval's 60 minutes.
-	const headKWh = 0.031
 	allPowerRows := []influx.Row{
 		{DeviceID: "winefridge", Field: "power_w", Value: 50, Time: grid[0]},
 		{DeviceID: "winefridge", Field: "power_w", Value: 40, Time: grid[1]},
@@ -703,10 +694,8 @@ func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
 	q := &influx.FakeQuerier{
 		QueryFunc: func(flux string) ([]influx.Row, error) {
 			switch {
-			case strings.Contains(flux, "energy_kwh") && strings.Contains(flux, "aggregateWindow"):
-				return counterRows, nil
 			case strings.Contains(flux, "energy_kwh"):
-				return []influx.Row{{DeviceID: "winefridge", Field: "energy_kwh", Value: headKWh, Time: grid[1]}}, nil
+				return counterRows, nil
 			case strings.Contains(flux, "power_w"):
 				return allPowerRows, nil
 			}
@@ -723,8 +712,7 @@ func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
 	}
 	wine := resp.Series[0]
 	// Every grid row lands on its own bucket: no leading slice dropped, no shift.
-	// Bucket 0 carries the clipped head rather than the full 14:00 interval.
-	want := []float64{headKWh, 0.04, 0.06, 0.03}
+	want := []float64{0.05, 0.04, 0.06, 0.03}
 	for i, w := range want {
 		if wine.KWh[i] != w {
 			t.Errorf("winefridge kwh[%d] = %v, want %v (axis/aggregation misaligned?)", i, wine.KWh[i], w)

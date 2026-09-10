@@ -907,13 +907,7 @@ components:
           type: array
           items:
             type: number
-          description: >
-            Per-bucket energy (kWh), aligned to buckets. Every value covers only
-            the part of its bucket that lies INSIDE [from, to): the first and last
-            buckets may therefore be partial (see `buckets`), and a partial bucket
-            carries proportionally less energy than a full one. Summing kwh gives
-            total_kwh, which agrees with GET /devices/{id}/energy over the same
-            window.
+          description: Per-bucket energy (kWh), aligned to buckets.
         cost:
           type: array
           items:
@@ -978,16 +972,7 @@ components:
           items:
             type: string
             format: date-time
-          description: >
-            Local-timezone bucket-start axis every series aligns to. Starts are
-            GRID-ALIGNED — anchored at local midnight and stepped by `interval` —
-            matching Influx's aggregation boundaries, so for an off-grid `from`
-            the FIRST timestamp precedes `from` (e.g. from=14:29 with interval=30m
-            yields a first bucket of 14:00). That bucket is a PARTIAL bucket: it is
-            labelled by the grid boundary it starts on but its values cover only
-            14:29 onwards, exactly as the last bucket covers only up to `to`.
-            Buckets are also real wall-clock lengths, so a 1d bucket spanning a DST
-            change is 23h or 25h.
+          description: Local-timezone bucket-start axis every series aligns to.
         series:
           type: array
           description: >
@@ -1042,20 +1027,15 @@ components:
         time:
           type: string
           format: date-time
-          description: >
-            Bucket start (local timezone offset). Grid-aligned, so the first row's
-            time may precede `from` — see SeriesResponse.buckets.
+          description: Bucket start (local timezone offset).
         kwh:
           type: number
-          description: >
-            Energy in the part of the bucket inside [from, to). The first and last
-            buckets may be partial.
         cost:
           type: number
           description: VAT-inclusive GBP cost.
         avg_w:
           type: number
-          description: Mean power over the in-window part of the bucket (W).
+          description: Mean power over the bucket (W).
       required: [key, time, kwh, cost, avg_w]
 
     RowsResponse:
