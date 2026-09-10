@@ -314,6 +314,20 @@ func (f *Fetcher) refreshTariffs(ctx context.Context, token string) {
 		f.recordStatus(nsTariffs, err)
 		return
 	}
+	// A document that fetched fine but is internally ambiguous is treated
+	// exactly like a fetch failure: keep the last-known snapshot and record the
+	// reason. Applying it would let an ambiguous tariff price money, and
+	// tariffs are the one namespace where a plausible-looking wrong number is
+	// worse than no update at all.
+	//
+	// Combined with the cold-start rule (Cold() aborts startup for a namespace
+	// that has NEVER been fetched), this gives the project's standard shape:
+	// boot needs truth, running keeps the last truth.
+	if err := tariffs.Validate(); err != nil {
+		f.warn("remote config: energy_tariffs is invalid, keeping last-known", "error", err)
+		f.recordStatus(nsTariffs, err)
+		return
+	}
 	f.mu.Lock()
 	f.tariffs = tariffs
 	f.mu.Unlock()

@@ -710,17 +710,56 @@ components:
 
     Tariff:
       type: object
+      description: >
+        A fuel's pricing. The schema is recursive: a fuel entry may carry a
+        `periods` array holding its effective-date history, and each element of
+        that array is itself a Tariff describing one dated period. A fuel entry
+        with no `periods` is the single-rate shape, where the one rate applies at
+        every instant.
       properties:
         unit_rate:
           type: number
-          description: GBP per kWh, ex-VAT.
+          description: >
+            GBP per kWh, ex-VAT. Absent on a half-hourly period, where the rate
+            varies within the period and comes from the price archive instead —
+            see `tariff_code`.
         daily_standing_charge:
           type: number
-          description: GBP per day, ex-VAT.
+          description: GBP per day, ex-VAT. Flat per day on half-hourly tariffs too.
         unit:
           type: string
+          description: Inherited by each period from the fuel entry unless overridden.
         vat_rate:
           type: number
+          description: >
+            Inherited by each period from the fuel entry unless overridden. A
+            period may override it so a historical window is priced at the VAT
+            rate that applied on the day.
+        tariff_code:
+          type: string
+          description: >
+            Present only on a HALF-HOURLY period, and mutually exclusive with
+            `unit_rate`. The supplier tariff code whose half-hourly prices this
+            period is billed from (e.g. an Agile tariff). Its presence, rather
+            than a separate type field, is what marks the period as half-hourly.
+          example: E-1R-AGILE-24-10-01-A
+        effective_from:
+          type: string
+          format: date-time
+          description: >
+            Inclusive start of a period. Required on each element of `periods`
+            and absent on a fuel entry. A window that begins before the earliest
+            `effective_from` has no known price and is refused rather than priced
+            at the nearest rate.
+        periods:
+          type: array
+          description: >
+            Effective-date history, oldest first. When present, the rate in force
+            at any instant is the latest period whose `effective_from` is at or
+            before it, and a window spanning a boundary is billed as one segment
+            per period.
+          items:
+            $ref: "#/components/schemas/Tariff"
 
     TariffsResponse:
       type: object
