@@ -325,7 +325,8 @@ for stacking). `createEmpty:true`.
 
 **Influx (~3 queries, device-count-independent):**
 1. Counter energy (plug+meter): `energy_kwh |> increase() |> aggregateWindow(every:dt,last,location) |> difference()`. Pad the range one interval earlier; drop the pad bucket so bucket 0 has a real delta. (`increase()` first = reset-safe.)
-2. UPS energy: `power_w |> aggregateWindow(every:dt,mean,location)` × bucket-hours / 1000.
+   1b. Partial head (only when `from` is off the grid, i.e. bucket 0 opens before the window): `energy_kwh |> increase() |> last()` over the exact `[from, buckets[1])`, replacing bucket 0. The grid bucket cannot be split after the fact, and without this the series bills a full interval of pre-`from` energy and disagrees with `/devices/{id}/energy` (issue #27).
+2. UPS energy: `power_w |> aggregateWindow(every:dt,mean,location)` × bucket-hours / 1000, where bucket-hours is clipped to the window at BOTH ends.
 3. Avg power (all): `power_w |> aggregateWindow(every:dt,mean,location)`.
 Cost derived in Go. Rounding via `roundTo` (kWh 3dp, cost 4dp, W 1dp).
 
