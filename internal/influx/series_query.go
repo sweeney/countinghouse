@@ -93,6 +93,38 @@ from(bucket: %q)
 	)
 }
 
+// BuildCounterHeadFlux builds the EXACT windowed energy delta over an arbitrary
+// range for a SET of counter devices — the same increase()|>last() reduction
+// BuildCounterFlux uses for the whole-window endpoints, fanned out across a
+// device set so the query count stays device-count-independent.
+//
+// It exists to repair the FIRST bucket of the counter series (issue #27).
+// BuildCounterSeriesFlux buckets on aggregateWindow's grid, which is anchored at
+// local midnight and therefore begins at or BEFORE the window start; bucket 0's
+// difference() delta is consequently the whole grid interval, and the window
+// start never enters the arithmetic. A grid interval is not divisible after the
+// fact, so the in-window head gets its own query over [win.Start, buckets[1]).
+// increase() is already correct over an arbitrary range — which is exactly why
+// the scalar endpoints get this right today — so the two agree by construction.
+//
+// The caller issues this ONLY when win.Start is strictly after the first bucket
+// start; every midnight-aligned window (today/week/month/<N>d) skips it.
+func BuildCounterHeadFlux(bucket string, deviceIDs []string, start, stop time.Time) string {
+	return fmt.Sprintf(`from(bucket: %q)
+  |> range(start: %s, stop: %s)
+  |> filter(fn: (r) => r._measurement == "device_power" and r._field == "energy_kwh")
+  |> filter(fn: (r) => contains(value: r.device_id, set: %s))
+%s
+  |> increase()
+  |> last()`,
+		bucket,
+		fluxTime(start),
+		fluxTime(stop),
+		deviceSet(deviceIDs),
+		regroupByDeviceWindow,
+	)
+}
+
 // BuildPowerMeanSeriesFlux builds the per-bucket mean instantaneous power
 // series (power_w) for a SET of devices, on DST-aware local buckets. It is used
 // for two purposes by the energy layer:
