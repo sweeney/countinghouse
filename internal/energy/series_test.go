@@ -560,13 +560,14 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 		"network-ups": {Class: "ups_sensor", DisplayName: "Network UPS", Location: "office"},
 	}
 
-	// counter rows: per-bucket energy for winefridge, stamped at LEFT edges.
+	// counter rows: the CLOSING RUNNING TOTAL at each bucket, measured from the
+	// window start, stamped at LEFT edges. Per-bucket energy is 0.05/0.04/0.06,
+	// so the totals accumulate. A row before the axis must still be ignored.
 	counterRows := []influx.Row{
-		// A pad bucket (one interval before start) that MUST be dropped.
 		{DeviceID: "winefridge", Field: "energy_kwh", Value: 999, Time: start.Add(-time.Hour)},
 		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.05, Time: buckets[0]},
-		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.04, Time: buckets[1]},
-		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.06, Time: buckets[2]},
+		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.09, Time: buckets[1]},
+		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.15, Time: buckets[2]},
 	}
 	// UPS power rows (mean W): energy = mean × 1h / 1000.
 	upsPowerRows := []influx.Row{
@@ -626,7 +627,7 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 	wine := byKey["winefridge"]
 	// Pad bucket (999) dropped; real per-bucket energy aligned.
 	if wine.KWh[0] != 0.05 || wine.KWh[1] != 0.04 || wine.KWh[2] != 0.06 {
-		t.Errorf("winefridge kwh = %v, want [0.05 0.04 0.06] (pad dropped)", wine.KWh)
+		t.Errorf("winefridge kwh = %v, want [0.05 0.04 0.06] (running totals differenced)", wine.KWh)
 	}
 	if wine.AvgW[0] != 50 || wine.AvgW[2] != 60 {
 		t.Errorf("winefridge avg_w = %v", wine.AvgW)
@@ -648,6 +649,11 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 // boundaries, with every grid-stamped row landing on the exact-match path —
 // nothing dropped, nothing shifted. Mirrors TestBuildSeriesEndToEnd but with a
 // 14:23 start.
+//
+// Bucket 0's grid interval (14:00) opens before the window does, but its VALUE
+// covers only [14:23, 15:00): the counter series is anchored at `from` by
+// increase() over the exact window (issues #27, #29), so the axis stays on the
+// grid while the values stay inside the window.
 func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
 	loc := mustLondon(t)
 	start := time.Date(2026, 6, 11, 14, 23, 0, 0, loc)
@@ -676,13 +682,15 @@ func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
 		"winefridge": {Class: "continuous_power_device", DisplayName: "Wine Fridge", Location: "kitchen"},
 	}
 
-	// Counter rows stamped at the Influx grid boundaries — including the 14:00
-	// row that the old raw-start axis (14:23) would have dropped.
+	// Closing running totals stamped at the Influx grid boundaries — including the
+	// 14:00 row that the old raw-start axis (14:23) would have dropped. Per-bucket
+	// energy is 0.05/0.04/0.06/0.03; bucket 0 covers only 14:23->15:00, which
+	// increase() already measures from the window start.
 	counterRows := []influx.Row{
 		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.05, Time: grid[0]},
-		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.04, Time: grid[1]},
-		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.06, Time: grid[2]},
-		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.03, Time: grid[3]},
+		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.09, Time: grid[1]},
+		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.15, Time: grid[2]},
+		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.18, Time: grid[3]},
 	}
 	allPowerRows := []influx.Row{
 		{DeviceID: "winefridge", Field: "power_w", Value: 50, Time: grid[0]},

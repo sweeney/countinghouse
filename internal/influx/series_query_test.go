@@ -36,8 +36,7 @@ func TestBuildCounterSeriesFlux(t *testing.T) {
 		`r._field == "energy_kwh"`,
 		`contains(value: r.device_id, set: ["winefridge", "freezer"])`,
 		`increase()`,
-		`aggregateWindow(every: 1h, fn: last, timeSrc: "_start", location: timezone.location(name: "Europe/London"), createEmpty: true)`,
-		`difference()`,
+		`aggregateWindow(every: 1h, fn: last, timeSrc: "_start", location: timezone.location(name: "Europe/London"), createEmpty: false)`,
 		`stop: 2026-06-12T00:00:00Z`,
 	}
 	for _, w := range wants {
@@ -46,46 +45,32 @@ func TestBuildCounterSeriesFlux(t *testing.T) {
 		}
 	}
 
-	// Range must be padded one interval (1h) BEFORE start (23:00 prior day).
-	if !strings.Contains(flux, `start: 2026-06-10T23:00:00Z`) {
-		t.Errorf("counter series flux not padded one interval before start\n---\n%s", flux)
+	// The range is the EXACT window: no pad. The pad is what used to anchor the
+	// series at a reading taken before `from` (issue #29).
+	if !strings.Contains(flux, `start: 2026-06-11T00:00:00Z`) {
+		t.Errorf("counter series flux must range over the exact window, unpadded\n---\n%s", flux)
 	}
 
-	// Ordering: increase() BEFORE aggregateWindow BEFORE difference().
-	iInc := strings.Index(flux, "increase()")
-	iAgg := strings.Index(flux, "aggregateWindow")
-	iDiff := strings.Index(flux, "difference()")
-	if !(iInc < iAgg && iAgg < iDiff) {
-		t.Errorf("counter ordering wrong: increase=%d aggregate=%d difference=%d\n---\n%s", iInc, iAgg, iDiff, flux)
+	// increase() must precede aggregateWindow, so counter resets are absorbed
+	// into the running total before it is bucketed.
+	if strings.Index(flux, "increase()") > strings.Index(flux, "aggregateWindow") {
+		t.Errorf("increase() must precede aggregateWindow\n---\n%s", flux)
+	}
+
+	// Differencing is the CALLER's job now (energy.demuxCounterTotals), so a
+	// bucket with no reading can be told from a bucket worth zero.
+	if strings.Contains(flux, "difference()") {
+		t.Errorf("counter series must not difference() in Flux\n---\n%s", flux)
+	}
+	if !strings.Contains(flux, "createEmpty: false") {
+		t.Errorf("counter series needs createEmpty:false; an empty bucket must be absent, "+
+			"not a null decoding to a 0.0 running total\n---\n%s", flux)
 	}
 
 	// Counter path must not touch power_w / integral / mean.
 	for _, bad := range []string{`power_w`, `integral(`, `fn: mean`} {
 		if strings.Contains(flux, bad) {
 			t.Errorf("counter series flux unexpectedly contains %q", bad)
-		}
-	}
-}
-
-func TestBuildCounterSeriesFluxPadByInterval(t *testing.T) {
-	cases := []struct {
-		interval  string
-		wantStart string
-	}{
-		{"5m", "2026-06-10T23:55:00Z"},
-		{"15m", "2026-06-10T23:45:00Z"},
-		{"30m", "2026-06-10T23:30:00Z"},
-		{"1h", "2026-06-10T23:00:00Z"},
-		{"6h", "2026-06-10T18:00:00Z"},
-		{"1d", "2026-06-10T00:00:00Z"},
-	}
-	for _, c := range cases {
-		flux := BuildCounterSeriesFlux("statehouse", []string{"x"}, seriesStart, seriesStop, c.interval, "Europe/London")
-		if !strings.Contains(flux, "start: "+c.wantStart) {
-			t.Errorf("interval %s: want padded start %s\n---\n%s", c.interval, c.wantStart, flux)
-		}
-		if !strings.Contains(flux, "every: "+c.interval+",") {
-			t.Errorf("interval %s: aggregateWindow every token missing\n---\n%s", c.interval, flux)
 		}
 	}
 }

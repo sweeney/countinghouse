@@ -23,55 +23,61 @@ func deviceSet(deviceIDs []string) string {
 	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
-// padStart returns the query range start moved one interval earlier than the
-// window start. The counter series needs a real datapoint immediately before
-// the first window bucket so that difference() yields a proper delta for bucket
-// 0; the Go layer then drops every bucket before the window. The pad amount is
-// the literal local-window duration of one interval (sub-day intervals are
-// fixed; for "1d" we subtract 24h, which is close enough to seed the pad — the
-// Go axis, not this start, is authoritative for bucket boundaries).
-func padStart(start time.Time, interval string) time.Time {
-	return start.Add(-padDuration(interval))
+// intervalDurations maps each allowed Flux duration token to its Go duration.
+// It mirrors energy.intervals, which owns the allowed set; this package cannot
+// import that one (energy imports influx), so the table is kept minimal and
+// every consumer here treats an unknown token explicitly.
+var intervalDurations = map[string]time.Duration{
+	"5m":  5 * time.Minute,
+	"15m": 15 * time.Minute,
+	"30m": 30 * time.Minute,
+	"1h":  time.Hour,
+	"6h":  6 * time.Hour,
+	"1d":  24 * time.Hour,
 }
 
-// padDuration maps a Flux duration token to a Go duration for the pad. It is
-// deliberately lenient: any unrecognised token falls back to one hour, which is
-// safe because the pad only needs to guarantee at least one prior datapoint.
-func padDuration(interval string) time.Duration {
-	switch interval {
-	case "5m":
-		return 5 * time.Minute
-	case "15m":
-		return 15 * time.Minute
-	case "30m":
-		return 30 * time.Minute
-	case "1h":
-		return time.Hour
-	case "6h":
-		return 6 * time.Hour
-	case "1d":
-		return 24 * time.Hour
-	default:
-		return time.Hour
-	}
+// intervalDuration resolves a Flux duration token, reporting false for one
+// outside the allowed set. Note "1d" is its NOMINAL 24h: a calendar day across a
+// DST change is 23h or 25h, and callers that care step by calendar date instead.
+func intervalDuration(token string) (time.Duration, bool) {
+	d, ok := intervalDurations[token]
+	return d, ok
 }
 
-// BuildCounterSeriesFlux builds the per-bucket energy series from the cumulative
-// energy_kwh counter, for a SET of counter-class devices (plug classes + the
-// energy meter). It is reset-safe and timezone-aware:
+// BuildCounterSeriesFlux builds the per-bucket CLOSING RUNNING TOTAL of the
+// cumulative energy_kwh counter, for a SET of counter-class devices (plug
+// classes + the energy meter). It is reset-safe and timezone-aware:
 //
-//   - increase() runs FIRST, BEFORE aggregateWindow, so device-side counter
-//     resets are absorbed into the monotonic running total.
-//   - aggregateWindow(every: interval, fn: last, location: timezone.location(tz),
-//     createEmpty: true) collapses each bucket to its closing running total on
-//     DST-aware local boundaries, emitting empty buckets so the axis is dense.
-//   - difference() turns the per-bucket running totals into per-bucket deltas
-//     (the energy consumed within each bucket).
+//   - The range is the EXACT window. increase() therefore re-bases at the first
+//     reading at or after `start`, so every value it produces is "energy since
+//     the window opened" — the same zero point BuildCounterFlux uses for
+//     /devices/{id}/energy. It also runs FIRST, before aggregateWindow, so
+//     device-side counter resets are absorbed into the monotonic running total.
+//   - aggregateWindow(every:, fn: last, timeSrc: "_start", location:) collapses
+//     each bucket to its closing running total on DST-aware local boundaries.
 //
-// The query range is padded ONE interval before start (see padStart) so the
-// first real window bucket has a prior value to difference against; the Go
-// layer drops the pad bucket(s). Rows keep r.device_id (group columns are
-// preserved) so the caller can demux per device.
+// It deliberately does NOT difference() — the caller does that in Go, walking
+// the canonical axis and carrying the last known total across buckets with no
+// readings (see energy.demuxCounterTotals). Two reasons, both learned the hard
+// way (issue #29):
+//
+//   - difference() consumes the first window it sees as its seed. The old design
+//     paid for that seed by padding the range one interval earlier, which
+//     anchored the whole series at whatever reading the device last managed
+//     BEFORE the window — energy from outside the window, billed. And when the
+//     pad held no reading, the seed came from INSIDE the window instead and a
+//     real bucket's energy vanished.
+//   - Differencing in Go makes a reading gap explicit: the buckets it spans are
+//     zero and the next real reading resumes from the carried total, so nothing
+//     is lost and nothing pre-`from` leaks in.
+//
+// createEmpty is FALSE for the same reason: an empty bucket would arrive as a
+// null that decodes to 0.0, indistinguishable from a running total of zero (a
+// counter reset). Omitting those buckets and carrying forward in Go is
+// unambiguous.
+//
+// Rows keep r.device_id (group columns are preserved) so the caller can demux
+// per device.
 func BuildCounterSeriesFlux(bucket string, deviceIDs []string, start, stop time.Time, interval, tz string) string {
 	return fmt.Sprintf(`import "timezone"
 
@@ -81,10 +87,9 @@ from(bucket: %q)
   |> filter(fn: (r) => contains(value: r.device_id, set: %s))
 %s
   |> increase()
-  |> aggregateWindow(every: %s, fn: last, timeSrc: "_start", location: timezone.location(name: %q), createEmpty: true)
-  |> difference()`,
+  |> aggregateWindow(every: %s, fn: last, timeSrc: "_start", location: timezone.location(name: %q), createEmpty: false)`,
 		bucket,
-		fluxTime(padStart(start, interval)),
+		fluxTime(start),
 		fluxTime(stop),
 		deviceSet(deviceIDs),
 		regroupByDevice,
@@ -101,8 +106,17 @@ from(bucket: %q)
 //   - UPS energy: mean watts × bucket-hours / 1000 → kWh (computed in Go, since
 //     bucket-hours vary across a DST changeover).
 //
-// Unlike the counter series this needs no pad: a bucket mean is self-contained.
-// createEmpty: true keeps the axis dense; rows keep r.device_id for demuxing.
+// A bucket mean is self-contained, so this reduces to one value per bucket with
+// no cross-bucket arithmetic and nothing to seed. createEmpty: true keeps the
+// axis dense; rows keep r.device_id for demuxing.
+//
+// Caveat inherited from that density: an empty bucket arrives as a null which
+// Client.Query decodes to 0.0, so a device that stopped reporting reads as a mean
+// of 0 W rather than as absent. For avg_w that is merely optimistic; for the UPS
+// energy path it under-reports the gap. The counter series avoids the same hazard
+// with createEmpty: false and a Go-side carry (see BuildCounterSeriesFlux); doing
+// the equivalent here is a separate change, since a mean cannot simply be carried
+// forward the way a running total can.
 func BuildPowerMeanSeriesFlux(bucket string, deviceIDs []string, start, stop time.Time, interval, tz string) string {
 	return fmt.Sprintf(`import "timezone"
 

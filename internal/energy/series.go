@@ -185,8 +185,16 @@ type HouseStats struct {
 // for window=custom whose `from` is off the boundary (e.g. 14:23 with 1h snaps
 // to 14:00). Snapping makes every Influx row's _start stamp exact-match a
 // bucket, so the first partial window is no longer dropped and later buckets are
-// not shifted. The first bucket is therefore widened to its grid boundary (it
-// includes the pre-`from` slice, which carries no in-window data).
+// not shifted.
+//
+// The first bucket's TIMESTAMP therefore precedes `from`, but its VALUE does not
+// cover the pre-`from` slice (issues #27, #29). Both value paths hold the head to
+// win.Start, symmetrically with the tail clip at win.Stop, though by different
+// means: bucketHours clips the power path's bucket length, while the counter
+// path's query is anchored at win.Start by increase() so its bucket 0 cannot
+// describe anything earlier. Bucket 0 is a partial bucket labelled by the grid
+// boundary it starts on, exactly as the last bucket is a partial bucket ending at
+// win.Stop.
 //
 // Flux parity (anchoring): Influx's location-aware aggregateWindow anchors
 // windows to local midnight in the configured location and handles DST by
@@ -234,26 +242,40 @@ func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 	return out
 }
 
-// bucketHours returns, for each bucket i, the real wall-clock length of that
-// bucket in hours: buckets[i+1]-buckets[i] for interior buckets, and
-// win.Stop-buckets[last] for the final (possibly partial) bucket. This is what
-// the UPS energy conversion (mean watts × hours / 1000) must use, because a
-// calendar-day bucket spanning a DST change is 23h or 25h, and a period-to-date
-// final bucket ends at "now", not on a boundary.
-func bucketHours(buckets []time.Time, stop time.Time) []float64 {
+// bucketHours returns, for each bucket i, the wall-clock length in hours of the
+// part of that bucket that lies INSIDE the window — clipped at BOTH ends:
+//
+//   - bucket 0 starts at win.Start, not at its grid boundary. The axis snaps
+//     that boundary DOWN below win.Start on purpose (issue #1, see BucketStarts),
+//     so the first bucket's grid interval can begin before the window does; the
+//     part before win.Start is not the caller's window and must not be billed.
+//   - the final bucket ends at win.Stop, which for a period-to-date window is
+//     "now" rather than a boundary.
+//
+// Either edge can therefore be partial, and a window contained entirely within
+// one grid interval is partial at both. Interior buckets are their full
+// wall-clock length, which is not the same as iv.Duration: a calendar-day bucket
+// spanning a DST change is 23h or 25h.
+//
+// This is what the UPS energy conversion (mean watts × hours / 1000) must use.
+// The head clip is load-bearing there: aggregateWindow computes bucket 0's mean
+// over the samples inside the QUERY RANGE, which begins at win.Start, so a mean
+// measured over one minute would otherwise be scaled across a whole 30-minute
+// interval (issue #27).
+func bucketHours(buckets []time.Time, start, stop time.Time) []float64 {
 	hrs := make([]float64, len(buckets))
 	for i := range buckets {
-		var end time.Time
+		from := buckets[i]
+		if from.Before(start) {
+			from = start
+		}
+		to := stop
 		if i+1 < len(buckets) {
-			end = buckets[i+1]
-		} else {
-			end = stop
+			to = buckets[i+1]
 		}
-		h := end.Sub(buckets[i]).Hours()
-		if h < 0 {
-			h = 0
+		if h := to.Sub(from).Hours(); h > 0 {
+			hrs[i] = h
 		}
-		hrs[i] = h
 	}
 	return hrs
 }
@@ -641,8 +663,10 @@ func withUnmonitoredCatchAll(
 // would clamp to 0 — reporting "0 W" for a series consuming real energy (the
 // avg_w=0 bug, docs/bug-unmonitored-avg-w.md) — and would disagree with the
 // published kwh anyway, mirroring the C9 reasoning for cost. Using the actual
-// bucket_hours keeps a partial first/last bucket correctly scaled. monitored may
-// be nil (no monitored devices ⇒ the whole meter is unmonitored).
+// bucket_hours keeps a partial first OR last bucket correctly scaled: BOTH edges
+// are clipped to the window (issue #27), so bucket 0's residual energy is divided
+// by the hours it actually covers rather than by its full grid interval.
+// monitored may be nil (no monitored devices ⇒ the whole meter is unmonitored).
 //
 // Because meter and monitored carry already-rounded per-bucket values, the
 // visible invariant monitored.kwh + unmonitored.kwh == meter.kwh holds exactly at
@@ -895,7 +919,8 @@ func sortedDeviceIDs(devices map[string]config.DeviceConfig) []string {
 // BuildSeries is the orchestrator: it runs ~3 Influx queries (counter energy for
 // the counter set incl. meter; UPS mean-power→energy for the ups set; mean-power
 // for ALL metered devices), demuxes the bucketed rows onto the canonical axis
-// (dropping pad buckets), and calls AssembleSeries.
+// and calls AssembleSeries. The query count is three regardless of window
+// alignment or device count.
 //
 // The query count is independent of device count: each builder fans out across
 // a device set via contains(set: [...]). bucket is the Influx bucket name; win
@@ -921,7 +946,7 @@ func BuildSeries(
 	}
 	buckets := BucketStarts(win, iv, loc)
 	idx := bucketIndex(buckets)
-	hrs := bucketHours(buckets, win.Stop)
+	hrs := bucketHours(buckets, win.Start, win.Stop)
 	tz := loc.String()
 
 	// Partition the metered inventory.
@@ -950,7 +975,10 @@ func BuildSeries(
 		if err != nil {
 			return SeriesResponse{}, err
 		}
-		demux(rows, idx, energyByDevice, len(buckets), func(v float64, _ int) float64 { return v })
+		// The counter series returns each bucket's CLOSING RUNNING TOTAL measured
+		// from the window start, not a per-bucket delta: the differencing happens
+		// here so a reading gap is explicit rather than smeared (issue #29).
+		demuxCounterTotals(rows, idx, energyByDevice, len(buckets))
 	}
 
 	// Query 2: UPS mean-power → energy (mean W × bucket-hours / 1000).
@@ -1040,7 +1068,10 @@ func resolveGroupBy(groupBy string) string {
 // its position. Influx returns each bucket's right-edge stop time from
 // aggregateWindow, but we key on the LEFT edge; demux resolves a row's time to
 // the bucket whose [start,next) it falls in via the index of exact starts, and
-// falls back to the containing bucket for non-exact stamps.
+// falls back to the containing bucket for non-exact stamps — which is not a rare
+// path: aggregateWindow truncates its first window to the range, so an off-grid
+// `from` yields a first row stamped at `from` itself rather than at the grid
+// boundary the axis uses.
 func bucketIndex(buckets []time.Time) map[int64]int {
 	m := make(map[int64]int, len(buckets))
 	for i, b := range buckets {
@@ -1051,25 +1082,23 @@ func bucketIndex(buckets []time.Time) map[int64]int {
 
 // demux folds bucketed rows onto the canonical axis. Each row carries a
 // DeviceID, a Time and a Value; conv maps (value, bucketIndex) → the stored
-// quantity (identity for energy/power, mean→energy for UPS). Rows whose time is
-// before the first bucket (pad buckets) or after the last are dropped. A row
-// landing on a bucket SUMS into that bucket (aggregateWindow yields one row per
-// bucket per device, so this is normally an assignment; summing is just safe).
+// quantity (identity for power, mean→energy for UPS). Rows whose time falls
+// outside the axis are dropped. A row landing on a bucket SUMS into that bucket
+// (aggregateWindow yields one row per bucket per device, so this is normally an
+// assignment; summing is just safe).
+//
+// This serves the two POWER queries only. The counter series carries running
+// totals rather than per-bucket quantities and is folded by demuxCounterTotals.
 func demux(rows []influx.Row, idx map[int64]int, dst map[string][]float64, n int, conv func(float64, int) float64) {
 	if n == 0 {
 		return
 	}
-	// Build a sorted bucket-start list once for containment fallback.
-	starts := make([]int64, 0, len(idx))
-	for k := range idx {
-		starts = append(starts, k)
-	}
-	sort.Slice(starts, func(a, b int) bool { return starts[a] < starts[b] })
+	starts := sortedBucketStarts(idx)
 
 	for _, r := range rows {
 		i := resolveBucket(r.Time, idx, starts)
 		if i < 0 {
-			continue // pad bucket / outside window
+			continue // outside the window
 		}
 		arr := dst[r.DeviceID]
 		if arr == nil {
@@ -1077,6 +1106,97 @@ func demux(rows []influx.Row, idx map[int64]int, dst map[string][]float64, n int
 			dst[r.DeviceID] = arr
 		}
 		arr[i] += conv(r.Value, i)
+	}
+}
+
+// sortedBucketStarts returns the bucket-start keys ascending, for
+// resolveBucket's containment fallback.
+func sortedBucketStarts(idx map[int64]int) []int64 {
+	starts := make([]int64, 0, len(idx))
+	for k := range idx {
+		starts = append(starts, k)
+	}
+	sort.Slice(starts, func(a, b int) bool { return starts[a] < starts[b] })
+	return starts
+}
+
+// demuxCounterTotals folds the counter series' per-bucket CLOSING RUNNING TOTALS
+// onto the canonical axis and differences them here, in Go, rather than in Flux.
+//
+// Each row is "energy this device had accumulated by the end of this bucket,
+// measured from the window start" (see influx.BuildCounterSeriesFlux). A bucket
+// is worth the rise since the last bucket that CLOSED — not since the previous
+// bucket index — so the running total is carried across buckets the device did
+// not report in. Those buckets are worth 0, and the next real reading picks up
+// everything that accrued meanwhile.
+//
+// That carry is the whole point (issue #29). Flux's difference() could not do it:
+// it needs a prior window to subtract against, which the old design bought by
+// padding the range before the window — anchoring the series at a reading taken
+// BEFORE `from`, and, when the pad was empty, spending a real in-window bucket as
+// the seed instead. Anchoring at `from` makes the series' total identical to
+// BuildCounterFlux's reduction over the same range, so /series and
+// /devices/{id}/energy agree by definition.
+//
+// A device with no rows at all gets no entry, which AssembleSeries reads as
+// all-zero — correct for a device that reported nothing inside the window.
+//
+// Note the deliberate asymmetry with DeviceWindowKWh, which SUMS the rows it gets
+// ("disjoint accumulations, so they add"). Both are right for the one table per
+// device that regroupByDevice guarantees. They differ in how they would fail if
+// that guarantee lapsed — as it did when the location→site migration fragmented
+// every series mid-window (issue #17): summing running totals would multiply the
+// answer, so last-wins is the safer reading here, while summing is the safer one
+// there. Neither should be "harmonised" into the other without restoring the
+// guarantee first.
+func demuxCounterTotals(rows []influx.Row, idx map[int64]int, dst map[string][]float64, n int) {
+	if n == 0 {
+		return
+	}
+	starts := sortedBucketStarts(idx)
+
+	// The closing total per (device, bucket). aggregateWindow yields one row per
+	// bucket per device, but resolve defensively: the LAST row to land in a
+	// bucket is the one that closes it.
+	type bucketClose struct {
+		at  time.Time
+		val float64
+	}
+	closes := make(map[string]map[int]bucketClose)
+	for _, r := range rows {
+		i := resolveBucket(r.Time, idx, starts)
+		if i < 0 {
+			continue // outside the window
+		}
+		per := closes[r.DeviceID]
+		if per == nil {
+			per = make(map[int]bucketClose)
+			closes[r.DeviceID] = per
+		}
+		if prev, seen := per[i]; !seen || !r.Time.Before(prev.at) {
+			per[i] = bucketClose{at: r.Time, val: r.Value}
+		}
+	}
+
+	for id, per := range closes {
+		arr := dst[id]
+		if arr == nil {
+			arr = make([]float64, n)
+			dst[id] = arr
+		}
+		var running float64
+		for i := 0; i < n; i++ {
+			c, closed := per[i]
+			if !closed {
+				continue // no reading: carry `running` forward, this bucket is 0
+			}
+			// increase() is monotonic, so a fall should be impossible; clamp
+			// rather than publish negative energy, and still advance the anchor.
+			if d := c.val - running; d > 0 {
+				arr[i] += d
+			}
+			running = c.val
+		}
 	}
 }
 
