@@ -612,10 +612,11 @@ func (s *Server) handleUnmonitoredSeries(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Keep only the unmonitored series and present it as a device-shaped response.
-	resp.Series = energy.OnlySeries(resp.Series, energy.UnmonitoredID)
-	resp.GroupBy = energy.GroupByDevice
-	writeSingleSeries(w, shape, resp, energy.UnmonitoredID)
+	// Present the house build as a device-shaped response: one series, group_by
+	// device, and none of the house-only signals the build attached on the way
+	// through. AsSingleDevice does all three together on purpose — doing only the
+	// first two is issue #23.
+	writeSingleSeries(w, shape, resp.AsSingleDevice(energy.UnmonitoredID), energy.UnmonitoredID)
 }
 
 // handleBill serves GET /bill. It queries every billable device (metered,

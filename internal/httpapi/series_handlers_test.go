@@ -1130,3 +1130,71 @@ func TestWriteSingleSeries_RejectsAnythingButOneSeries(t *testing.T) {
 		})
 	}
 }
+
+// --- issue #23: the synthetic device must be device-SHAPED, not just relabelled ---
+
+// houseOnlyKeys are the confidence signals SeriesResponse.HouseStats documents as
+// populated for group_by=house only.
+var houseOnlyKeys = []string{"coverage", "stale_monitored_count", "stale_monitored_ids"}
+
+// R3.1 requires /devices/unmonitored/series to return the SAME response schema as
+// a real device's, so a client can plot it "with zero client branching" (G2).
+// Three extra keys is a different schema.
+//
+// The handler builds group_by=house (the only grouping that can derive
+// unmonitored at all) and then rewrote group_by to "device" — but HouseStats is
+// embedded in the response and survived, so the body announced itself as
+// device-grouped while carrying the house-only signals.
+func TestUnmonitoredDeviceSeries_HasNoHouseOnlyFields(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0} // network-ups silent → stale, so the fields are non-nil on the house build
+	s := seriesSetup(t, energyPer, powerPer)
+
+	for _, shape := range []string{"", "&shape=rows"} {
+		w := doGET(t, s, "/devices/unmonitored/series?window=today"+shape)
+		if w.Code != http.StatusOK {
+			t.Fatalf("shape %q: want 200, got %d: %s", shape, w.Code, w.Body.String())
+		}
+		body := decode(t, w)
+		if body["group_by"] != "device" {
+			t.Fatalf("shape %q: group_by = %v, want device", shape, body["group_by"])
+		}
+		for _, k := range houseOnlyKeys {
+			if v, present := body[k]; present {
+				t.Errorf("shape %q: body carries house-only %q = %v; a device-grouped response must not (issue #23)",
+					shape, k, v)
+			}
+		}
+	}
+}
+
+// The control: a real device's response has never carried them, and must not
+// start. Same assertion, so a fix that reached for the wrong lever fails here.
+func TestDeviceSeries_HasNoHouseOnlyFields(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0}
+	s := seriesSetup(t, energyPer, powerPer)
+
+	body := decode(t, doGET(t, s, "/devices/winefridge/series?window=today"))
+	for _, k := range houseOnlyKeys {
+		if v, present := body[k]; present {
+			t.Errorf("real device body carries house-only %q = %v", k, v)
+		}
+	}
+}
+
+// The other control, and the reason this is a reshape rather than a deletion:
+// the signals still belong on group_by=house, which is where they are documented
+// and where a consumer who wants unmonitored WITH its confidence should look.
+func TestHouseGroupingStillCarriesHouseOnlyFields(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0} // network-ups silent → stale
+	s := seriesSetup(t, energyPer, powerPer)
+
+	body := decode(t, doGET(t, s, "/series?window=today&group_by=house"))
+	for _, k := range houseOnlyKeys {
+		if _, present := body[k]; !present {
+			t.Errorf("group_by=house lost house-only %q — the fix removed a signal instead of reshaping a response", k)
+		}
+	}
+}
