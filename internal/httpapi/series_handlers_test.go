@@ -56,11 +56,17 @@ func decodeSeries(t *testing.T, w *httptest.ResponseRecorder) seriesResp {
 // keyed on the Flux field and the device set. `per` maps device_id → the
 // per-bucket quantity that device should end up reporting, in every bucket.
 //
-// The two series queries have different row semantics and this reproduces both:
-// the power_w mean is per-bucket and self-contained, while the energy_kwh counter
-// carries each bucket's closing RUNNING TOTAL since the window start, which the
-// energy layer differences (energy.demuxCounterTotals). So a counter device's
-// rows accumulate `per` across the axis while a power device's repeat it.
+// The three series queries have different row semantics and this reproduces all
+// of them. `per` is read as kWh-per-bucket for the counter map and as WATTS for
+// the power map, which is what the call sites express:
+//
+//   - energy_kwh + aggregateWindow — the counter series: each bucket's closing
+//     RUNNING TOTAL since the window start, which the energy layer differences
+//     (energy.demuxCounterTotals). Rows accumulate `per` across the axis.
+//   - power_w + aggregateWindow + integral — the UPS energy series (issue #32):
+//     already kWh for that bucket, so watts × the bucket's hours / 1000.
+//   - power_w + aggregateWindow + mean — the avg_w series: watts, per-bucket and
+//     self-contained, so the value repeats.
 //
 // The series builders fan out across a device SET (contains(..., set: [...])),
 // so we look at which device ids appear in the flux and emit rows only for those
@@ -69,6 +75,9 @@ func seriesFakeQuerier(buckets []time.Time, energyPer, powerPer map[string]float
 	q := &influx.FakeQuerier{PingOK: true}
 	q.QueryFunc = func(flux string) ([]influx.Row, error) {
 		isCounter := strings.Contains(flux, `r._field == "energy_kwh"`)
+		// The UPS energy series is power_w reduced by integral() rather than by
+		// mean(), so its rows are kWh where the avg_w series' are watts.
+		isUPSEnergy := !isCounter && strings.Contains(flux, "integral(")
 		per := powerPer
 		if isCounter {
 			per = energyPer
@@ -107,8 +116,11 @@ func seriesFakeQuerier(buckets []time.Time, energyPer, powerPer map[string]float
 				// happens in Go — see energy.demuxCounterTotals), so accumulate.
 				// The power mean is per-bucket and self-contained.
 				val := v
-				if isCounter {
+				switch {
+				case isCounter:
 					val = v * float64(i+1)
+				case isUPSEnergy:
+					val = v * fixtureBucketHours(buckets, i) / 1000.0
 				}
 				rows = append(rows, influx.Row{DeviceID: id, Time: buckets[i], Value: val})
 			}
@@ -116,6 +128,20 @@ func seriesFakeQuerier(buckets []time.Time, energyPer, powerPer map[string]float
 		return rows, nil
 	}
 	return q
+}
+
+// fixtureBucketHours is the wall-clock length of bucket i on a fixture axis, used
+// to turn a steady wattage into the per-bucket kWh the UPS energy query returns.
+// The final bucket reuses the previous step: every fixture axis here is a whole
+// number of full buckets, so there is no partial tail to model.
+func fixtureBucketHours(buckets []time.Time, i int) float64 {
+	if len(buckets) < 2 {
+		return 1
+	}
+	if i+1 < len(buckets) {
+		return buckets[i+1].Sub(buckets[i]).Hours()
+	}
+	return buckets[i].Sub(buckets[i-1]).Hours()
 }
 
 // todayHourBuckets returns the canonical 1h bucket axis the dataSetup clock

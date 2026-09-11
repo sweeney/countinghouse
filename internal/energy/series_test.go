@@ -569,20 +569,20 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.09, Time: buckets[1]},
 		{DeviceID: "winefridge", Field: "energy_kwh", Value: 0.15, Time: buckets[2]},
 	}
-	// UPS power rows (mean W): energy = mean × 1h / 1000.
-	upsPowerRows := []influx.Row{
-		{DeviceID: "network-ups", Field: "power_w", Value: 120, Time: buckets[0]}, // 0.12 kWh
-		{DeviceID: "network-ups", Field: "power_w", Value: 100, Time: buckets[1]}, // 0.10 kWh
-		{DeviceID: "network-ups", Field: "power_w", Value: 80, Time: buckets[2]},  // 0.08 kWh
+	// UPS ENERGY rows: already kWh per bucket, because the UPS series integrates
+	// power_w rather than averaging it (issue #32). A steady 120/100/80 W over
+	// these 1h buckets integrates to 0.12/0.10/0.08 kWh.
+	upsEnergyRows := []influx.Row{
+		{DeviceID: "network-ups", Field: "power_w", Value: 0.12, Time: buckets[0]},
+		{DeviceID: "network-ups", Field: "power_w", Value: 0.10, Time: buckets[1]},
+		{DeviceID: "network-ups", Field: "power_w", Value: 0.08, Time: buckets[2]},
 	}
-	// avg power rows for ALL metered (both devices).
-	allPowerRows := []influx.Row{
+	// avg power rows for the COUNTER devices. The UPS is absent by design: its
+	// avg_w is energy-derived from its own integral, not separately averaged.
+	counterPowerRows := []influx.Row{
 		{DeviceID: "winefridge", Field: "power_w", Value: 50, Time: buckets[0]},
 		{DeviceID: "winefridge", Field: "power_w", Value: 40, Time: buckets[1]},
 		{DeviceID: "winefridge", Field: "power_w", Value: 60, Time: buckets[2]},
-		{DeviceID: "network-ups", Field: "power_w", Value: 120, Time: buckets[0]},
-		{DeviceID: "network-ups", Field: "power_w", Value: 100, Time: buckets[1]},
-		{DeviceID: "network-ups", Field: "power_w", Value: 80, Time: buckets[2]},
 	}
 
 	q := &influx.FakeQuerier{
@@ -590,10 +590,10 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 			switch {
 			case strings.Contains(flux, "energy_kwh"):
 				return counterRows, nil
-			case strings.Contains(flux, "power_w") && strings.Contains(flux, `"network-ups"`) && !strings.Contains(flux, `"winefridge"`):
-				return upsPowerRows, nil
+			case strings.Contains(flux, "power_w") && strings.Contains(flux, "integral("):
+				return upsEnergyRows, nil
 			case strings.Contains(flux, "power_w"):
-				return allPowerRows, nil
+				return counterPowerRows, nil
 			}
 			return nil, nil
 		},
@@ -634,12 +634,14 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 	}
 
 	ups := byKey["network-ups"]
-	// UPS energy = mean × hours / 1000: 0.12, 0.10, 0.08.
+	// UPS energy is the integral query's kWh, folded through unchanged.
 	if ups.KWh[0] != 0.12 || ups.KWh[1] != 0.1 || ups.KWh[2] != 0.08 {
 		t.Errorf("ups kwh = %v, want [0.12 0.1 0.08]", ups.KWh)
 	}
-	if ups.AvgW[0] != 120 {
-		t.Errorf("ups avg_w[0] = %v, want 120", ups.AvgW[0])
+	// avg_w is derived back out of that energy over the bucket's real hours, so
+	// it agrees with the kwh beside it by construction rather than by fixture.
+	if ups.AvgW[0] != 120 || ups.AvgW[1] != 100 || ups.AvgW[2] != 80 {
+		t.Errorf("ups avg_w = %v, want [120 100 80] (energy-derived)", ups.AvgW)
 	}
 }
 
@@ -853,8 +855,11 @@ func TestBuildSeriesDefaultGroupByReported(t *testing.T) {
 	}
 }
 
-// bucketHours: the final period-to-date bucket is partial; UPS energy must use
-// the real hours.
+// The final period-to-date bucket is partial. Since issue #32 the UPS energy
+// series is an integral over the query range, so Influx clips that bucket itself
+// — the range simply stops at win.Stop. What bucketHours still owns is avg_w,
+// which is energy-derived: divide the partial bucket's energy by a FULL hour and
+// a UPS holding a steady 100 W reads 50 W.
 func TestBuildSeriesUPSPartialFinalBucket(t *testing.T) {
 	loc := mustLondon(t)
 	start := time.Date(2026, 6, 11, 0, 0, 0, 0, loc)
@@ -870,29 +875,25 @@ func TestBuildSeriesUPSPartialFinalBucket(t *testing.T) {
 	devices := map[string]config.DeviceConfig{
 		"network-ups": {Class: "ups_sensor", DisplayName: "UPS"},
 	}
-	upsPowerRows := []influx.Row{
-		{DeviceID: "network-ups", Field: "power_w", Value: 100, Time: buckets[0]},
-		{DeviceID: "network-ups", Field: "power_w", Value: 100, Time: buckets[1]},
-		{DeviceID: "network-ups", Field: "power_w", Value: 100, Time: buckets[2]},
-	}
-	q := &influx.FakeQuerier{
-		QueryFunc: func(flux string) ([]influx.Row, error) {
-			if strings.Contains(flux, "power_w") {
-				return upsPowerRows, nil
-			}
-			return nil, nil
-		},
-	}
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+	sim := influx.NewPowerSim(loc).AddSteady("network-ups", start, stop, time.Minute, 100)
+
+	resp, err := BuildSeries(context.Background(), &influx.FakeQuerier{QueryFunc: sim.Answer},
+		"statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
 	ups := resp.Series[0]
-	// Hours 0 and 1 are full (0.1 kWh each); the final bucket is 0.5h → 0.05.
+	// Hours 0 and 1 are full (0.1 kWh each); the final bucket is 0.5h -> 0.05.
 	if ups.KWh[0] != 0.1 || ups.KWh[1] != 0.1 {
-		t.Errorf("full-bucket ups kwh = %v", ups.KWh[:2])
+		t.Errorf("full-bucket ups kwh = %v, want [0.1 0.1]", ups.KWh[:2])
 	}
 	if ups.KWh[2] != 0.05 {
 		t.Errorf("partial final bucket ups kwh = %v, want 0.05", ups.KWh[2])
+	}
+	// The load never changed, so every bucket — partial included — must report it.
+	for i, w := range ups.AvgW {
+		if w != 100 {
+			t.Errorf("ups avg_w[%d] = %v, want 100 (a steady load, scaled by the hours the bucket really covers)", i, w)
+		}
 	}
 }

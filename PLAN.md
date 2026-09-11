@@ -325,8 +325,8 @@ for stacking). `createEmpty:true`.
 
 **Influx (~3 queries, device-count-independent):**
 1. Counter energy (plug+meter): `energy_kwh |> increase() |> aggregateWindow(every:dt,last,location,createEmpty:false)` over the EXACT window — each bucket's closing running total, measured from `from` (`increase()` first = reset-safe). Go differences along the axis, carrying the total across buckets with no readings. No pad: padding anchored the series at a reading taken before `from`, and an empty pad spent a real in-window bucket as `difference()`'s seed (issues #27, #29). Anchoring at `from` makes the total identical to the `/devices/{id}/energy` reduction by definition.
-2. UPS energy: `power_w |> aggregateWindow(every:dt,mean,location)` × bucket-hours / 1000, where bucket-hours is clipped to the window at BOTH ends.
-3. Avg power (all): `power_w |> aggregateWindow(every:dt,mean,location)`.
+2. UPS energy: `power_w |> aggregateWindow(every:dt, fn: integral(unit:1h,interpolate:"linear"), location, createEmpty:false) |> map(/1000)` — the SAME reduction `/devices/{id}/energy` applies to the whole window, just per bucket, so the two estimate one integral the same way (issue #32). Influx clips the first and last buckets itself, since the range is the exact window. A bucket with no sample is omitted, not zeroed. UPS `avg_w` is energy-derived from this (`kwh × 1000 / bucket-hours`, C8), so the UPS is absent from query 3.
+3. Avg power (counter devices): `power_w |> aggregateWindow(every:dt,mean,location)`. `createEmpty:true` keeps the axis dense, but the nulls it emits are flagged (`Row.Null`) and dropped rather than folded as 0 W — which is what lets C13 staleness see a device that reported nothing.
 Cost derived in Go. Rounding via `roundTo` (kWh 3dp, cost 4dp, W 1dp).
 
 ## B. Binary / event timeline
