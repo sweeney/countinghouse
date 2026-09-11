@@ -52,7 +52,7 @@ type SiteConfig struct {
 	// config that leaves it unset.
 	DevicesNamespace string `yaml:"devices_namespace"`
 
-	// AgreementsNamespace names this site's dated-tariff namespace (conventionally
+	// EnergyAgreementsNamespace names this site's dated-tariff namespace (conventionally
 	// "energy_agreements"). It sits here, beside the other two per-property
 	// pointers, because a tariff is a property of the SITE — a second property is
 	// generally on a different tariff, in a different region, at different rates.
@@ -67,7 +67,7 @@ type SiteConfig struct {
 	// required: per the cold-start rule, naming one that has never been fetched
 	// aborts startup rather than silently falling back to the legacy rate, because
 	// falling back would price a half-hourly tariff at a flat number.
-	AgreementsNamespace string `yaml:"agreements_namespace"`
+	EnergyAgreementsNamespace string `yaml:"energy_agreements_namespace"`
 
 	// FloorplanNamespace is the config namespace holding this site's floor and room
 	// records — the same document greenhouse reads, published by /floors and /rooms
@@ -243,14 +243,27 @@ func Load(path string) (Config, error) {
 		}
 	}
 	cfg.warnings = siteWarnings(cfg.Site)
-	// Devices first: it is the namespace that decides whether any answer is right at
-	// all, so an operator fixing one key at a time is sent to that one before the
-	// namespace that only decides what things are called.
-	if err := requireDevicesNamespace(cfg.Site); err != nil {
-		return cfg, err
-	}
-	if err := requireFloorplanNamespace(cfg.Site); err != nil {
-		return cfg, err
+
+	// The namespace pointers are normally supplied by the shared `sites` document,
+	// so they cannot be required HERE when there is a config service to resolve
+	// them from — requiring both would force every operator to duplicate what
+	// `sites` already says, which is the drift this design removes.
+	//
+	// The requirement has not gone away, it has moved: ResolveSiteNamespaces
+	// refuses when NEITHER source supplies them, which is the condition that
+	// actually matters. Without a config service, though, local config is the only
+	// source, so the check still belongs at load — and still fires before the
+	// service can serve zero devices or ids-where-names-belong.
+	if cfg.RemoteConfig.BaseURL == "" {
+		// Devices first: it is the namespace that decides whether any answer is
+		// right at all, so an operator fixing one key at a time is sent to that one
+		// before the namespace that only decides what things are called.
+		if err := requireDevicesNamespace(cfg.Site); err != nil {
+			return cfg, err
+		}
+		if err := requireFloorplanNamespace(cfg.Site); err != nil {
+			return cfg, err
+		}
 	}
 	return cfg, nil
 }

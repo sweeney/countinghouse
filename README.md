@@ -463,14 +463,37 @@ and it cannot express a half-hourly tariff at all.
 
 Migration is opt-in via one local-config key:
 
-```yaml
-site:
-  agreements_namespace: "energy_agreements"
+Add `energy_agreements_namespace` to this site's entry in the shared **`sites`** namespace,
+alongside the pointers that already live there:
+
+```json
+{ "sites": [ {
+    "id": "home",
+    "devices_namespace": "devices_home",
+    "floorplan_namespace": "floorplan_home",
+    "energy_agreements_namespace": "energy_agreements"
+} ] }
 ```
 
-It lives in the `site:` block beside `devices_namespace` and `floorplan_namespace`, because a
-tariff is a property of the site: a second property is generally on a different tariff, in a
-different region, at different rates.
+A tariff is a property of the site — a second property is generally on a different tariff, in
+a different region, at different rates — so it belongs with the other per-site pointers rather
+than in each service's local config.
+
+**Startup is two-phase** as a result: `sites` is read first to learn which namespaces this
+property uses, then those namespaces are fetched. That makes `sites` boot-critical in a way
+the others are not — until it has been read there is nothing to fail open *onto*, because we
+could not even name what is missing. A failure there aborts, consistent with the cold-start
+rule.
+
+Local `site:` keys remain as a **fallback** for a site whose `sites` entry is not filled in
+yet, and for local development with no config service at all. Where both are set, **`sites`
+wins and a warning names both** — a stale local pointer silently overriding the correct remote
+one is exactly the drift this arrangement removes, but an operator's edit must not be ignored
+without a word.
+
+Pointers are resolved **once, at startup**. A later SIGHUP reports a change but does not adopt
+it: repointing a running service at another property's data would swap the device inventory
+underneath every in-flight answer, so that needs an explicit restart.
 
 Unset, the legacy document is authoritative. Set, the new one is — and the legacy
 document is not even fetched. **The two are never merged:** two documents disagreeing

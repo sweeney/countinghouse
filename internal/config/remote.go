@@ -65,10 +65,15 @@ type Fetcher struct {
 	// exactly as the devices fetch handles the same mistake.
 	FloorplanNamespace string
 
-	// AgreementsNamespace names the dated-tariff namespace. When empty the legacy
+	// EnergyAgreementsNamespace names the dated-tariff namespace. When empty the legacy
 	// energy_tariffs document is authoritative; when set, IT is, and the legacy
 	// document is not fetched at all. Never merged — see RemoteConfigConfig.
-	AgreementsNamespace string
+	EnergyAgreementsNamespace string
+
+	// resolved records the namespaces settled at startup, and the site they were
+	// settled for, so a later refresh can report DRIFT without adopting it.
+	resolved   SiteNamespaces
+	resolvedID string
 
 	mu         sync.RWMutex
 	devices    map[string]DeviceConfig
@@ -97,6 +102,85 @@ const maxConfigBytes = 1 << 20 // 1 MiB
 // The devices namespace is per-site and comes from config — see DevicesNamespace.
 const nsTariffs = "energy_tariffs"
 
+// nsSites is the shared per-site document. It is BOOT-CRITICAL in a way the others
+// are not: it names which namespaces to read, so without it there is nothing to
+// fail open onto — we could not even say what we are missing.
+const nsSites = "sites"
+
+// ResolveNamespaces fetches the shared `sites` document and settles which
+// namespaces this instance will read, writing them onto the Fetcher.
+//
+// This is phase one of a two-phase bootstrap: until `sites` has been read we
+// cannot name the other namespaces, so there is no meaningful fail-open here —
+// falling open would mean reading some other property's data, or none. A failure
+// is therefore an error for the caller to abort on, consistent with the
+// cold-start rule everywhere else.
+//
+// Local config is the fallback and `sites` wins a disagreement; see
+// ResolveSiteNamespaces for why that direction, and for the warnings returned.
+//
+// With no BaseURL configured nothing is fetched and local config stands alone,
+// which is what keeps local development working.
+func (f *Fetcher) ResolveNamespaces(ctx context.Context, local SiteConfig) ([]string, error) {
+	var sites Sites
+
+	if f.BaseURL != "" {
+		token, err := f.Tokens.Token(ctx)
+		if err != nil {
+			f.recordStatus(nsSites, err)
+			return nil, fmt.Errorf("config: cannot resolve site namespaces: identity token: %w", err)
+		}
+		if err := f.fetch(ctx, token, nsSites, &sites); err != nil {
+			f.recordStatus(nsSites, err)
+			return nil, fmt.Errorf("config: cannot resolve site namespaces: fetching %q: %w", nsSites, err)
+		}
+		f.recordStatus(nsSites, nil)
+	}
+
+	resolved, warns, err := ResolveSiteNamespaces(local, sites)
+	if err != nil {
+		return warns, err
+	}
+
+	f.DevicesNamespace = resolved.Devices
+	f.FloorplanNamespace = resolved.Floorplan
+	f.EnergyAgreementsNamespace = resolved.Agreements
+
+	f.mu.Lock()
+	f.resolved, f.resolvedID = resolved, local.ID
+	f.mu.Unlock()
+
+	return warns, nil
+}
+
+// SiteNamespaceDrift re-reads `sites` and reports pointers that have changed since
+// startup, WITHOUT adopting them.
+//
+// Repointing a running service at a different property's data is not something to
+// do silently: the device inventory would swap underneath every in-flight answer.
+// So a change is reported for an explicit restart, which is cheap. Returns nothing
+// when there is no remote config to compare against.
+func (f *Fetcher) SiteNamespaceDrift(ctx context.Context) []string {
+	if f.BaseURL == "" {
+		return nil
+	}
+	token, err := f.Tokens.Token(ctx)
+	if err != nil {
+		return nil
+	}
+	var sites Sites
+	if err := f.fetch(ctx, token, nsSites, &sites); err != nil {
+		return nil
+	}
+	f.mu.RLock()
+	resolved, id := f.resolved, f.resolvedID
+	f.mu.RUnlock()
+	if id == "" {
+		return nil
+	}
+	return resolved.DriftFrom(sites, id)
+}
+
 // Devices returns a copy of the current devices snapshot keyed by
 // device_id. Safe for concurrent use. Implements httpapi.ConfigProvider.
 func (f *Fetcher) Devices() map[string]DeviceConfig {
@@ -119,7 +203,7 @@ func (f *Fetcher) Devices() map[string]DeviceConfig {
 func (f *Fetcher) Tariffs() TariffSource {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	if f.AgreementsNamespace != "" {
+	if f.EnergyAgreementsNamespace != "" {
 		return f.agreements
 	}
 	return f.tariffs
@@ -132,7 +216,7 @@ func (f *Fetcher) Tariffs() TariffSource {
 func (f *Fetcher) Agreements() EnergyAgreements {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	if f.AgreementsNamespace != "" {
+	if f.EnergyAgreementsNamespace != "" {
 		return f.agreements
 	}
 	return f.tariffs.AsAgreements()
@@ -142,8 +226,8 @@ func (f *Fetcher) Agreements() EnergyAgreements {
 // /tariffs. Which document priced a bill is not something anybody should have to
 // deduce from the shape of the answer.
 func (f *Fetcher) TariffNamespace() string {
-	if f.AgreementsNamespace != "" {
-		return f.AgreementsNamespace
+	if f.EnergyAgreementsNamespace != "" {
+		return f.EnergyAgreementsNamespace
 	}
 	return nsTariffs
 }
@@ -219,8 +303,8 @@ func (f *Fetcher) Cold() []string {
 // an operator could act on.
 func (f *Fetcher) configuredNamespaces() []string {
 	out := []string{}
-	if f.AgreementsNamespace != "" {
-		out = append(out, f.AgreementsNamespace)
+	if f.EnergyAgreementsNamespace != "" {
+		out = append(out, f.EnergyAgreementsNamespace)
 	} else {
 		out = append(out, nsTariffs)
 	}
@@ -229,6 +313,14 @@ func (f *Fetcher) configuredNamespaces() []string {
 	}
 	if f.FloorplanNamespace != "" {
 		out = append(out, f.FloorplanNamespace)
+	}
+	// sites is included once it has been resolved from: it is how the others were
+	// named, so a cold sites namespace means we never knew what to read.
+	f.mu.RLock()
+	resolvedID := f.resolvedID
+	f.mu.RUnlock()
+	if resolvedID != "" && f.BaseURL != "" {
+		out = append(out, nsSites)
 	}
 	return out
 }
@@ -271,7 +363,7 @@ func (f *Fetcher) Refresh(ctx context.Context) {
 		return
 	}
 	f.refreshDevices(ctx, token)
-	if f.AgreementsNamespace != "" {
+	if f.EnergyAgreementsNamespace != "" {
 		f.refreshAgreements(ctx, token)
 	} else {
 		f.refreshTariffs(ctx, token)
@@ -386,7 +478,7 @@ func (f *Fetcher) refreshTariffs(ctx context.Context, token string) {
 // tariff document would let it price money. With the cold-start rule, boot needs
 // truth and running keeps the last truth.
 func (f *Fetcher) refreshAgreements(ctx context.Context, token string) {
-	ns := f.AgreementsNamespace
+	ns := f.EnergyAgreementsNamespace
 	var agreements EnergyAgreements
 	if err := f.fetch(ctx, token, ns, &agreements); err != nil {
 		f.warn("remote config: agreements namespace unavailable, keeping last-known",

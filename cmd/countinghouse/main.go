@@ -62,14 +62,15 @@ func main() {
 		ClientSecret: cfg.Identity.ClientSecret,
 	}
 	fetcher := &config.Fetcher{
-		BaseURL:            cfg.RemoteConfig.BaseURL,
-		Tokens:             tokens,
-		Logger:             logger,
-		DevicesNamespace:   cfg.Site.DevicesNamespace,
-		FloorplanNamespace: cfg.Site.FloorplanNamespace,
-		// Empty means the legacy energy_tariffs document stays authoritative, so
-		// this binary can be deployed with no config change and behave as before.
-		AgreementsNamespace: cfg.Site.AgreementsNamespace,
+		BaseURL: cfg.RemoteConfig.BaseURL,
+		Tokens:  tokens,
+		Logger:  logger,
+		// The three namespace pointers are NOT set here. They are resolved below
+		// from the shared `sites` document, with these local values as the
+		// fallback — see ResolveNamespaces.
+		DevicesNamespace:          cfg.Site.DevicesNamespace,
+		FloorplanNamespace:        cfg.Site.FloorplanNamespace,
+		EnergyAgreementsNamespace: cfg.Site.EnergyAgreementsNamespace,
 	}
 	if cfg.RemoteConfig.BaseURL == "" {
 		// Explicit local-dev opt-out: nothing is fetched, so the cold check below is
@@ -77,7 +78,28 @@ func main() {
 		// said they expect empty snapshots; one who names it has not.
 		logger.Warn("remote config base_url is empty; serving empty device/tariff/floorplan snapshots")
 	} else {
-		logger.Info("tariff document in force", "namespace", fetcher.TariffNamespace())
+		// PHASE ONE: read `sites` to learn which namespaces this property uses.
+		// Until this succeeds we cannot name the others, so there is nothing to
+		// fail open onto — falling open would mean reading some other property's
+		// data, or none at all. An error here aborts, consistent with the
+		// cold-start rule.
+		resolveCtx, cancelResolve := context.WithTimeout(context.Background(), 10*time.Second)
+		warns, err := fetcher.ResolveNamespaces(resolveCtx, cfg.Site)
+		cancelResolve()
+		for _, w := range warns {
+			logger.Warn("remote config: " + w)
+		}
+		if err != nil {
+			logger.Error("resolving site namespaces", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("site namespaces resolved",
+			"site", cfg.Site.ID,
+			"devices", fetcher.DevicesNamespace,
+			"floorplan", fetcher.FloorplanNamespace,
+			"tariffs", fetcher.TariffNamespace())
+
+		// PHASE TWO: fetch the namespaces just named.
 		logger.Info("refreshing remote config", "url", cfg.RemoteConfig.BaseURL)
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		fetcher.Refresh(refreshCtx)
@@ -211,6 +233,13 @@ func watchSIGHUP(fetcher *config.Fetcher, logger *slog.Logger) {
 	for range ch {
 		logger.Info("SIGHUP: refreshing remote config")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// Namespace pointers are settled at startup and deliberately NOT adopted
+		// here: repointing a running service at a different property's data would
+		// swap the device inventory underneath every in-flight answer. A change is
+		// reported for an explicit restart, which is cheap.
+		for _, d := range fetcher.SiteNamespaceDrift(ctx) {
+			logger.Warn("SIGHUP: site namespaces have drifted", "detail", d)
+		}
 		fetcher.Refresh(ctx)
 		cancel()
 		logger.Info("SIGHUP: remote config refresh complete")

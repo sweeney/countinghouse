@@ -36,25 +36,26 @@
 #                      surfaces days later as a legend reading "floor1.room-c" to a
 #                      human. Declared or refused; there is no quiet middle.
 site:
+  # WHICH property this instance serves. This is the only site key you normally
+  # need: it is a deployment decision, like the listen port.
   id: home
-  devices_namespace: devices_home
-  floorplan_namespace: floorplan_home
 
-  # This site's dated-tariff namespace. Sits here beside the other two because a
-  # tariff is a property of the SITE: a second property is generally on a different
-  # tariff, in a different region, at different rates.
+  # The namespace pointers below are normally supplied by the shared `sites`
+  # namespace in the config service — which already holds them, and which other
+  # services read too. Declaring them here as well is how they DRIFT: rename one in
+  # `sites` and every other service follows while this one quietly keeps reading
+  # the old document.
   #
-  # Leave UNSET to keep using the legacy `energy_tariffs` single-rate document —
-  # that is what makes the migration opt-in, so this binary can be deployed with no
-  # config change at all. Set it to move to dated agreements, which is what a
-  # half-hourly (variable) tariff requires.
+  # So leave them unset. They remain as a FALLBACK for two cases: a site whose
+  # `sites` entry has not been filled in yet, and local development with no config
+  # service at all (remote_config.base_url empty), where they are required because
+  # nothing else can supply them.
   #
-  # The two are never merged: exactly one document is authoritative, and both
-  # /healthz and GET /tariffs report which. When set, the namespace is required — a
-  # named namespace that has never been fetched aborts startup rather than quietly
-  # falling back to the legacy rate, because falling back would price a half-hourly
-  # tariff at a flat number.
-  # agreements_namespace: "energy_agreements"
+  # If you do set one and `sites` disagrees, `sites` wins and a warning names both.
+  #
+  # devices_namespace: devices_home
+  # floorplan_namespace: floorplan_home
+  # energy_agreements_namespace: energy_agreements
 
 # Countinghouse local configuration.
 # Device inventory and tariffs are fetched from the remote config service
