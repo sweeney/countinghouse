@@ -180,3 +180,54 @@ func TestASingleNullBucketDoesNotMakeADeviceStale(t *testing.T) {
 		t.Errorf("avg_w[1] = %v, want 0 — the axis is dense; the honest 'unknown' needs a nullable field", got[1])
 	}
 }
+
+// The counter fold must drop nulls too. demux does; demuxCounterTotals took
+// r.Value unconditionally, which is safe only while BuildCounterSeriesFlux says
+// createEmpty: false — one word away, in a file whose other builder says true.
+//
+// The failure mode is worse than the one the null flag was added for. A null
+// reads as a running total of ZERO, so the anchor resets and the next real
+// bucket re-bills everything accrued since the window opened: the same
+// double-count class as issue #29's symptom 0, in the path #29 rewrote, and
+// silent.
+func TestNullCounterBucketDoesNotResetTheRunningTotal(t *testing.T) {
+	loc := mustLondon(t)
+	start := time.Date(2026, 6, 11, 0, 0, 0, 0, loc)
+	win := Window{Start: start, Stop: start.Add(4 * time.Hour), Label: WindowToday}
+	iv, _ := lookupInterval("1h")
+	buckets := BucketStarts(win, iv, loc)
+
+	devices := map[string]config.DeviceConfig{
+		"winefridge": {Class: "continuous_power_device", DisplayName: "Wine Fridge"},
+	}
+	// Closing running totals 1.0, <null>, 3.0, 4.0 — per-bucket energy 1, 0, 2, 1.
+	rows := []influx.Row{
+		{DeviceID: "winefridge", Field: "energy_kwh", Time: buckets[0], Value: 1.0},
+		{DeviceID: "winefridge", Field: "energy_kwh", Time: buckets[1], Null: true},
+		{DeviceID: "winefridge", Field: "energy_kwh", Time: buckets[2], Value: 3.0},
+		{DeviceID: "winefridge", Field: "energy_kwh", Time: buckets[3], Value: 4.0},
+	}
+	q := &influx.FakeQuerier{QueryFunc: func(flux string) ([]influx.Row, error) {
+		if strings.Contains(flux, `r._field == "energy_kwh"`) {
+			return rows, nil
+		}
+		return nil, nil
+	}}
+
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
+		GroupByDevice, false, false, devices, testTariff(), nil, loc)
+	if err != nil {
+		t.Fatalf("BuildSeries: %v", err)
+	}
+	s := resp.Series[0]
+	want := []float64{1, 0, 2, 1}
+	for i, w := range want {
+		if s.KWh[i] != w {
+			t.Errorf("kwh = %v, want %v — a null must carry the running total, not reset it to zero", s.KWh, want)
+			break
+		}
+	}
+	if s.TotalKWh != 4 {
+		t.Errorf("total_kwh = %v, want 4 — bucket 0's energy is being billed twice", s.TotalKWh)
+	}
+}

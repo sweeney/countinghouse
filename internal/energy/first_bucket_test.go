@@ -239,6 +239,15 @@ func TestBuildSeriesUPSClipsFirstBucketToWindowStart(t *testing.T) {
 //
 // Both sides read one PowerSim, so a disagreement is arithmetic rather than
 // fixture skew.
+//
+// The step sits WHOLLY INSIDE bucket 0, and that is load-bearing rather than
+// incidental: the two reductions see different neighbours only at a bucket
+// boundary, so they agree exactly while the power is constant across each one.
+// Move this step to straddle 14:30 and the comparison parts by 0.0075 kWh —
+// see influx.TestPowerSimDivergesWhenPowerStepsAcrossABoundary, which pins that
+// term and its size. Keep the step inside a bucket when editing this fixture,
+// or the failure will look like a code regression when it is the sim's edge
+// model.
 func TestUPSSeriesTotalAgreesWithDeviceEnergyOnUnevenSampling(t *testing.T) {
 	loc := mustLondon(t)
 	start := time.Date(2026, 6, 11, 14, 0, 0, 0, loc)

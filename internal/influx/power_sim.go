@@ -35,22 +35,50 @@ import (
 // # What this models, and what it does not
 //
 // integral() is modelled as the trapezoid rule across the samples inside the
-// table, plus a FLAT HOLD from the table's lower bound to the first sample and
-// from the last sample to its upper bound. The flat hold is the sim's reading of
-// the behaviour countinghouse observed against real Influx during issue #17,
-// where three tag-fragments of one device were each "extrapolated across the
-// whole window" and summed to 3x the real energy: integral() takes its bounds
-// from _start/_stop and fills to them rather than integrating only between the
+// table, plus a FLAT HOLD out to the table's bounds (see boundaryFill, which is
+// the single place that rule lives). The flat hold is the sim's reading of the
+// behaviour countinghouse observed against real Influx during issue #17, where
+// three tag-fragments of one device were each "extrapolated across the whole
+// window" and summed to 3x the real energy: integral() takes its bounds from
+// _start/_stop and fills to them rather than integrating only between the
 // samples it can see.
 //
 // That is a MODEL of Flux's edge arithmetic, not a transcription of it, and it
-// is the one part of this sim that a reviewer should not take on trust. The
-// shapes, the bucketing, the omission of empty windows and the kWh conversion
-// are all pinned against the real builders by power_sim_test.go; the exact value
-// Flux interpolates at a window bound is not something a fake can establish.
-// Tests here therefore use STEADY loads wherever they compare the two endpoints,
-// because a steady load makes every plausible edge rule agree — which is also
-// the load the two real UPSs actually carry.
+// is the one part of this sim a reviewer should not take on trust. The shapes,
+// the bucketing, the omission of empty windows and the kWh conversion are all
+// pinned against the real builders by power_sim_test.go; what Flux actually does
+// at a window bound is not something a fake can establish.
+//
+// # When the two endpoints agree, and when they do not
+//
+// The condition is NOT that the load is steady, which is what an earlier version
+// of this comment claimed. It is that the power is constant ACROSS EACH BUCKET
+// BOUNDARY. A boundary is the one place the bucketed and whole-window reductions
+// see different neighbours: the whole-window integral trapezoids across the
+// sample gap straddling it, while the bucketed one closes bucket i with a flat
+// hold forward and opens bucket i+1 with a flat hold back. Those coincide only
+// when the two samples either side are equal.
+//
+// When they are not, the per-bucket sum exceeds the whole-window integral by
+//
+//	(P_before - P_after) / 2 * (the sample gap straddling the boundary)
+//
+// per boundary — half the step, times the gap. Its size is set by how violently
+// the load moves and how slowly the device reports, not by the window or the
+// interval, and it is NOT always negligible: a 1 kW step at a 30s cadence is
+// 0.004 kWh, which rounds into the published 3dp. What makes it invisible here
+// is the workload rather than the arithmetic — a UPS steps by tens of watts, so
+// the real term is nearer 0.0002 kWh.
+// TestPowerSimDivergesWhenPowerStepsAcrossABoundary pins both the formula and
+// that distinction, and the endpoint comparisons elsewhere hold power constant
+// across their boundaries ON PURPOSE rather than by accident.
+//
+// All of that is under the flat-hold model. If Flux instead interpolates at
+// window bounds — which interpolate: "linear" rather suggests — the per-bucket
+// sum telescopes exactly and the endpoints agree unconditionally, making this
+// sim pessimistic rather than wrong. Only the live instance settles which, and
+// it is on the pre-deploy list beside "the lambda is accepted" and "integral
+// gets its bounds".
 //
 // Scope: power_w only. A query for any other field (energy_kwh) returns no rows,
 // so a test needing a counter alongside should compose this with CounterSim.
@@ -216,24 +244,37 @@ func (s powerSeries) inRange(start, stop time.Time) powerSeries {
 	return out
 }
 
-// integrateKWh is integral(unit: 1h, interpolate: "linear") followed by the /1000
-// map: the trapezoid rule across the samples, flat-held out to [lo, hi).
+// boundaryFill is the W.h contributed by the stretch between a table bound and
+// the nearest sample to it, where `watts` is that sample's value.
 //
-// See the type comment on PowerSim for why the flat hold is a model rather than
-// a transcription, and why the comparisons that matter use steady loads.
+// It is the ONE unverified line in this sim and deliberately has a name, so that
+// confirming Flux's real edge rule against the live instance is a single-point
+// change here rather than an archaeology exercise. Today it flat-holds the
+// nearest sample out to the bound; the alternative reading of
+// interpolate: "linear" would project the trend from the two nearest samples.
+// The two differ only at bucket boundaries, by the bound quoted on PowerSim.
+func boundaryFill(watts float64, span time.Duration) float64 {
+	return watts * span.Hours()
+}
+
+// integrateKWh is integral(unit: 1h, interpolate: "linear") followed by the /1000
+// map: the trapezoid rule across the samples, filled out to [lo, hi).
+//
+// See the type comment on PowerSim for why the edge fill is a model rather than
+// a transcription, and for exactly when the bucketed and whole-window reductions
+// agree — which is a statement about bucket BOUNDARIES, not about steadiness.
 func (s powerSeries) integrateKWh(lo, hi time.Time) float64 {
 	if len(s.at) == 0 {
 		return 0
 	}
-	var wh float64
-	// Flat hold from the lower bound to the first sample.
-	wh += s.w[0] * s.at[0].Sub(lo).Hours()
+	// Fill from the lower bound to the first sample.
+	wh := boundaryFill(s.w[0], s.at[0].Sub(lo))
 	// Trapezoid across consecutive samples.
 	for i := 0; i+1 < len(s.at); i++ {
 		wh += (s.w[i] + s.w[i+1]) / 2 * s.at[i+1].Sub(s.at[i]).Hours()
 	}
-	// Flat hold from the last sample to the upper bound.
-	wh += s.w[len(s.w)-1] * hi.Sub(s.at[len(s.at)-1]).Hours()
+	// Fill from the last sample to the upper bound.
+	wh += boundaryFill(s.w[len(s.w)-1], hi.Sub(s.at[len(s.at)-1]))
 	return wh / 1000.0
 }
 

@@ -919,10 +919,11 @@ components:
             in is 0, and the energy accrued meanwhile appears in the next bucket
             that has a reading. A ups_sensor has no counter, so both endpoints
             ESTIMATE its integral — the same way, per bucket here and over the
-            whole window there, so they agree while it is reporting. The one
-            exception is a bucket it reported nothing in: there is nothing to
-            integrate, so the series publishes 0 while the whole-window integral
-            interpolates across the outage and counts the load.
+            whole window there — but they are close rather than identical. They
+            differ where the load steps across a bucket boundary, by roughly half
+            that step times the gap between the readings straddling it; and a
+            bucket the device reported nothing in publishes 0, while the
+            whole-window integral interpolates across the outage and counts it.
         cost:
           type: array
           items:

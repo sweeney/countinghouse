@@ -1195,6 +1195,9 @@ func sortedBucketStarts(idx map[int64]int) []int64 {
 // A device with no rows at all gets no entry, which AssembleSeries reads as
 // all-zero — correct for a device that reported nothing inside the window.
 //
+// Null rows are dropped before any of that, for a sharper reason than on the
+// power path — see the guard below.
+//
 // Note the deliberate asymmetry with DeviceWindowKWh, which SUMS the rows it gets
 // ("disjoint accumulations, so they add"). Both are right for the one table per
 // device that regroupByDevice guarantees. They differ in how they would fail if
@@ -1218,6 +1221,16 @@ func demuxCounterTotals(rows []influx.Row, idx map[int64]int, dst map[string][]f
 	}
 	closes := make(map[string]map[int]bucketClose)
 	for _, r := range rows {
+		if r.Null {
+			// A null is an absent bucket, and absent is what the carry-forward
+			// below already handles correctly. Folding it would be worse here
+			// than on the power path: a null reads as a running total of ZERO,
+			// so the anchor resets and the next real bucket re-bills everything
+			// accrued since the window opened — issue #29's double-count, in the
+			// path #29 rewrote. BuildCounterSeriesFlux says createEmpty: false
+			// so none should arrive; this does not depend on that staying true.
+			continue
+		}
 		i := resolveBucket(r.Time, idx, starts)
 		if i < 0 {
 			continue // outside the window

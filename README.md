@@ -126,22 +126,24 @@ lands in the next bucket that does have a reading. A device that reported nothin
 the window is all zeroes, never a share of someone else's total.
 
 **`ups_sensor` is estimated, not counted.** A UPS publishes only `power_w`, so there is no
-counter to read and both endpoints estimate an integral. They now estimate it the *same*
-way — `integral(unit: 1h, interpolate: "linear")`, whole-window for `/devices/{id}/energy`
-and per bucket for the series — so for a UPS that is reporting they agree. Until recently
-the series used `mean(power_w) × bucket_hours` instead, a sample mean that weights every
-reading equally however long it stood; for samples bunched into the start of a bucket that
-overstated the bucket by more than a factor of three.
+counter to read and both endpoints estimate an integral. They estimate it the *same* way —
+`integral(unit: 1h, interpolate: "linear")`, whole-window for `/devices/{id}/energy` and per
+bucket for the series — so a UPS series tracks the scalar endpoint closely, instead of
+differing from it by method as it once did. It is not the identity the counter classes get,
+though, and two things separate them:
+
+- **Bucket boundaries.** The whole-window integral sees the readings either side of a bucket
+  edge; the per-bucket one does not. Where the load *steps* across an edge the two differ by
+  roughly half that step times the gap between the readings straddling it — for a UPS's
+  tens-of-watts moves at a 30s cadence, around `0.0002` kWh per boundary.
+- **A bucket the UPS reported nothing in** has nothing to integrate and publishes `0`, while
+  the whole-window integral interpolates straight across the outage and counts the load. The
+  series is the low one, by roughly the length of the outage. Closing that needs the readings
+  either side of the gap, which a per-bucket query cannot see.
 
 `avg_w` for a UPS is derived back out of that energy (`kwh × 1000 / bucket_hours`), so it is
 the bucket's **time-weighted** mean power and cannot contradict the `kwh` printed beside it.
-For a steady load on a regular cadence this is the same number the sample mean gave.
-
-One limit remains, and it is the one case where a UPS series and `/devices/{id}/energy` still
-part company: a bucket the UPS reported **nothing** in has nothing to integrate and publishes
-`0`, while the whole-window integral interpolates straight across the outage and counts the
-load. The series is the low one, by roughly the length of the outage. Closing that needs the
-readings either side of the gap, which a per-bucket query cannot see.
+For a steady load on a regular cadence it is the same number a sample mean would give.
 
 The synthetic `unmonitored` series has no scalar counterpart at all, and its per-bucket
 clamping means its total is not the raw residual either.

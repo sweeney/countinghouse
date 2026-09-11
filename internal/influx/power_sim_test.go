@@ -66,9 +66,14 @@ func TestPowerSimIntegralSeriesIsKWhPerBucket(t *testing.T) {
 }
 
 // The headline property of issue #32's fix: both endpoints now estimate the same
-// integral, so for a steadily-reporting UPS the buckets sum to the whole-window
-// reduction. A steady load is deliberate — it is what makes this independent of
-// how Flux interpolates at a window bound (see the PowerSim type comment).
+// integral, so the buckets sum to the whole-window reduction.
+//
+// The load is steady on purpose, but the property doing the work is narrower
+// than steadiness — it is that the power is constant ACROSS EACH BUCKET
+// BOUNDARY, which is the only place the two reductions see different
+// neighbours. See TestPowerSimDivergesWhenPowerStepsAcrossABoundary for the
+// case that separates them, and the PowerSim type comment for why the
+// distinction matters.
 func TestPowerSimBucketsSumToWholeWindow(t *testing.T) {
 	sim, loc := steadyPowerSim(t)
 	start := time.Date(2026, 6, 11, 14, 29, 0, 0, loc) // deliberately off-grid
@@ -215,6 +220,73 @@ func TestPowerSimMeanAndIntegralDifferOnUnevenSampling(t *testing.T) {
 	}
 	if oldWay <= intRows[0].Value*2 {
 		t.Errorf("the two estimators should diverge sharply here: mean-derived %v vs integral %v", oldWay, intRows[0].Value)
+	}
+}
+
+// The exact case the agreement test above does NOT cover, pinned so the size of
+// the gap stays visible and so a future edit to a fixture cannot quietly turn a
+// sim-model artefact into what looks like a code regression.
+//
+// A 900 W step straddling the 14:30 boundary at a one-minute cadence: the
+// whole-window integral trapezoids across the straddling gap, the bucketed one
+// flat-holds into the boundary from both sides, and they part company by
+// (P_before - P_after)/2 x gap = 900/2 x 1/60 h = 7.5 W.h.
+//
+// This is a statement about THIS SIM's edge model, not about Flux — under a
+// bound-interpolating integral the sum would telescope exactly. Either way the
+// term is bounded by half the step times the sampling gap, so its size is set by
+// how violently the load moves and how slowly the device reports, not by the
+// window or the interval.
+func TestPowerSimDivergesWhenPowerStepsAcrossABoundary(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 6, 11, 14, 0, 0, 0, loc)
+	stop := time.Date(2026, 6, 11, 15, 0, 0, 0, loc)
+	boundary := start.Add(30 * time.Minute)
+
+	var at []time.Time
+	var w []float64
+	for ts := start; ts.Before(stop); ts = ts.Add(time.Minute) {
+		at = append(at, ts)
+		if ts.Before(boundary) {
+			w = append(w, 1000)
+		} else {
+			w = append(w, 100)
+		}
+	}
+	sim := NewPowerSim(loc).AddSamples("network-ups", at, w)
+
+	whole, err := sim.Answer(BuildIntegralFlux("b", "network-ups", start, stop))
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	bucketed, err := sim.Answer(BuildPowerIntegralSeriesFlux("b", []string{"network-ups"}, start, stop, "30m", "Europe/London"))
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	var sum float64
+	for _, r := range bucketed {
+		sum += r.Value
+	}
+
+	// Half the step, times the one-minute gap straddling the boundary.
+	wantDelta := (1000 - 100) / 2.0 * (1.0 / 60) / 1000
+	if got := sum - whole[0].Value; math.Abs(got-wantDelta) > 1e-9 {
+		t.Errorf("series %.4f - scalar %.4f = %+.6f, want %+.6f (half the step x the straddling gap)",
+			sum, whole[0].Value, got, wantDelta)
+	}
+	// 0.0075 kWh — visible at the 3dp the API publishes. This fixture is
+	// deliberately extreme (a 900 W step at a one-minute cadence); the point of
+	// asserting it is that the term is NOT negligible in general, only at the
+	// scale the real UPSs operate at. That scale, checked separately so the
+	// claim is a number rather than an adjective:
+	const realisticStepW, realisticCadence = 50.0, 30 * time.Second
+	realistic := realisticStepW / 2.0 * realisticCadence.Hours() / 1000
+	if realistic >= 0.0005 {
+		t.Errorf("a %v W step at a %v cadence contributes %v kWh per boundary, which rounds into the published 3dp",
+			realisticStepW, realisticCadence, realistic)
 	}
 }
 
