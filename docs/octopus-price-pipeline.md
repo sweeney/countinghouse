@@ -163,7 +163,8 @@ Implementation notes specific to this service:
   `0.00p`, so zero is data and absence must be a distinct thing.
 - **Per-device attribution** names its method on the response (`attribution: "counter_slot"`)
   and reports a per-device `effective_rate`, so a noisy small-load figure is interpretable
-  rather than merely wrong-looking. Still **OPEN (4)** per the model doc.
+  rather than merely wrong-looking. **Decided: C1** — see `per-device-attribution.md` for the
+  measurements, the rejected options and when to revisit.
 
 > ✅ **#27 is fixed and merged (#30), so this is no longer a blocker.** It was: the series path
 > billed energy from before `win.Start`, which under a flat tariff was a small kWh error but at
