@@ -44,7 +44,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter. `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
 | `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
-| `GET /tariffs` | Configured tariffs keyed by fuel (electricity, gas), including any effective-date history. |
+| `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered. |
 | `GET /metrics` | Query counters, Influx latency, `drift_buckets_total` (negative meter−monitored drift beyond the 0.1 kWh quantum), uptime, goroutines. |
 
 **Windows:** `today`, `week` (starts Monday), `month` — all period-to-date — and `custom`
@@ -353,61 +353,92 @@ house:   { timezone: "Europe/London" }
   a missing key reads as healthy rather than as an error — so alert on the top-level
   `status` field, which degrades regardless of the key.
 
-### Tariffs and effective-date history
+### Tariffs: `energy_agreements`
 
-The `energy_tariffs` namespace is keyed by fuel. Countinghouse bills `electricity`;
-anything else is read and ignored. Rates are GBP ex-VAT, and VAT is applied by the cost
+Tariffs are configured as **dated agreements** — one block per tariff you were on,
+with explicit bounds. Keyed by fuel; countinghouse bills `electricity` and reads,
+validates and ignores the rest. Rates are GBP ex-VAT, and VAT is applied by the cost
 layer.
 
-The single-rate shape still works and needs no history:
-
 ```json
-{ "tariffs": { "electricity": {
-    "unit_rate": 0.208948, "daily_standing_charge": 0.529443,
-    "unit": "kWh", "vat_rate": 0.05 } } }
+{ "agreements": { "electricity": [
+    { "from": "2025-09-23T00:00:00+01:00",
+      "to":   "2026-09-10T00:00:00+01:00",
+      "name": "Octopus 12M Fixed",
+      "type": "fixed",
+      "id":   "E-1R-OE-FIX-12M-25-09-09-A",
+      "unit": "kWh", "vat_rate": 0.05,
+      "unit_rate": 0.208948,
+      "daily_standing_charge": 0.529443 },
+
+    { "from": "2026-09-10T00:00:00+01:00",
+      "name": "Agile Octopus",
+      "type": "variable",
+      "id":   "E-1R-AGILE-24-10-01-A",
+      "unit": "kWh", "vat_rate": 0.05,
+      "daily_standing_charge": 0.591606 }
+] } }
 ```
 
-That rate applies at **every** instant. This matters, because real tariffs re-price
-mid-term — a 12-month fixed product can and does change rate partway through — and pricing
-a historical window at today's rate is wrong by the difference, silently. To price history
-correctly, give the fuel a `periods` array instead:
+**`fixed` carries its rate. `variable` deliberately does not.** A variable tariff's
+price changes every half hour, so there is no single number to put here — the curve
+lives in the price archive and consumers read it from the price endpoints. A
+representative rate in this document would be read as *the* price, and would be
+wrong. The standing charge stays here either way: it is flat per day on both types.
 
-```json
-{ "tariffs": { "electricity": {
-    "unit": "kWh", "vat_rate": 0.05,
-    "periods": [
-      { "effective_from": "2025-09-08T23:00:00Z",
-        "unit_rate": 0.242348, "daily_standing_charge": 0.529443 },
-      { "effective_from": "2026-03-31T23:00:00Z",
-        "unit_rate": 0.208948, "daily_standing_charge": 0.529443 },
-      { "effective_from": "2026-09-09T23:00:00Z",
-        "tariff_code": "E-1R-AGILE-24-10-01-A", "daily_standing_charge": 0.591606 }
-    ] } } }
-```
+`variable` is narrower than the industry's use of the word. A supplier's *standard
+variable rate* — one number that changes every few months — has no intra-agreement
+curve to look up, so it is configured as **successive `fixed` blocks**, one per rate.
+`variable` means specifically "priced per half hour from the archive".
 
 Rules, all enforced when the namespace is applied:
 
-- `effective_from` is **inclusive** and required on every period. The rate in force at an
-  instant is the latest period starting at or before it.
-- **A window beginning before the earliest period is refused, not priced.** We do not know
-  what a kWh cost then, and the nearest rate we hold would be a confident wrong number.
-- A window spanning a boundary is billed as **one segment per period**, each with its own
-  rate, standing charge and VAT multiplier. The segments tile the window exactly, so the
-  apportioned standing charge adds up.
-- `unit` and `vat_rate` are inherited from the fuel entry. A period may override `vat_rate`
-  so a historical window uses the rate that applied on the day.
-- **`tariff_code` marks a half-hourly period** and is mutually exclusive with `unit_rate`:
-  the price of a kWh varies within the period, so it comes from the price archive rather
-  than from config. The standing charge is still flat per day and still configured here.
-  There is no `kind` field — a flat tariff and a half-hourly one are the same relation at
-  different row densities, so what the cost path needs is the key to look prices up under,
-  not a type discriminator.
-- Periods may be authored in any order; they are sorted on load.
-- Two periods sharing an `effective_from`, a period with both `unit_rate` and `tariff_code`,
-  a period with neither, an undated period, or an unparseable `tariff_code` all make the
-  document **invalid**. An invalid document is treated exactly like a failed fetch: the
-  last-known snapshot is kept and `/healthz` degrades. Per *boot needs truth, running keeps
-  the last truth*, a namespace that has never been fetched still aborts startup.
+- `from` is **inclusive**, `to` **exclusive**. `to` absent means the agreement is
+  current. The tariff in force at an instant is the agreement covering it.
+- **Gaps are allowed.** No agreement covering an instant is a real state — you were
+  not a customer — so the document may say so. But a window touching a gap is
+  **refused, not priced**: billing it at a neighbouring rate would be invisible and
+  wrong, and returning only the covered parts would silently under-bill.
+- **Overlaps are refused.** Two agreements covering one instant means two prices for
+  one kWh, and there is no defensible way to pick. Only the most recent agreement may
+  omit `to`.
+- A window spanning a boundary is billed as **one segment per agreement**, each with
+  its own rate, standing charge and VAT multiplier. Segments tile the window exactly,
+  so the apportioned standing charge adds up.
+- `name` is required — an unnamed agreement surfaces as its code, and a code where a
+  name belongs reads as data rather than as a missing label.
+- `id` is required on `variable` (it is the key prices are archived under, so without
+  it the block cannot be priced) and optional on `fixed`, but validated when present.
+- `fixed` requires `unit_rate`; `variable` must **not** set one.
+- Blocks may be authored in any order; they are sorted on load.
+- An invalid document is treated exactly like a failed fetch: the last-known snapshot
+  is kept and `/healthz` degrades. Per *boot needs truth, running keeps the last
+  truth*, a namespace that has never been fetched still aborts startup.
+
+#### Migrating from `energy_tariffs`
+
+The legacy namespace still works untouched. It holds one current rate per fuel and no
+dates, which means **every instant resolves to the same rate** — so a historical
+window is priced at today's price, which is wrong whenever the rate has ever changed,
+and it cannot express a half-hourly tariff at all.
+
+Migration is opt-in via one local-config key:
+
+```yaml
+remote_config:
+  agreements_namespace: "energy_agreements"
+```
+
+Unset, the legacy document is authoritative. Set, the new one is — and the legacy
+document is not even fetched. **The two are never merged:** two documents disagreeing
+about what a kWh cost has no safe resolution, so exactly one answers and both
+`/healthz` and `GET /tariffs` report which. A named namespace that has never been
+fetched aborts startup rather than falling back, because falling back would price a
+variable tariff at a fixed number.
+
+`GET /tariffs` serves the **dated-block shape either way** — a legacy document is
+presented as a single agreement with neither bound — so a consumer handles one shape
+rather than two.
 
 ## Run locally
 

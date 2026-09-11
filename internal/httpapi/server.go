@@ -33,8 +33,22 @@ type ConfigProvider interface {
 	// Devices returns the current statehouse_devices snapshot keyed by
 	// device_id. Used for class-based query routing and bill grouping.
 	Devices() map[string]config.DeviceConfig
-	// Tariffs returns the current energy_tariffs snapshot.
-	Tariffs() config.EnergyTariffs
+	// Tariffs returns the authoritative tariff document as a TariffSource.
+	//
+	// An interface, not a concrete document: countinghouse can be configured
+	// against the legacy `energy_tariffs` single rate or the dated
+	// `energy_agreements` blocks, and no handler should know which. Both answer
+	// TariffFor(t) and PeriodsBetween identically.
+	Tariffs() config.TariffSource
+
+	// Agreements returns the same document in the dated-block shape, so /tariffs
+	// serves one response shape either way. A legacy document is presented as a
+	// single open-ended fixed agreement.
+	Agreements() config.EnergyAgreements
+
+	// TariffNamespace names whichever namespace is authoritative, so a consumer
+	// need not deduce it from the shape of the answer.
+	TariffNamespace() string
 }
 
 // FloorplanProvider supplies the floorplan snapshot behind /floors and /rooms,

@@ -65,12 +65,18 @@ type Fetcher struct {
 	// exactly as the devices fetch handles the same mistake.
 	FloorplanNamespace string
 
-	mu       sync.RWMutex
-	devices  map[string]DeviceConfig
-	floors   map[string]FloorConfig
-	rooms    map[string]RoomConfig
-	tariffs  EnergyTariffs
-	statuses map[string]NamespaceStatus
+	// AgreementsNamespace names the dated-tariff namespace. When empty the legacy
+	// energy_tariffs document is authoritative; when set, IT is, and the legacy
+	// document is not fetched at all. Never merged — see RemoteConfigConfig.
+	AgreementsNamespace string
+
+	mu         sync.RWMutex
+	devices    map[string]DeviceConfig
+	floors     map[string]FloorConfig
+	rooms      map[string]RoomConfig
+	tariffs    EnergyTariffs
+	agreements EnergyAgreements
+	statuses   map[string]NamespaceStatus
 
 	// landed records the namespaces that have been fetched successfully at least
 	// once, which is what separates STALE from COLD. It is not derivable from
@@ -103,13 +109,43 @@ func (f *Fetcher) Devices() map[string]DeviceConfig {
 	return out
 }
 
-// Tariffs returns the current energy_tariffs snapshot. Safe for concurrent use.
-// Implements httpapi.ConfigProvider. The returned EnergyTariffs shares the
-// inner Tariffs map; callers treat it as read-only (handlers never mutate it).
-func (f *Fetcher) Tariffs() EnergyTariffs {
+// Tariffs returns whichever tariff document is authoritative, as a TariffSource.
+// Safe for concurrent use. Implements httpapi.ConfigProvider.
+//
+// Returning the INTERFACE rather than a concrete document is what keeps the
+// migration out of the HTTP layer: every caller asks TariffFor(t) or
+// PeriodsBetween and neither knows nor cares which namespace answered. The
+// snapshots share their inner maps and slices; callers treat them as read-only.
+func (f *Fetcher) Tariffs() TariffSource {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
+	if f.AgreementsNamespace != "" {
+		return f.agreements
+	}
 	return f.tariffs
+}
+
+// Agreements returns the authoritative document in the dated-block shape, so
+// /tariffs serves ONE response shape whichever namespace backs it rather than
+// making every consumer handle both. A legacy document is presented as a single
+// open-ended fixed agreement.
+func (f *Fetcher) Agreements() EnergyAgreements {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.AgreementsNamespace != "" {
+		return f.agreements
+	}
+	return f.tariffs.AsAgreements()
+}
+
+// TariffNamespace reports which namespace is authoritative, for /healthz and
+// /tariffs. Which document priced a bill is not something anybody should have to
+// deduce from the shape of the answer.
+func (f *Fetcher) TariffNamespace() string {
+	if f.AgreementsNamespace != "" {
+		return f.AgreementsNamespace
+	}
+	return nsTariffs
 }
 
 // Floors returns a copy of the current floor-record snapshot keyed by floor id.
@@ -182,7 +218,12 @@ func (f *Fetcher) Cold() []string {
 // name means a Fetcher built by hand, and reporting "" as cold would name nothing
 // an operator could act on.
 func (f *Fetcher) configuredNamespaces() []string {
-	out := []string{nsTariffs}
+	out := []string{}
+	if f.AgreementsNamespace != "" {
+		out = append(out, f.AgreementsNamespace)
+	} else {
+		out = append(out, nsTariffs)
+	}
 	if ns := f.devicesNamespace(); ns != "" {
 		out = append(out, ns)
 	}
@@ -230,7 +271,11 @@ func (f *Fetcher) Refresh(ctx context.Context) {
 		return
 	}
 	f.refreshDevices(ctx, token)
-	f.refreshTariffs(ctx, token)
+	if f.AgreementsNamespace != "" {
+		f.refreshAgreements(ctx, token)
+	} else {
+		f.refreshTariffs(ctx, token)
+	}
 	f.refreshFloorplan(ctx, token)
 }
 
@@ -332,6 +377,33 @@ func (f *Fetcher) refreshTariffs(ctx context.Context, token string) {
 	f.tariffs = tariffs
 	f.mu.Unlock()
 	f.recordStatus(nsTariffs, nil)
+}
+
+// refreshAgreements fetches the dated-tariff document.
+//
+// Same policy as refreshTariffs: a fetch failure OR an invalid document keeps the
+// last-known snapshot and records the reason, because applying an ambiguous
+// tariff document would let it price money. With the cold-start rule, boot needs
+// truth and running keeps the last truth.
+func (f *Fetcher) refreshAgreements(ctx context.Context, token string) {
+	ns := f.AgreementsNamespace
+	var agreements EnergyAgreements
+	if err := f.fetch(ctx, token, ns, &agreements); err != nil {
+		f.warn("remote config: agreements namespace unavailable, keeping last-known",
+			"namespace", ns, "error", err)
+		f.recordStatus(ns, err)
+		return
+	}
+	if err := agreements.Validate(); err != nil {
+		f.warn("remote config: agreements namespace is invalid, keeping last-known",
+			"namespace", ns, "error", err)
+		f.recordStatus(ns, err)
+		return
+	}
+	f.mu.Lock()
+	f.agreements = agreements
+	f.mu.Unlock()
+	f.recordStatus(ns, nil)
 }
 
 func (f *Fetcher) recordStatus(ns string, err error) {

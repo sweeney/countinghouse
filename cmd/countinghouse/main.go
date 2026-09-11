@@ -63,6 +63,9 @@ func main() {
 		Logger:             logger,
 		DevicesNamespace:   cfg.Site.DevicesNamespace,
 		FloorplanNamespace: cfg.Site.FloorplanNamespace,
+		// Empty means the legacy energy_tariffs document stays authoritative, so
+		// this binary can be deployed with no config change and behave as before.
+		AgreementsNamespace: cfg.RemoteConfig.AgreementsNamespace,
 	}
 	if cfg.RemoteConfig.BaseURL == "" {
 		// Explicit local-dev opt-out: nothing is fetched, so the cold check below is
@@ -70,6 +73,7 @@ func main() {
 		// said they expect empty snapshots; one who names it has not.
 		logger.Warn("remote config base_url is empty; serving empty device/tariff/floorplan snapshots")
 	} else {
+		logger.Info("tariff document in force", "namespace", fetcher.TariffNamespace())
 		logger.Info("refreshing remote config", "url", cfg.RemoteConfig.BaseURL)
 		refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		fetcher.Refresh(refreshCtx)

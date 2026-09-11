@@ -65,5 +65,16 @@ identity:
 remote_config:
   base_url: "https://config.swee.net"
 
+  # Dated-tariff namespace. Leave UNSET to keep using the legacy `energy_tariffs`
+  # single-rate document; set it to opt in to dated agreements, which is what a
+  # half-hourly (variable) tariff requires.
+  #
+  # The two are never merged — exactly one document is authoritative, and
+  # /healthz and GET /tariffs both report which. When set, the namespace is
+  # required: a named namespace that has never been fetched aborts startup rather
+  # than quietly falling back to the legacy rate, because falling back would
+  # price a variable tariff at a fixed number.
+  # agreements_namespace: "energy_agreements"
+
 house:
   timezone: "Europe/London"

@@ -123,6 +123,23 @@ type IdentityConfig struct {
 // RemoteConfigConfig holds the address of the remote config service.
 type RemoteConfigConfig struct {
 	BaseURL string `yaml:"base_url"`
+
+	// AgreementsNamespace names the dated-tariff namespace (conventionally
+	// "energy_agreements"). When EMPTY the legacy `energy_tariffs` document is
+	// used instead, which is what makes the migration opt-in: a deployment can
+	// take this binary with no config change and keep its existing behaviour.
+	//
+	// The two are never merged. Two tariff documents disagreeing about what a kWh
+	// cost has no safe resolution, so exactly one is authoritative and /healthz
+	// reports which. When this is set the namespace is REQUIRED: per the
+	// cold-start rule, naming a namespace that has never been fetched aborts
+	// startup rather than silently falling back to the legacy rate, because
+	// falling back would price a variable tariff at a fixed rate.
+	//
+	// Not site-scoped today. It may need to become so — a second property is
+	// generally on a different tariff — but nothing here assumes one way or the
+	// other yet.
+	AgreementsNamespace string `yaml:"agreements_namespace"`
 }
 
 // HouseConfig holds house-wide settings.

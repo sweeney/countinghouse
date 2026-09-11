@@ -3,11 +3,8 @@ package notify
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -27,7 +24,8 @@ import (
 //
 // So this package carries the small set of events worth pushing, and keeps the
 // transport pluggable: the policy of WHAT deserves an alert belongs to
-// countinghouse, the choice of HOW it is delivered does not.
+// countinghouse, the choice of HOW it is delivered does not. Today that is the
+// service log; Multi is the seam for adding MQTT.
 // ---------------------------------------------------------------------------
 
 func event(kind, summary string) Event {
@@ -89,167 +87,12 @@ func TestSlogNotifierMapsSeverityToLevel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The webhook notifier
-// ---------------------------------------------------------------------------
-
-// A webhook keeps the transport out of this service: point it at ntfy, a Home
-// Assistant hook, an MQTT bridge, whatever — without countinghouse knowing which.
-func TestWebhookNotifierPostsEvent(t *testing.T) {
-	type received struct {
-		method, ctype string
-		body          []byte
-	}
-	var (
-		mu  sync.Mutex
-		got []received
-	)
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := make([]byte, r.ContentLength)
-		r.Body.Read(body) //nolint:errcheck
-		mu.Lock()
-		got = append(got, received{r.Method, r.Header.Get("Content-Type"), body})
-		mu.Unlock()
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer ts.Close()
-
-	clock := testutil.NewFakeClock(time.Date(2026, 9, 10, 20, 12, 24, 0, time.UTC))
-	n := NewWebhookNotifier(ts.URL, WebhookOptions{Clock: clock})
-
-	ev := Event{
-		Kind:     KindPricesMissing,
-		Severity: SeverityError,
-		Summary:  "no prices for tomorrow",
-		Detail:   map[string]any{"known_through": "2026-09-10T22:00:00Z"},
-	}
-	if err := n.Notify(context.Background(), ev); err != nil {
-		t.Fatalf("Notify: %v", err)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(got) != 1 {
-		t.Fatalf("got %d requests, want 1", len(got))
-	}
-	if got[0].method != http.MethodPost {
-		t.Errorf("method = %s, want POST", got[0].method)
-	}
-	if !strings.HasPrefix(got[0].ctype, "application/json") {
-		t.Errorf("content type = %q", got[0].ctype)
-	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(got[0].body, &payload); err != nil {
-		t.Fatalf("body is not JSON: %v\n%s", err, got[0].body)
-	}
-	for _, field := range []string{"kind", "severity", "summary", "at", "service"} {
-		if _, ok := payload[field]; !ok {
-			t.Errorf("payload missing %q: %v", field, payload)
-		}
-	}
-	// The timestamp comes from the injected clock, never time.Now: a consumer
-	// correlating this against a bill needs the service's notion of now.
-	if payload["at"] != "2026-09-10T20:12:24Z" {
-		t.Errorf("at = %v, want the injected clock's instant", payload["at"])
-	}
-	if payload["service"] != "countinghouse" {
-		t.Errorf("service = %v, want countinghouse so a shared endpoint can tell who called", payload["service"])
-	}
-}
-
-// A notification endpoint being down must never break the thing that was trying
-// to report. The error is returned so a caller can count it, but the caller's
-// own work is expected to continue — see the collector, which treats this as
-// fail-open.
-func TestWebhookNotifierFailureModes(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		handler http.HandlerFunc
-		closed  bool
-	}{
-		{
-			name:    "non-2xx is an error",
-			handler: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) },
-		},
-		{
-			name:    "404 is an error",
-			handler: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) },
-		},
-		{
-			name:    "401 is an error",
-			handler: func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) },
-		},
-		{
-			name:   "endpoint down is an error",
-			closed: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := tc.handler
-			if h == nil {
-				h = func(http.ResponseWriter, *http.Request) {}
-			}
-			ts := httptest.NewServer(h)
-			url := ts.URL
-			if tc.closed {
-				ts.Close()
-			} else {
-				defer ts.Close()
-			}
-
-			n := NewWebhookNotifier(url, WebhookOptions{})
-			err := n.Notify(context.Background(), event("k", "s"))
-			if err == nil {
-				t.Error("want an error so the caller can count the failure")
-			}
-		})
-	}
-}
-
-// A hanging endpoint must not hold the caller. Without a bounded timeout a
-// notification attempt could outlive the collector tick that produced it.
-func TestWebhookNotifierTimesOut(t *testing.T) {
-	block := make(chan struct{})
-	ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		select {
-		case <-block:
-		case <-r.Context().Done():
-		}
-	}))
-	defer func() { close(block); ts.Close() }()
-
-	n := NewWebhookNotifier(ts.URL, WebhookOptions{Timeout: 50 * time.Millisecond})
-	start := time.Now()
-	err := n.Notify(context.Background(), event("k", "s"))
-	if err == nil {
-		t.Fatal("want a timeout error")
-	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("took %v; the timeout did not bound the attempt", elapsed)
-	}
-}
-
-func TestWebhookNotifierRespectsContext(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	defer ts.Close()
-
-	n := NewWebhookNotifier(ts.URL, WebhookOptions{})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	err := n.Notify(ctx, event("k", "s"))
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("err = %v, want it to wrap context.Canceled", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // Fan-out
 // ---------------------------------------------------------------------------
 
-// One failing transport must not stop the others. The log notifier is usually
-// one of them, so this is what guarantees an alert is still recorded when the
-// webhook is down.
+// One failing transport must not stop the others. The log notifier is always one
+// of them, so this is what will guarantee an alert is still recorded once a
+// second transport (MQTT) exists and is unreachable.
 func TestMultiContinuesAfterAFailure(t *testing.T) {
 	failing := &fakeNotifier{err: errors.New("down")}
 	working := &fakeNotifier{}

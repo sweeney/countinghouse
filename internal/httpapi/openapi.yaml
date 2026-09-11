@@ -708,58 +708,64 @@ components:
           type: string
       required: [error]
 
-    Tariff:
+    Agreement:
       type: object
       description: >
-        A fuel's pricing. The schema is recursive: a fuel entry may carry a
-        `periods` array holding its effective-date history, and each element of
-        that array is itself a Tariff describing one dated period. A fuel entry
-        with no `periods` is the single-rate shape, where the one rate applies at
-        every instant.
+        One dated tariff commitment: which tariff applied, between when and when,
+        and what it cost. Intervals are half-open — `from` inclusive, `to`
+        exclusive. A legacy single-rate configuration is presented as one
+        agreement with neither bound.
       properties:
-        unit_rate:
-          type: number
-          description: >
-            GBP per kWh, ex-VAT. Absent on a half-hourly period, where the rate
-            varies within the period and comes from the price archive instead —
-            see `tariff_code`.
-        daily_standing_charge:
-          type: number
-          description: GBP per day, ex-VAT. Flat per day on half-hourly tariffs too.
-        unit:
-          type: string
-          description: Inherited by each period from the fuel entry unless overridden.
-        vat_rate:
-          type: number
-          description: >
-            Inherited by each period from the fuel entry unless overridden. A
-            period may override it so a historical window is priced at the VAT
-            rate that applied on the day.
-        tariff_code:
-          type: string
-          description: >
-            Present only on a HALF-HOURLY period, and mutually exclusive with
-            `unit_rate`. The supplier tariff code whose half-hourly prices this
-            period is billed from (e.g. an Agile tariff). Its presence, rather
-            than a separate type field, is what marks the period as half-hourly.
-          example: E-1R-AGILE-24-10-01-A
-        effective_from:
+        from:
           type: string
           format: date-time
           description: >
-            Inclusive start of a period. Required on each element of `periods`
-            and absent on a fuel entry. A window that begins before the earliest
-            `effective_from` has no known price and is refused rather than priced
-            at the nearest rate.
-        periods:
-          type: array
+            Inclusive start. Absent only on the synthesised block representing a
+            legacy single-rate configuration, which asserts nothing about when its
+            rate began.
+        to:
+          type: string
+          format: date-time
+          description: Exclusive end. Absent when the agreement is still current.
+        name:
+          type: string
+          description: Human label for the tariff, e.g. "Agile Octopus".
+          example: Agile Octopus
+        type:
+          type: string
+          enum: [fixed, variable]
           description: >
-            Effective-date history, oldest first. When present, the rate in force
-            at any instant is the latest period whose `effective_from` is at or
-            before it, and a window spanning a boundary is billed as one segment
-            per period.
-          items:
-            $ref: "#/components/schemas/Tariff"
+            `fixed` carries its own `unit_rate`. `variable` does NOT: its price
+            varies within the agreement (half-hourly), so there is no single
+            number to report and the half-hourly curve must be read from the price
+            endpoints instead. Note this is narrower than the industry sense of
+            "variable" — a supplier's standard variable rate, one number that
+            changes every few months, is configured as successive `fixed`
+            agreements because it has no intra-agreement curve.
+        id:
+          type: string
+          description: >
+            Supplier tariff code. Always present on a `variable` agreement, where
+            it is the key its half-hourly prices are stored under; optional on a
+            `fixed` one.
+          example: E-1R-AGILE-24-10-01-A
+        unit:
+          type: string
+          example: kWh
+        vat_rate:
+          type: number
+          description: Carried per agreement, so a historical VAT change prices correctly.
+        unit_rate:
+          type: number
+          description: >
+            GBP per kWh, ex-VAT. Present on `fixed` agreements only — absent on
+            `variable`, deliberately.
+        daily_standing_charge:
+          type: number
+          description: >
+            GBP per day, ex-VAT. Present on both types: a standing charge is flat
+            per day even when the unit rate is half-hourly.
+      required: [name, type, vat_rate, daily_standing_charge]
 
     TariffsResponse:
       type: object
@@ -767,11 +773,19 @@ components:
         currency:
           type: string
           example: GBP
-        tariffs:
+        source:
+          type: string
+          description: >
+            The config namespace that answered. Reported rather than inferred,
+            because the response shape is deliberately identical either way.
+          example: energy_agreements
+        agreements:
           type: object
-          description: Tariffs keyed by fuel (e.g. electricity, gas).
+          description: Agreements keyed by fuel (e.g. electricity, gas), oldest first.
           additionalProperties:
-            $ref: "#/components/schemas/Tariff"
+            type: array
+            items:
+              $ref: "#/components/schemas/Agreement"
 
     DeviceEnergyResponse:
       type: object

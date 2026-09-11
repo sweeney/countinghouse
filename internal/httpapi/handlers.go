@@ -719,18 +719,29 @@ func roundPtr(p *float64, dp int) {
 	}
 }
 
-// handleTariffs serves GET /tariffs, returning all configured tariffs keyed by
-// fuel (electricity, gas, ...). Countinghouse only bills electricity today, but
-// exposing the full set keeps the API forward-compatible with gas devices.
+// handleTariffs serves GET /tariffs: the configured agreements keyed by fuel
+// (electricity, gas, ...), oldest first. Countinghouse only bills electricity
+// today, but exposing the full set keeps the API forward-compatible.
+//
+// The response is the DATED-BLOCK shape whichever namespace backs it — a legacy
+// single-rate document is presented as one open-ended fixed agreement — so a
+// consumer handles one shape rather than two. `source` names the namespace that
+// answered, because which document priced a bill should not have to be inferred.
+//
+// Note what a `variable` agreement does NOT carry: a unit rate. Its price varies
+// within the block, so there is no single number to report and a consumer must
+// ask the price endpoints for the half-hourly curve. Reporting a representative
+// rate here would be read as the price and would be wrong.
 func (s *Server) handleTariffs(w http.ResponseWriter, _ *http.Request) {
-	tariffs := s.Config.Tariffs()
-	if len(tariffs.Tariffs) == 0 {
+	agreements := s.Config.Agreements()
+	if len(agreements.Agreements) == 0 {
 		writeError(w, http.StatusNotFound, "no tariffs configured")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"currency": "GBP",
-		"tariffs":  tariffs.Tariffs,
+		"currency":   "GBP",
+		"source":     s.Config.TariffNamespace(),
+		"agreements": agreements.Agreements,
 	})
 }
 

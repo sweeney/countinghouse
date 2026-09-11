@@ -8,9 +8,13 @@
 // bills have been issued against a tariff that was wrong.
 //
 // The split is deliberate: the POLICY of what deserves an alert belongs to
-// countinghouse (see the Kind constants), while the TRANSPORT does not. A
-// webhook keeps the choice of ntfy, Home Assistant, an MQTT bridge or anything
-// else outside this service.
+// countinghouse (see the Kind constants), while the TRANSPORT does not.
+//
+// Today the only transport is the service log, which is enough and cannot fail.
+// Multi is the seam for adding a second — MQTT is the intended one, since that is
+// already the ecosystem's bus and statehouse publishes under a `house` prefix.
+// Deliberately no HTTP webhook: an unused transport is dead production code, and
+// adding one when it is actually wanted costs a single type.
 //
 // Everything here is fail-open from the caller's point of view. Notify returns
 // an error so a caller can count it, but no caller should abandon its own work
@@ -19,14 +23,9 @@
 package notify
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"sync"
 	"time"
 
@@ -139,114 +138,6 @@ func (s *SlogNotifier) Notify(ctx context.Context, e Event) error {
 }
 
 // ---------------------------------------------------------------------------
-// webhook
-// ---------------------------------------------------------------------------
-
-// WebhookOptions configures a WebhookNotifier.
-type WebhookOptions struct {
-	// Timeout bounds one delivery attempt. Defaults to 10s. A bounded attempt
-	// matters because a hanging endpoint could otherwise outlive the collector
-	// tick that produced the event.
-	Timeout time.Duration
-
-	// HTTPClient is optional; one with Timeout is built when nil.
-	HTTPClient *http.Client
-
-	// Clock stamps the event. Injected so tests are deterministic and so the
-	// timestamp is the service's notion of now — which is what a consumer
-	// correlating an alert against a bill needs.
-	Clock testutil.Clock
-
-	// Headers are added to each request, for an endpoint needing a shared secret.
-	Headers map[string]string
-}
-
-// WebhookNotifier POSTs events as JSON to a configured URL.
-//
-// Deliberately the only network transport here. Pointing it at ntfy, a Home
-// Assistant webhook or an MQTT bridge is a configuration choice, so countinghouse
-// never grows a dependency on whichever one is in use this year.
-type WebhookNotifier struct {
-	url     string
-	client  *http.Client
-	clock   testutil.Clock
-	headers map[string]string
-}
-
-// NewWebhookNotifier returns a notifier posting to url.
-func NewWebhookNotifier(url string, opts WebhookOptions) *WebhookNotifier {
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	client := opts.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: timeout}
-	}
-	clock := opts.Clock
-	if clock == nil {
-		clock = testutil.RealClock{}
-	}
-	return &WebhookNotifier{url: url, client: client, clock: clock, headers: opts.Headers}
-}
-
-// webhookPayload is the wire shape. Stable by intention: something downstream
-// will be parsing it.
-type webhookPayload struct {
-	// Service names the sender so a shared endpoint can tell who called.
-	Service  string         `json:"service"`
-	Kind     string         `json:"kind"`
-	Severity Severity       `json:"severity"`
-	Summary  string         `json:"summary"`
-	At       string         `json:"at"`
-	DedupKey string         `json:"dedup_key,omitempty"`
-	Detail   map[string]any `json:"detail,omitempty"`
-}
-
-// Notify posts the event. A non-2xx response or a transport failure is an error;
-// the caller is expected to count it and carry on.
-func (w *WebhookNotifier) Notify(ctx context.Context, e Event) error {
-	body, err := json.Marshal(webhookPayload{
-		Service:  "countinghouse",
-		Kind:     e.Kind,
-		Severity: e.Severity,
-		Summary:  e.Summary,
-		At:       w.clock.Now().UTC().Format("2006-01-02T15:04:05Z"),
-		DedupKey: e.DedupKey,
-		Detail:   e.Detail,
-	})
-	if err != nil {
-		return fmt.Errorf("notify: marshal event: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("notify: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for k, v := range w.headers {
-		req.Header.Set(k, v)
-	}
-
-	resp, err := w.client.Do(req)
-	if err != nil {
-		// Surface a cancelled context unwrapped enough for errors.Is, so shutdown
-		// is distinguishable from an endpoint being down.
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("notify: post to webhook: %w", ctxErr)
-		}
-		return fmt.Errorf("notify: post to webhook: %w", err)
-	}
-	defer resp.Body.Close()                              //nolint:errcheck
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096)) //nolint:errcheck // drain to reuse the connection
-
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("notify: webhook returned %s", resp.Status)
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
 // fan-out
 // ---------------------------------------------------------------------------
 
@@ -256,8 +147,9 @@ type multi []Notifier
 // Multi fans an event out to every notifier, continuing past a failure and
 // joining the errors.
 //
-// Continuing matters: the slog notifier is normally one of these, so this is what
-// guarantees an alert is still recorded when the webhook is down.
+// Continuing matters: the slog notifier is always one of these, so this is what
+// will guarantee an alert is still recorded when a future transport (MQTT) is
+// unreachable.
 func Multi(ns ...Notifier) Notifier { return multi(ns) }
 
 func (m multi) Notify(ctx context.Context, e Event) error {
