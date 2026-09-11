@@ -23,6 +23,10 @@ security:
 tags:
   - name: data
     description: Energy, cost, bill, series and event endpoints (require a Bearer JWT).
+  - name: prices
+    description: >
+      Half-hourly spot prices: the archive, the forward curve, and the cheapest
+      window for a deferrable load.
   - name: system
     description: Health and API spec endpoints.
 
@@ -287,6 +291,139 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /prices:
+    get:
+      tags: [prices]
+      summary: Half-hourly prices over a window
+      description: >
+        The price curve for a window, past or future — the archive and the forward
+        curve are the same table, which is the point of keeping prices rather than
+        only fetching what is next. Returns 503 when the instance has no price
+        archive configured, and `half_hourly: false` with a `flat_price` when the
+        tariff covering the window is flat-rate rather than half-hourly.
+      operationId: getPrices
+      parameters:
+        - { $ref: "#/components/parameters/Window" }
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+      responses:
+        "200":
+          description: The curve, with per-slot band and rank
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceCurveResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "503":
+          description: No price archive configured, or no tariff covers the window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /prices/upcoming:
+    get:
+      tags: [prices]
+      summary: Everything known about the near future
+      description: >
+        The dashboard endpoint. Carries the curve plus the derivations a consumer
+        would otherwise compute — and would compute differently from the next
+        consumer: per-slot `band`, `rank` and `percentile`, a `summary` including
+        the price in force right now, and the cheapest contiguous window for each
+        of several durations. A duration that does not fit the window is OMITTED
+        rather than shortened.
+      operationId: getUpcomingPrices
+      parameters:
+        - name: hours
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 48, default: 24 }
+          description: >
+            How far ahead to report. Capped at 48 because the supplier publishes
+            at most about a day and a half ahead.
+      responses:
+        "200":
+          description: The forward curve with bands, ranks and cheapest runs
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpcomingPricesResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "503":
+          description: No price archive configured, or no tariff is in force
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /prices/cheapest:
+    get:
+      tags: [prices]
+      summary: The cheapest contiguous window for a deferrable load
+      description: >
+        Answers "when should this run". Two behaviours worth knowing: a run will
+        never span a GAP in the prices, because a window whose prices we do not
+        hold cannot honestly be called cheap; and `before` is a deadline for
+        FINISHING, not for starting, since a load that overruns into expensive
+        time was not scheduled. A duration that is not a whole number of half hours
+        rounds UP.
+      operationId: getCheapestPrice
+      parameters:
+        - name: duration
+          in: query
+          required: true
+          schema: { type: string, example: 3h }
+          description: Go duration, e.g. 90m or 3h. Must be positive and at most 24h.
+        - name: before
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+          description: The run must FINISH at or before this instant.
+      responses:
+        "200":
+          description: The cheapest window found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheapestRunResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404":
+          description: >
+            No contiguous window of that length exists in the prices held. A
+            well-formed question with no answer, as distinct from a bad request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: No price archive configured, or the tariff is not half-hourly
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /prices/stats:
+    get:
+      tags: [prices]
+      summary: Per-day price aggregates
+      description: >
+        Daily min, max, mean, spread and plunge-slot count, grouped by LOCAL
+        calendar day — the only framing in which a 23- or 25-hour day makes sense.
+        `spread` is the number that says whether shifting load that day was worth
+        the bother. Unlike the curve endpoints these figures are EX-VAT, because
+        they are analytical values compared against each other rather than a price
+        on a screen; `vat_included` states it either way.
+      operationId: getPriceStats
+      parameters:
+        - { $ref: "#/components/parameters/Window" }
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+      responses:
+        "200":
+          description: Per-day aggregates
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceStatsResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "503":
+          description: No price archive configured, or the tariff is not half-hourly
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
 
   /metrics:
     get:
@@ -766,6 +903,164 @@ components:
             GBP per day, ex-VAT. Present on both types: a standing charge is flat
             per day even when the unit rate is half-hourly.
       required: [name, type, vat_rate, daily_standing_charge]
+
+    PriceSlot:
+      type: object
+      description: >
+        One half hour of the curve, with the derivations served rather than left to
+        each consumer — so two dashboards agree on what "cheap" means.
+      properties:
+        valid_from: { type: string, format: date-time }
+        valid_to:   { type: string, format: date-time }
+        price:
+          type: number
+          description: >
+            Pence per kWh, VAT INCLUSIVE. Signed: negative means being paid to
+            consume, and exactly 0.00 is a real price.
+        rank:
+          type: integer
+          description: Position by price within the window, 1 being the CHEAPEST.
+        percentile:
+          type: number
+          description: Position in [0,1], 0 being the cheapest. For deriving your own banding.
+        band:
+          type: string
+          enum: [plunge, cheap, normal, peak]
+          description: >
+            Classification against the window's mean. `plunge` is any price at or
+            below zero, kept separate because free energy is categorically
+            different from merely cheap. The others sit +/-15% from the mean, which
+            is deliberately NOT a percentile split — a tercile would label a third
+            of a flat day a peak, which is false.
+      required: [valid_from, price, rank, band]
+
+    PriceCurveSummary:
+      type: object
+      properties:
+        slots: { type: integer }
+        min:   { type: number }
+        max:   { type: number }
+        mean:  { type: number }
+        current:
+          type: number
+          description: >
+            The price of the slot covering now. Absent when no held slot covers it.
+
+    PriceRun:
+      type: object
+      description: A contiguous stretch of slots, and what it averages.
+      properties:
+        from:  { type: string, format: date-time }
+        to:    { type: string, format: date-time }
+        slots: { type: integer }
+        mean_price:
+          type: number
+          description: Mean pence per kWh across the run, VAT inclusive.
+
+    PriceCurveResponse:
+      type: object
+      properties:
+        window:      { type: string }
+        from:        { type: string, format: date-time }
+        to:          { type: string, format: date-time }
+        tariff_code: { type: string }
+        half_hourly:
+          type: boolean
+          description: >
+            False when the tariff covering the window is flat-rate. `slots` is then
+            empty and `flat_price` carries the rate — a different shape of answer
+            rather than an empty curve, so it is not mistaken for a broken archive.
+        flat_price:  { type: number }
+        unit:        { type: string, example: p/kWh }
+        vat_included: { type: boolean }
+        summary:     { $ref: "#/components/schemas/PriceCurveSummary" }
+        slots:
+          type: array
+          items: { $ref: "#/components/schemas/PriceSlot" }
+        complete:
+          type: boolean
+          description: Whether every half hour of the window holds a price.
+
+    UpcomingPricesResponse:
+      type: object
+      properties:
+        tariff_code:  { type: string }
+        half_hourly:  { type: boolean }
+        flat_price:   { type: number }
+        unit:         { type: string, example: p/kWh }
+        vat_included: { type: boolean }
+        generated_at: { type: string, format: date-time }
+        from:         { type: string, format: date-time }
+        to:           { type: string, format: date-time }
+        known_to:
+          type: string
+          format: date-time
+          description: >
+            End of the newest slot held for this tariff — how far prices run at all,
+            which may be beyond the requested window.
+        summary: { $ref: "#/components/schemas/PriceCurveSummary" }
+        slots:
+          type: array
+          items: { $ref: "#/components/schemas/PriceSlot" }
+        cheapest:
+          type: object
+          description: >
+            Cheapest contiguous window per duration, keyed 30m/1h/2h/3h. A duration
+            that does not fit the window is OMITTED rather than shortened — a run
+            labelled 3h must actually be three hours.
+          additionalProperties: { $ref: "#/components/schemas/PriceRun" }
+        missing:
+          type: array
+          description: >
+            Half-hour starts within the window that hold no price. Stated rather
+            than left to be inferred from a short `slots` array.
+          items: { type: string, format: date-time }
+        complete: { type: boolean }
+
+    CheapestRunResponse:
+      allOf:
+        - $ref: "#/components/schemas/PriceRun"
+        - type: object
+          properties:
+            tariff_code:  { type: string }
+            unit:         { type: string, example: p/kWh }
+            vat_included: { type: boolean }
+            searched_to:
+              type: string
+              format: date-time
+              description: How far ahead the search looked.
+
+    PriceDayStats:
+      type: object
+      properties:
+        day:
+          type: string
+          description: Local calendar date, YYYY-MM-DD.
+        slots:  { type: integer, description: "46, 48 or 50 depending on the DST changeover." }
+        min:    { type: number }
+        max:    { type: number }
+        mean:   { type: number }
+        spread:
+          type: number
+          description: max − min. Whether shifting load that day was worth the bother.
+        plunge_slots:
+          type: integer
+          description: Half hours priced at or below zero.
+
+    PriceStatsResponse:
+      type: object
+      properties:
+        window:      { type: string }
+        from:        { type: string, format: date-time }
+        to:          { type: string, format: date-time }
+        tariff_code: { type: string }
+        unit:        { type: string, example: p/kWh }
+        vat_included:
+          type: boolean
+          description: False here — these are analytical ex-VAT figures, unlike the curve endpoints.
+        days:
+          type: array
+          items: { $ref: "#/components/schemas/PriceDayStats" }
 
     PriceHealth:
       type: object

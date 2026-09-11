@@ -45,6 +45,10 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
 | `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered. |
+| `GET /prices` | Half-hourly price curve over a window, past or future. |
+| `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
+| `GET /prices/cheapest` | The cheapest contiguous window for a deferrable load. |
+| `GET /prices/stats` | Per-day min/max/mean/spread and plunge-slot counts. |
 | `GET /metrics` | Query counters, Influx latency, `drift_buckets_total` (negative meter−monitored drift beyond the 0.1 kWh quantum), uptime, goroutines. |
 
 **Windows:** `today`, `week` (starts Monday), `month` — all period-to-date — and `custom`
@@ -453,6 +457,74 @@ Alert on `complete_to`. A publication routinely advances the horizon across a wh
 leaving that day two slots short, so `known_to` alone will tell you yes when the answer is no.
 `complete_to` at or behind now means today cannot be priced in full, and degrades the
 top-level `status`.
+
+### The price endpoints
+
+Four read-only routes over the archive. All need a Bearer token like any data route,
+and **service tokens work**, because the consumers are other services.
+
+```
+GET /prices/upcoming?hours=12
+```
+
+```json
+{ "tariff_code": "E-1R-AGILE-24-10-01-N",
+  "unit": "p/kWh", "vat_included": true,
+  "summary": { "slots": 24, "current": 45.85, "min": -2.62, "mean": 24.48, "max": 50.22 },
+  "slots": [
+    { "valid_from": "…T11:00:00+01:00", "price": -2.62, "rank": 1,
+      "percentile": 0, "band": "plunge" } ],
+  "cheapest": {
+    "30m": { "from": "…T11:00:00+01:00", "to": "…T11:30:00+01:00", "mean_price": -2.62 },
+    "3h":  { "from": "…T10:30:00+01:00", "to": "…T13:30:00+01:00", "mean_price": -2.49 } },
+  "missing": [], "complete": true }
+```
+
+The derivations are **served, not left to the caller**. Two dashboards inventing their
+own definition of "cheap" is how a house ends up with two screens disagreeing about
+whether now is a good time.
+
+- **`band`** is `plunge` / `cheap` / `normal` / `peak`. `plunge` is any price at or
+  below zero — free energy, or being paid to take it — kept separate because it is
+  categorically different from merely cheap, and it is the signal most worth seeing.
+  The rest sit ±15% from the window's **median**.
+- **Median, not mean, and not percentiles.** A percentile split always labels a fixed
+  share of the window as peak, which on a flat day is false. And the mean is dragged
+  about by plunge clusters: on a real published day with ten negative slots the mean
+  fell to 24.48p against a median of 28.42p, which banded **25 of 48 slots as peak**
+  and diluted the signal to nothing. The median shrugs that off — and plunge days are
+  exactly the days these endpoints exist for, so the statistic has to survive them.
+- **`rank` 1 is the cheapest**, because the question is "when should I run this".
+- **`percentile`** is served too, so a consumer that dislikes our thresholds can band
+  it differently without refetching.
+
+```
+GET /prices/cheapest?duration=3h&before=2026-09-12T07:00:00Z
+```
+
+Two behaviours worth knowing. A run **never spans a gap** in the prices: a window
+whose prices we do not hold cannot honestly be called cheap. And `before` is a
+deadline for **finishing**, not starting — a load that overruns into expensive time
+was not scheduled, it was merely begun. A duration that is not a whole number of half
+hours rounds **up**. No window of that length returns **404**, which is a well-formed
+question with no answer rather than a bad request.
+
+`/prices/stats` reports per-**local**-day figures — the only framing in which a 23- or
+25-hour day makes sense — and is **ex-VAT**, unlike the curve endpoints, because these
+are analytical values compared against each other rather than a price on a screen.
+`vat_included` states it either way. `spread` is max − min: the single number saying
+whether shifting load that day was worth the bother.
+
+All four carry an **ETag** and a short `Cache-Control`, so a dashboard polling every
+few seconds gets a 304 rather than re-downloading 48 slots. The tag hashes the
+rendered body, so it cannot claim "unchanged" when a band has shifted because the
+window slid forward.
+
+A **flat-rate** tariff has no curve. Those routes then answer `half_hourly: false`
+with a `flat_price` rather than an empty `slots` array — a different shape of answer,
+so nobody goes hunting a collector bug that does not exist. With no archive configured
+at all they answer **503**: the route exists and works elsewhere, so it is a
+deployment state rather than a missing endpoint.
 
 #### Migrating from `energy_tariffs`
 

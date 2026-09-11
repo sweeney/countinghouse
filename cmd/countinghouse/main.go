@@ -149,6 +149,11 @@ func main() {
 		Floorplan:          fetcher,
 		Logger:             logger,
 		Prices:             priceHealth(collectors),
+		// The same store the collector writes, handed over read-only: PriceReader
+		// deliberately omits Put, so the HTTP layer cannot write to the archive even
+		// by accident. Nil when no archive is configured, and the /prices routes
+		// then answer 503.
+		PriceReader: priceReader(store),
 	}
 
 	logger.Info("starting", "config", *configPath, "http", cfg.HTTP.Listen,
@@ -374,3 +379,15 @@ func priceHealth(collectors []*collector.Collector) httpapi.PricesProvider {
 type priceHealthFunc func() []httpapi.PriceHealth
 
 func (f priceHealthFunc) PriceHealth() []httpapi.PriceHealth { return f() }
+
+// priceReader hands the archive to the HTTP layer read-only.
+//
+// Returns a nil interface when there is no store, rather than a non-nil interface
+// holding a nil pointer — the handlers check for nil to decide between serving and
+// answering 503, and a typed nil would pass that check and then panic.
+func priceReader(store *prices.SQLiteStore) httpapi.PriceReader {
+	if store == nil {
+		return nil
+	}
+	return store
+}

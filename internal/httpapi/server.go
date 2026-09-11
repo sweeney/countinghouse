@@ -149,6 +149,12 @@ type Server struct {
 	// than as no archive.
 	Prices PricesProvider
 
+	// PriceReader serves the /prices endpoints from the archive. Nil when no
+	// archive is configured, and those routes then answer 503 — the route exists
+	// and would work elsewhere, so it is a deployment state rather than a bad
+	// request or a missing endpoint.
+	PriceReader PriceReader
+
 	// RemoteConfig surfaces per-namespace remote-config fetch status on
 	// /healthz. The real impl is the Fetcher (which satisfies ConfigStatus);
 	// tests may inject a fake or leave it nil (then /healthz omits the field).
@@ -247,6 +253,10 @@ func newMux(s *Server) *http.ServeMux {
 	mux.Handle("GET /series", auth(http.HandlerFunc(s.handleSeries)))
 	mux.Handle("GET /bill", auth(http.HandlerFunc(s.handleBill)))
 	mux.Handle("GET /tariffs", auth(http.HandlerFunc(s.handleTariffs)))
+	mux.Handle("GET /prices", auth(http.HandlerFunc(s.handlePrices)))
+	mux.Handle("GET /prices/upcoming", auth(http.HandlerFunc(s.handleUpcomingPrices)))
+	mux.Handle("GET /prices/cheapest", auth(http.HandlerFunc(s.handleCheapestPrice)))
+	mux.Handle("GET /prices/stats", auth(http.HandlerFunc(s.handlePriceStats)))
 	mux.Handle("GET /metrics", auth(http.HandlerFunc(s.handleMetrics)))
 	return mux
 }
