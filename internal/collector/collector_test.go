@@ -973,3 +973,79 @@ func TestBackfillChunksALongRange(t *testing.T) {
 }
 
 var _ = fmt.Sprintf // keep fmt for debugging helpers
+
+// Plunge pricing must survive the whole pipeline, not just the layers that parse
+// and store it. The octopus and prices packages each assert negatives
+// individually; this is the end-to-end path — fetch, validate, store — with a day
+// that is mostly negative, which is the shape of a real oversupplied day.
+//
+// It matters because a negative price is the one value most likely to trip
+// something incidental: a sum that assumes monotonic growth, a comparison that
+// assumes positive money, a threshold that fires on anything unusual. Those would
+// all pass a test suite built only on 20p slots.
+func TestSyncHandlesAPlungePricingDay(t *testing.T) {
+	// earliest covers TODAY too (local 2026-04-10 starts at 2026-04-09T23:00Z);
+	// otherwise the collector correctly reports today as unpriced and this test
+	// would be asserting against that instead of against plunge handling.
+	f := newFakeFetcher(ts(t, "2026-04-09T23:00:00Z"), ts(t, "2026-04-11T23:00:00Z"))
+	// Modelled on the observed 2026-04-11: 36 of 48 slots negative, minimum
+	// -10.69p, with VAT making each MORE negative.
+	f.priceAt = func(at time.Time) (float64, float64) {
+		exc := -10.69
+		if h := at.UTC().Hour(); h >= 17 && h < 23 {
+			exc = 15.15 // the evening peak is still positive
+		}
+		return exc, exc * 1.05
+	}
+	h := newHarness(t, ts(t, "2026-04-10T16:10:00Z"), f)
+	ctx := context.Background()
+
+	res, err := h.c.Sync(ctx)
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if res.Stored.Inserted == 0 {
+		t.Fatal("stored nothing")
+	}
+	// Nothing about a negative price is invalid, and nothing about it is even
+	// surprising enough to warn: being paid to consume is the point of the tariff.
+	if len(res.Rejected) != 0 {
+		t.Errorf("rejected %d slots of a legitimate plunge day: %+v", len(res.Rejected), res.Rejected)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("warned on %d slots; -10.69p is well inside the observed range: %+v",
+			len(res.Warnings), res.Warnings)
+	}
+	if !res.TomorrowComplete {
+		t.Errorf("the day should be complete: %+v", res)
+	}
+	if kinds := h.noti.kinds(); len(kinds) != 0 {
+		t.Errorf("a plunge day raised alerts: %v", kinds)
+	}
+
+	// The archive must hold them still negative, and with VAT more negative than
+	// ex-VAT — the sign-aware relationship, not abs().
+	held, err := h.store.Range(ctx, testTariffCode,
+		ts(t, "2026-04-11T00:00:00Z"), ts(t, "2026-04-11T06:00:00Z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(held) == 0 {
+		t.Fatal("no slots held for the negative stretch")
+	}
+	var negatives int
+	for _, s := range held {
+		if s.ExcVATPence >= 0 {
+			continue
+		}
+		negatives++
+		if s.IncVATPence >= s.ExcVATPence {
+			t.Errorf("slot %s: inc %v should be MORE negative than exc %v",
+				s.ValidFrom.Format(time.RFC3339), s.IncVATPence, s.ExcVATPence)
+		}
+	}
+	if negatives == 0 {
+		t.Error("no negative slots reached the archive; the fixture is not testing what it claims")
+	}
+	t.Logf("%d negative slots round-tripped through the collector", negatives)
+}
