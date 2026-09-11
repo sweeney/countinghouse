@@ -31,7 +31,7 @@ GET /products/{product}/electricity-tariffs/{tariff}/standard-unit-rates/?page_s
 
 Results are newest-first, so the first row's `valid_to` is the **horizon** — the end of the
 last slot anyone has published. ✅ Verified: 344 bytes, one round trip. Comparing it to our
-own `known_through` detects publication without fetching anything we already hold.
+own `known_to` detects publication without fetching anything we already hold.
 
 ✅ Observed directly: at 14:32Z the horizon was `2026-09-10T22:00Z`; by 16:08Z it had moved to
 `2026-09-11T22:00Z` and `count` rose 34,798 → 34,846. A day of slots had landed.
@@ -55,8 +55,8 @@ hole in it and stopped looking. Two separate states are therefore needed:
 
 | State | Meaning | Drives |
 |---|---|---|
-| `known_through` | end of the newest slot held | "are prices arriving?" |
-| `complete_through` | end of the newest **contiguous, fully-populated local day** | "can we stop polling?" / what the API advertises |
+| `known_to` | end of the newest slot held | "are prices arriving?" |
+| `complete_to` | end of the newest **contiguous, fully-populated local day** | "can we stop polling?" / what the API advertises |
 
 **Expected slot count comes from the local calendar, never from the constant 48.** A London
 day is 46, 48 or 50 slots across a DST changeover (✅ 2025-10-26 = 50, 2026-03-29 = 46).
@@ -137,8 +137,8 @@ not binned — the same reasoning as `fail-loud-not-silent`.
 
 ### Health and metrics
 
-`/healthz` gains a `prices` block: `last_fetch`, `last_success`, `known_through`,
-`complete_through`, `incomplete_days`, `rejected`, `restatements`. "Do we have prices?" must
+`/healthz` gains a `prices` block: `last_fetch`, `last_success`, `known_to`,
+`complete_to`, `incomplete_days`, `rejected`, `restatements`. "Do we have prices?" must
 be answerable without running a query.
 
 ---
@@ -187,8 +187,8 @@ two different dashboards agree on what "cheap" means:
 {
   "tariff_code": "E-1R-AGILE-24-10-01-N",
   "generated_at": "2026-09-10T17:08:00+01:00",
-  "known_through": "2026-09-11T23:00:00+01:00",
-  "complete_through": "2026-09-11T22:00:00+01:00",
+  "known_to": "2026-09-11T23:00:00+01:00",
+  "complete_to": "2026-09-11T22:00:00+01:00",
   "unit": "p/kWh",
   "vat_included": true,
   "summary": { "slots": 46, "min": 14.70, "max": 39.78, "mean": 25.37, "current": 22.49 },
@@ -213,7 +213,7 @@ Design choices worth defending:
   dashboard invents its own threshold and two screens in the same house disagree about
   whether now is cheap. Bands are derived from the returned window, so "cheap" means cheap
   *relative to what's coming* — which is the only definition that shapes behaviour.
-- **`known_through` *and* `complete_through`.** A dashboard must be able to say "prices to
+- **`known_to` *and* `complete_to`.** A dashboard must be able to say "prices to
   23:00; tomorrow not published yet" instead of silently drawing a short axis. §1's partial
   day is precisely why both are on the wire.
 - **`cheapest` by duration** is the payload that changes behaviour — "run the dishwasher at

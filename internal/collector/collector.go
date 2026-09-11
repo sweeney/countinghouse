@@ -125,13 +125,13 @@ type Status struct {
 	LastSuccess time.Time
 	LastError   string
 
-	// KnownThrough is the end of the newest slot held. CompleteThrough is the
+	// KnownTo is the end of the newest slot held. CompleteTo is the
 	// end of the newest fully populated local day. They differ, and the
 	// difference is load-bearing: a publication can advance the horizon across a
 	// whole day while leaving that day short of slots, so answering "do we have
-	// tomorrow's prices?" with KnownThrough alone would say yes when it is no.
-	KnownThrough    time.Time
-	CompleteThrough time.Time
+	// tomorrow's prices?" with KnownTo alone would say yes when it is no.
+	KnownTo    time.Time
+	CompleteTo time.Time
 
 	// Cumulative counters, for /metrics.
 	Syncs    int
@@ -229,7 +229,7 @@ func (c *Collector) Sync(ctx context.Context) (SyncResult, error) {
 		return SyncResult{}, c.fail(fmt.Errorf("collector: horizon probe: %w", err))
 	}
 
-	known, err := c.store.KnownThrough(ctx, c.tariff.Code)
+	known, err := c.store.KnownTo(ctx, c.tariff.Code)
 	if err != nil {
 		return SyncResult{}, c.fail(fmt.Errorf("collector: read archive horizon: %w", err))
 	}
@@ -260,8 +260,8 @@ func (c *Collector) Sync(ctx context.Context) (SyncResult, error) {
 	// archive actually holds, which is not the same thing as what the supplier
 	// claims to have published. A slot rejected by validation would otherwise
 	// inflate this.
-	if held, err := c.store.KnownThrough(ctx, c.tariff.Code); err == nil {
-		c.setKnownThrough(held)
+	if held, err := c.store.KnownTo(ctx, c.tariff.Code); err == nil {
+		c.setKnownTo(held)
 	}
 
 	c.assess(ctx, now, &res)
@@ -393,7 +393,7 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 	tmrw := c.dayCompleteness(ctx, tomorrow, tomorrowStart, tomorrowEnd)
 
 	res.TomorrowComplete = tmrw.Complete
-	c.recordCompleteThrough(today, tmrw, todayEnd, tomorrowEnd)
+	c.recordCompleteTo(today, tmrw, todayEnd, tomorrowEnd)
 
 	inWatch := c.inWatchWindow(now)
 	pastDeadline := c.pastDeadline(now)
@@ -467,22 +467,22 @@ func (c *Collector) dayCompleteness(ctx context.Context, day, start, end time.Ti
 	return prices.CheckDay(held, day, c.loc)
 }
 
-// recordCompleteThrough stores the end of the newest fully populated day.
+// recordCompleteTo stores the end of the newest fully populated day.
 //
 // It stops at the first incomplete day rather than taking the newest complete
 // one, because the question this answers is "how far can we price without
 // gaps?" — and a complete tomorrow behind an incomplete today would not make
 // today priceable.
-func (c *Collector) recordCompleteThrough(today, tomorrow prices.DayCompleteness, todayEnd, tomorrowEnd time.Time) {
-	var through time.Time
+func (c *Collector) recordCompleteTo(today, tomorrow prices.DayCompleteness, todayEnd, tomorrowEnd time.Time) {
+	var completeTo time.Time
 	if today.Complete {
-		through = todayEnd
+		completeTo = todayEnd
 		if tomorrow.Complete {
-			through = tomorrowEnd
+			completeTo = tomorrowEnd
 		}
 	}
 	c.mu.Lock()
-	c.status.CompleteThrough = through
+	c.status.CompleteTo = completeTo
 	c.mu.Unlock()
 }
 
@@ -507,7 +507,7 @@ func (c *Collector) pastDeadline(now time.Time) bool {
 func (c *Collector) DueIn() time.Duration {
 	now := c.clock.Now()
 	c.mu.Lock()
-	completeThrough := c.status.CompleteThrough
+	completeThrough := c.status.CompleteTo
 	c.mu.Unlock()
 
 	_, tomorrowEnd := localDayWindow(now.AddDate(0, 0, 1), c.loc)
@@ -586,11 +586,11 @@ func (c *Collector) markSuccess(now time.Time, res SyncResult) {
 	c.status.Warnings += len(res.Warnings)
 }
 
-// setKnownThrough is called after a successful assess to publish the horizon.
-func (c *Collector) setKnownThrough(t time.Time) {
+// setKnownTo is called after a successful assess to publish the horizon.
+func (c *Collector) setKnownTo(t time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.status.KnownThrough = t
+	c.status.KnownTo = t
 }
 
 func (c *Collector) alert(ctx context.Context, e notify.Event) {

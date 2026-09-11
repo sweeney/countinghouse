@@ -267,7 +267,7 @@ Prices for tomorrow appear ~16:00 UK. Recommended posture:
 
 Health and observability, which is where this design earns its keep:
 
-- `/healthz` gains a `prices` block: `last_fetch`, `last_success`, **`known_through`**
+- `/healthz` gains a `prices` block: `last_fetch`, `last_success`, **`known_to`**
   (the timestamp of the last slot we hold) and a gap count. "Do we have prices?" must
   be answerable without a query.
 - `/metrics` gains fetch counts, errors, slots written.

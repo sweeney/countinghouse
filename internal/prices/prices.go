@@ -176,10 +176,10 @@ type Store interface {
 	// starting mid-slot still gets the price that covers its start.
 	Range(ctx context.Context, tariffCode string, from, to time.Time) ([]Slot, error)
 
-	// KnownThrough returns the end of the newest slot held for a tariff, or the
+	// KnownTo returns the end of the newest slot held for a tariff, or the
 	// zero time when none are. This is what /healthz reports so "do we have
 	// prices?" is answerable without a query.
-	KnownThrough(ctx context.Context, tariffCode string) (time.Time, error)
+	KnownTo(ctx context.Context, tariffCode string) (time.Time, error)
 
 	// Restatements returns the most recent recorded restatements, newest first.
 	Restatements(ctx context.Context, tariffCode string, limit int) ([]Restatement, error)

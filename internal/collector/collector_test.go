@@ -283,12 +283,12 @@ func TestSyncFillsAnEmptyArchive(t *testing.T) {
 		t.Fatalf("stored nothing: %+v", res)
 	}
 
-	known, err := h.store.KnownThrough(ctx, testTariffCode)
+	known, err := h.store.KnownTo(ctx, testTariffCode)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := ts(t, "2026-09-11T22:00:00Z"); !known.Equal(want) {
-		t.Errorf("KnownThrough = %s, want %s", known, want)
+		t.Errorf("KnownTo = %s, want %s", known, want)
 	}
 }
 
@@ -490,7 +490,7 @@ func TestSyncIsFailOpen(t *testing.T) {
 			if _, err := h.c.Sync(ctx); err != nil {
 				t.Fatal(err)
 			}
-			knownBefore, err := h.store.KnownThrough(ctx, testTariffCode)
+			knownBefore, err := h.store.KnownTo(ctx, testTariffCode)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -510,7 +510,7 @@ func TestSyncIsFailOpen(t *testing.T) {
 				t.Errorf("LastSuccess moved to %s during a failure; health would look fine", got)
 			}
 
-			knownAfter, err := h.store.KnownThrough(ctx, testTariffCode)
+			knownAfter, err := h.store.KnownTo(ctx, testTariffCode)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -570,10 +570,10 @@ func TestSyncRecoversAfterFailure(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // The real 2026-09-10 case. The horizon covers all of tomorrow while tomorrow is
-// missing its last two slots. complete_through must NOT advance past the
+// missing its last two slots. complete_to must NOT advance past the
 // incomplete day, and the collector must report it as still worth polling rather
 // than alerting immediately.
-func TestSyncDistinguishesKnownThroughFromCompleteThrough(t *testing.T) {
+func TestSyncDistinguishesKnownToFromCompleteTo(t *testing.T) {
 	// Exactly the observed case: published through 22:00Z, so the last slot is
 	// [21:30,22:00) and local 2026-09-11 is missing its final two — 46 of 48.
 	f := newFakeFetcher(ts(t, "2026-09-09T23:00:00Z"), ts(t, "2026-09-11T22:00:00Z"))
@@ -586,12 +586,12 @@ func TestSyncDistinguishesKnownThroughFromCompleteThrough(t *testing.T) {
 	}
 
 	st := h.c.Status()
-	if !st.KnownThrough.Equal(ts(t, "2026-09-11T22:00:00Z")) {
-		t.Errorf("KnownThrough = %s, want the newest slot's end", st.KnownThrough)
+	if !st.KnownTo.Equal(ts(t, "2026-09-11T22:00:00Z")) {
+		t.Errorf("KnownTo = %s, want the newest slot's end", st.KnownTo)
 	}
 	// The incomplete day must not count as complete.
-	if st.CompleteThrough.After(ts(t, "2026-09-10T23:00:00Z")) {
-		t.Errorf("CompleteThrough = %s; it must not advance past an incomplete day", st.CompleteThrough)
+	if st.CompleteTo.After(ts(t, "2026-09-10T23:00:00Z")) {
+		t.Errorf("CompleteTo = %s; it must not advance past an incomplete day", st.CompleteTo)
 	}
 	if res.TomorrowComplete {
 		t.Error("tomorrow is missing two slots and must not be reported complete")
@@ -629,8 +629,8 @@ func TestSyncCompletesWhenTheTailArrives(t *testing.T) {
 	if res.KeepPolling {
 		t.Error("KeepPolling should be false once tomorrow is complete")
 	}
-	if st := h.c.Status(); !st.CompleteThrough.Equal(ts(t, "2026-09-11T23:00:00Z")) {
-		t.Errorf("CompleteThrough = %s, want the end of the now-complete day", st.CompleteThrough)
+	if st := h.c.Status(); !st.CompleteTo.Equal(ts(t, "2026-09-11T23:00:00Z")) {
+		t.Errorf("CompleteTo = %s, want the end of the now-complete day", st.CompleteTo)
 	}
 }
 

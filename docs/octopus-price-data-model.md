@@ -292,7 +292,7 @@ copy. Which implies:
 - a **dedicated, never-expiring location** (no shared bucket, no retention policy);
 - it is in the **backup set** — and note an Influx bucket and a directory of files are very
   different propositions for the person restoring it;
-- **`known_through`** (the last slot we hold) on `/healthz`, so "do we have prices?" is
+- **`known_to`** (the last slot we hold) on `/healthz`, so "do we have prices?" is
   answerable without running a query.
 
 ---
@@ -401,7 +401,7 @@ func (s Slot) Covers(t time.Time) bool // ValidFrom <= t && (ValidTo == nil || t
 type Store interface {
     Put(context.Context, []Slot) error            // idempotent; append-only
     Range(context.Context, string, time.Time, time.Time) ([]Slot, error)
-    KnownThrough(context.Context, string) (time.Time, error)
+    KnownTo(context.Context, string) (time.Time, error)
 }
 
 // Curve is a window's slots, indexed for pricing. Missing is the explicit

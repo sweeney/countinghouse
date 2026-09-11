@@ -261,14 +261,14 @@ func (s *SQLiteStore) Range(ctx context.Context, tariffCode string, from, to tim
 	return out, nil
 }
 
-// KnownThrough returns the point our knowledge of a tariff's prices runs out:
+// KnownTo returns the point our knowledge of a tariff's prices runs out:
 // the end of the newest slot held, or its start when that slot is open-ended.
 //
 // An empty archive yields the ZERO TIME and no error. "We hold nothing yet" is a
 // legitimate state at first boot and has to be distinguishable from a failure —
 // this is what /healthz reports, so conflating them would make the health signal
 // lie in exactly the situation it exists for.
-func (s *SQLiteStore) KnownThrough(ctx context.Context, tariffCode string) (time.Time, error) {
+func (s *SQLiteStore) KnownTo(ctx context.Context, tariffCode string) (time.Time, error) {
 	// COALESCE so an open-ended slot contributes its start rather than NULL:
 	// reporting a nil end as the horizon would be meaningless.
 	var newest sql.NullString
@@ -276,7 +276,7 @@ func (s *SQLiteStore) KnownThrough(ctx context.Context, tariffCode string) (time
 		SELECT MAX(COALESCE(valid_to, valid_from)) FROM unit_price WHERE tariff_code = ?`,
 		tariffCode).Scan(&newest)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("prices: known-through query: %w", err)
+		return time.Time{}, fmt.Errorf("prices: known-to query: %w", err)
 	}
 	if !newest.Valid || newest.String == "" {
 		return time.Time{}, nil

@@ -279,12 +279,12 @@ func TestTariffsAreIsolated(t *testing.T) {
 		t.Errorf("tariff A price = %v, want 20 — the other tariff leaked in", got[0].ExcVATPence)
 	}
 
-	known, err := s.KnownThrough(ctx, tariffB)
+	known, err := s.KnownTo(ctx, tariffB)
 	if err != nil {
-		t.Fatalf("KnownThrough: %v", err)
+		t.Fatalf("KnownTo: %v", err)
 	}
 	if !known.Equal(at(t, "2026-09-10T00:30:00Z")) {
-		t.Errorf("KnownThrough(B) = %v, want B's own horizon", known)
+		t.Errorf("KnownTo(B) = %v, want B's own horizon", known)
 	}
 }
 
@@ -567,21 +567,21 @@ func TestRangeRejectsInvertedWindow(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// KnownThrough — the health signal
+// KnownTo — the health signal
 // ---------------------------------------------------------------------------
 
-func TestKnownThrough(t *testing.T) {
+func TestKnownTo(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
 	// Empty: the zero time, NOT an error. "We hold nothing yet" is a legitimate
 	// state at first boot and must be distinguishable from a failure.
-	got, err := s.KnownThrough(ctx, tariffA)
+	got, err := s.KnownTo(ctx, tariffA)
 	if err != nil {
-		t.Fatalf("KnownThrough on an empty archive should not error: %v", err)
+		t.Fatalf("KnownTo on an empty archive should not error: %v", err)
 	}
 	if !got.IsZero() {
-		t.Errorf("KnownThrough = %v, want the zero time", got)
+		t.Errorf("KnownTo = %v, want the zero time", got)
 	}
 
 	if _, err := s.Put(ctx, []Slot{
@@ -591,20 +591,20 @@ func TestKnownThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err = s.KnownThrough(ctx, tariffA)
+	got, err = s.KnownTo(ctx, tariffA)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The END of the newest slot, not its start: that is where our knowledge
 	// actually runs out.
 	if want := at(t, "2026-09-10T22:00:00Z"); !got.Equal(want) {
-		t.Errorf("KnownThrough = %v, want %v", got, want)
+		t.Errorf("KnownTo = %v, want %v", got, want)
 	}
 }
 
 // An open-ended slot means we know prices indefinitely from its start. Reporting
 // its (nil) end as the horizon would be meaningless, so the start is used.
-func TestKnownThroughWithOpenEndedSlot(t *testing.T) {
+func TestKnownToWithOpenEndedSlot(t *testing.T) {
 	s := openMemory(t)
 	ctx := context.Background()
 
@@ -614,7 +614,7 @@ func TestKnownThroughWithOpenEndedSlot(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.KnownThrough(ctx, tariffA)
+	got, err := s.KnownTo(ctx, tariffA)
 	if err != nil {
 		t.Fatal(err)
 	}

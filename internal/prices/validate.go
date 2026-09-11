@@ -395,7 +395,7 @@ func finitePrices(s Slot) error {
 //
 // It gates the SIGNAL, not the rows: every slot that passed Gate A is stored
 // whatever this says. What it decides is whether the day may count towards
-// complete_through — i.e. whether the collector can stop polling and whether
+// complete_to — i.e. whether the collector can stop polling and whether
 // the API may advertise the day as whole.
 type DayCompleteness struct {
 	// Day is local midnight IN the location asked about, so it prints as the
