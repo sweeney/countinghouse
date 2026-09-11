@@ -165,10 +165,26 @@ Implementation notes specific to this service:
   and reports a per-device `effective_rate`, so a noisy small-load figure is interpretable
   rather than merely wrong-looking. Still **OPEN (4)** per the model doc.
 
-> ⚠️ **#27 is a prerequisite for short-window spend.** The series path currently bills energy
-> from before `win.Start` (the first bucket is never clipped). Under a flat tariff that was a
-> small kWh error; at slot resolution the over-counted energy is priced at a *specific* slot's
-> rate. Accurate spend over a window that doesn't start on a 30m boundary needs #27 fixed.
+> ✅ **#27 is fixed and merged (#30), so this is no longer a blocker.** It was: the series path
+> billed energy from before `win.Start`, which under a flat tariff was a small kWh error but at
+> slot resolution means over-counted energy priced at a *specific* slot's rate.
+>
+> Worth recording how it was fixed, because it is better than the approach sketched here
+> earlier and changes what this milestone has to do. The counter series no longer pads its range
+> at all: it ranges from `win.Start` and lets `increase()` re-base there, so bucket 0 *cannot*
+> contain pre-window energy — no head query, no bucket substitution. `bucketHours` also now
+> takes `start`, clipping the head symmetrically with the tail. An earlier attempt (#28) did
+> use a separate head query, was merged on green CI without review, and was reverted when a
+> review found that a head containing no counter sample merely relocated the pre-window energy
+> into the next bucket that had data rather than removing it.
+>
+> Two consequences for slot-resolution costing:
+>
+> - it can rely on bucket 0 being correctly clipped, so segment edges need no special handling;
+> - the UPS path changed too (#33): per-bucket energy is now a trapezoidal `integral(power_w)`
+>   rather than mean-power × bucket-hours. Those are different estimators of the same quantity
+>   and diverge when reporting is uneven, so any costing arithmetic should go through the
+>   series layer rather than re-deriving UPS energy from a mean.
 
 ---
 
@@ -249,7 +265,7 @@ and `spec_test.go` keeps the new routes honest.
 | 3 | `internal/prices`: store (append-only), validation gates A/B/C, quarantine, restatement detection | fake store mirroring `influx/fake.go` |
 | 4 | Collector: horizon probe, completeness tracking, the four triggers, `/healthz` + `/metrics` | `FakeClock` drives a whole publication day, late and partial |
 | 5 | Backfill mode | full history is ~24 paged requests, once |
-| 6 | Slot-resolution spend in `/bill` + `/devices/{id}/cost`; `MaxBuckets` bypass; unpriced reporting | needs #27 for off-grid windows |
+| 6 | Slot-resolution spend in `/bill` + `/devices/{id}/cost`; `MaxBuckets` bypass; unpriced reporting | unblocked — #27 fixed by #30 |
 | 7 | `/prices`, `/prices/upcoming`, `/prices/cheapest`, `/prices/stats` + OpenAPI + README | the behaviour-shaping half |
 
 M2 first is deliberate: it is an outstanding correctness fix, not an Agile feature, and the

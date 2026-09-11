@@ -336,7 +336,7 @@ sit.** London's offset is always a whole number of hours, so interior buckets ma
 price slots with no alignment work. DST days fall out correctly (46/48/50 slots) because the
 axis steps in real time, not calendar days.
 
-❌ **But the edge buckets are currently snapped outward, and over-report.** Verified live
+✅ **Fixed upstream by #30** (this section described it while it was live). Originally verified
 2026-09-10 against `/devices/electricity_meter/series`:
 
 | window start | first bucket | kWh |
@@ -357,17 +357,17 @@ may be the day's most expensive. It is bounded by one slot at each edge — negl
 month (2 of 1488), but up to ~30% on a "what did the last 90 minutes cost?" query, which is
 exactly the kind of question Agile invites.
 
-**Fix:** clip edge buckets to the requested range. Interior segments are the regular 30m
-grid (one `aggregateWindow` query); the two partial edge segments take their own exact
-`range(start:, stop:)` queries — `increase()` and `integral()` are both already correct over
-an arbitrary range. Three queries per device instead of one.
+**How it was actually fixed**, which is cleaner than the three-query approach proposed here:
+the counter series stopped padding its range and now ranges from `win.Start`, letting
+`increase()` re-base there so bucket 0 cannot contain pre-window energy at all. `bucketHours`
+takes `start` and clips the head symmetrically with the tail. No extra queries.
 
-Per the TDD house rule this wants a failing test first: assert that a window starting at
-`14:29` reports strictly less energy than one starting at `14:00`.
+The regression is pinned upstream: a window starting at `14:29` reports strictly less energy
+than one starting at `14:00`, and `/series` now agrees with `/devices/{id}/energy` over an
+off-grid window.
 
-**OPEN (6):** fix the clipping in `/series` too, or only on the internal costing path? The
-`/series` axis labels buckets by slot start, so clipping changes published bucket values —
-a visible behaviour change, and the kind of thing `keep-docs-in-sync` exists for.
+~~OPEN (6)~~ — settled upstream: the clip applies to `/series` as well, so the two endpoints
+agree by construction rather than by coincidence.
 
 ### Unpriced segments
 
