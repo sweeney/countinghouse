@@ -102,12 +102,51 @@ Chart(points) { p in LineMark(x: .value("t", p.time), y: .value("W", p.avg_w)).f
 Timestamps are RFC3339 with the local offset (parse with JS `new Date(...)` / Swift
 `ISO8601`/`Date`). Values are pre-rounded (kWh 3dp, cost 4dp GBP, avg_w 1dp W).
 
-For a `window=custom` whose `from` is **not** on an interval boundary, the bucket axis
-snaps **down** to the interval grid (anchored at local midnight) so it matches Influx's
+#### Bucket semantics
+
+For a window whose `from` is **not** on an interval boundary, the bucket axis snaps
+**down** to the interval grid (anchored at local midnight) so it matches Influx's
 aggregation boundaries — e.g. `from=14:23` with `interval=1h` yields buckets starting at
-`14:00, 15:00, …`. The first bucket is widened to its grid boundary (the pre-`from` slice
-carries no in-window data). Period-to-date windows (`today`/`week`/`month`) already start
-at local midnight, so they are unaffected.
+`14:00, 15:00, …`. **The first bucket's timestamp can therefore precede `from`.**
+
+That first bucket is a **partial** bucket: it is *labelled* by the grid boundary it starts
+on, but its `kwh`/`cost`/`avg_w` cover only the part inside the window (`14:23` onwards),
+exactly as the last bucket covers only up to `to`. Both edges are clipped, so moving `from`
+later within the first bucket lowers the reported energy as it should, and summing `kwh`
+across buckets never bills electricity from before `from`.
+
+For a **counter-class** device — every plug class, and the meter — `total_kwh` equals
+`GET /devices/{id}/energy` `kwh` over the same window, for every window. Both are the same
+reset-safe `increase()` anchored at the first reading at or after `from`, so this holds by
+definition rather than by arithmetic coincidence, including when a device's readings have a
+gap around the window start.
+
+A bucket a counter device reported nothing in is `0`, and the energy that accrued meanwhile
+lands in the next bucket that does have a reading. A device that reported nothing at all in
+the window is all zeroes, never a share of someone else's total.
+
+**`ups_sensor` is different and does not carry that guarantee.** A UPS publishes only
+`power_w`, so `/devices/{id}/energy` integrates it (`integral(unit: 1h)`, linearly
+interpolating across gaps) while the series computes `mean(power_w) × bucket_hours`. Those
+are two estimators of the same integral: they agree closely for the steady loads a UPS
+carries and for evenly-spaced samples, and diverge as reporting becomes uneven. The
+synthetic `unmonitored` series has no scalar counterpart at all, and its per-bucket
+clamping means its total is not the raw residual either.
+
+Which windows the **grid snap** affects: `window=custom` with an off-grid `from`, and
+`window=<N>h` (e.g. `24h`), whose start inherits the current minute and second. `today`,
+`week`, `month` and `<N>d` all start at local midnight, which is on every allowed
+interval's grid, so their first bucket is a full one.
+
+The **anchoring** above is separate and applies to every window, aligned or not: a counter
+series always measures from the first reading at or after `from`. Energy a device
+accumulated before `from` and reported just after it belongs to the previous window, not
+this one — which is what `/devices/{id}/energy`, `/devices/{id}/cost` and `/bill` have
+always returned.
+
+Bucket lengths are real wall-clock lengths, not nominal ones: a `1d` bucket spanning a DST
+change is 23h or 25h, and `avg_w` for the derived `unmonitored` series is scaled by the
+hours a bucket actually covers.
 
 The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth for request
 and response schemas; a path-coverage test fails CI if routes and spec drift.
