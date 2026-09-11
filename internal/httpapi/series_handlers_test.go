@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -1164,6 +1165,47 @@ func TestUnmonitoredDeviceSeries_HasNoHouseOnlyFields(t *testing.T) {
 				t.Errorf("shape %q: body carries house-only %q = %v; a device-grouped response must not (issue #23)",
 					shape, k, v)
 			}
+		}
+	}
+}
+
+// R3.1 is a claim about the SCHEMA, not about three named fields, and the tests
+// above pin the symptom rather than the requirement: a field added to
+// SeriesResponse outside HouseStats and populated only on house builds would leak
+// exactly as HouseStats did, and every other test here would still pass. That is
+// the same shape as the bug — a field shipped because of where it LIVES rather
+// than because anyone decided to ship it.
+//
+// This takes its expectation from the two real responses instead of from a
+// hand-maintained list, so it cannot drift out of date: whatever a real device's
+// body carries at the top level, the synthetic one must carry the same, in both
+// shapes. That is what "the same response schema … with zero client branching"
+// actually asks for.
+func TestUnmonitoredDeviceSeries_TopLevelSchemaMatchesARealDevice(t *testing.T) {
+	energyPer := map[string]float64{"winefridge": 0.05, "electricity_meter": 0.5}
+	powerPer := map[string]float64{"winefridge": 52.0} // network-ups silent, so the house build populates HouseStats
+	s := seriesSetup(t, energyPer, powerPer)
+
+	topLevelKeys := func(path string) []string {
+		t.Helper()
+		w := doGET(t, s, path)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: want 200, got %d: %s", path, w.Code, w.Body.String())
+		}
+		var out []string
+		for k := range decode(t, w) {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	for _, shape := range []string{"", "&shape=rows"} {
+		real := topLevelKeys("/devices/winefridge/series?window=today" + shape)
+		synthetic := topLevelKeys("/devices/unmonitored/series?window=today" + shape)
+		if !reflect.DeepEqual(real, synthetic) {
+			t.Errorf("shape %q: /devices/unmonitored/series and /devices/{id}/series must carry the same top-level keys\n"+
+				"  real device: %v\n  unmonitored: %v", shape, real, synthetic)
 		}
 	}
 }
