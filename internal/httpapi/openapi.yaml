@@ -201,6 +201,12 @@ paths:
         same single-series shape; it returns 404 when no whole-house meter is
         configured (unmonitored is then undefined). For id=unmonitored the
         unclamped diagnostic param applies (ignored for real devices).
+        Its body is the SAME schema as a real device's: coverage,
+        stale_monitored_count and stale_monitored_ids are absent here too, even
+        though deriving unmonitored requires the whole-house decomposition. Those
+        signals describe that decomposition rather than this series, and
+        GET /series?group_by=house carries them beside the identical unmonitored
+        values for a consumer that wants both.
       operationId: getDeviceSeries
       tags: [data]
       parameters:
@@ -982,8 +988,11 @@ components:
         stale_monitored_count:
           type: integer
           description: >
-            group_by=house only: count of monitored devices that reported NO power
-            telemetry in the window (likely dropped/offline). Their load shifts
+            group_by=house only — including GET /devices/unmonitored/series, which
+            derives its values from the house decomposition but reports group_by
+            "device" and therefore omits this: count of monitored devices that
+            reported NO power telemetry in the window (likely dropped/offline).
+            Their load shifts
             into the "unmonitored" series, inflating it, so a non-zero value flags
             a low-confidence split. Omitted for other groupings / no meter.
             A device whose buckets came back empty counts here: an unreported

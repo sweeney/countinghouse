@@ -150,6 +150,12 @@ const driftQuantumKWh = 0.1
 // "this much of the home is genuinely unmonitored" from "monitored is
 // under-counted because a sensor dropped" without a second service call (C12/C13).
 //
+// "group_by=house" means the REPORTED grouping, not the one the values were
+// computed from. /devices/unmonitored/series derives its series from the house
+// decomposition and then reports itself as device-grouped, so it carries none of
+// these — see AsSingleDevice, which clears them in the same breath as it rewrites
+// GroupBy precisely so the two cannot disagree (issue #23).
+//
 // Coverage is monitored ÷ meter energy for the window — a pointer so a genuine
 // zero (meter present, nothing monitored) is distinct from "not applicable" (nil,
 // no meter / not a house grouping), which is then omitted.
@@ -806,6 +812,33 @@ func rebuildUnmonitoredUnclamped(series []Series, buckets []time.Time, bucketHou
 	}
 	series[idx] = deriveUnmonitored(buckets, bucketHours, monitored, *meter, tariff, true)
 	return series
+}
+
+// AsSingleDevice reshapes a GROUPED build into the single-device response form:
+// only the named series, group_by=device, and none of the house-only confidence
+// signals. It is what lets /devices/unmonitored/series satisfy R3.1 — the same
+// response schema as a real device's, so a client plots it with no branching —
+// even though unmonitored can only be DERIVED from the house grouping.
+//
+// All three parts are one decision, which is why they are one call (issue #23).
+// The third is the one easy to miss: HouseStats is EMBEDDED in SeriesResponse,
+// and BuildSeries populates it under exactly the predicate that reports GroupBy
+// as "house". Rewriting GroupBy alone therefore left a body announcing itself as
+// device-grouped while still carrying coverage and staleness — two facts about
+// the same response, disagreeing. Clearing the stats here means they cannot.
+//
+// Dropping them loses nothing: they describe the whole-house decomposition, not
+// this series, and GET /series?group_by=house still carries them beside the same
+// unmonitored values for a consumer who wants both.
+//
+// Drift is deliberately kept. It is never serialised (json:"-") and is the
+// operator-facing C3 signal the handler turns into a metric — a property of the
+// computation that produced these numbers, not of the shape they are sent in.
+func (r SeriesResponse) AsSingleDevice(key string) SeriesResponse {
+	r.Series = OnlySeries(r.Series, key)
+	r.GroupBy = GroupByDevice
+	r.HouseStats = HouseStats{}
+	return r
 }
 
 // OnlySeries returns the sub-slice of series whose Key == key (preserving order),
