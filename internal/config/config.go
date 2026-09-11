@@ -52,6 +52,23 @@ type SiteConfig struct {
 	// config that leaves it unset.
 	DevicesNamespace string `yaml:"devices_namespace"`
 
+	// AgreementsNamespace names this site's dated-tariff namespace (conventionally
+	// "energy_agreements"). It sits here, beside the other two per-property
+	// pointers, because a tariff is a property of the SITE — a second property is
+	// generally on a different tariff, in a different region, at different rates.
+	//
+	// When EMPTY the legacy `energy_tariffs` document is used instead, which is
+	// what makes the migration opt-in: a deployment can take this binary with no
+	// config change and behave exactly as before.
+	//
+	// The two are never merged. Two tariff documents disagreeing about what a kWh
+	// cost has no safe resolution, so exactly one is authoritative and both
+	// /healthz and GET /tariffs report which. When this IS set the namespace is
+	// required: per the cold-start rule, naming one that has never been fetched
+	// aborts startup rather than silently falling back to the legacy rate, because
+	// falling back would price a half-hourly tariff at a flat number.
+	AgreementsNamespace string `yaml:"agreements_namespace"`
+
 	// FloorplanNamespace is the config namespace holding this site's floor and room
 	// records — the same document greenhouse reads, published by /floors and /rooms
 	// and used to label grouped series with names instead of ids.
@@ -124,23 +141,6 @@ type IdentityConfig struct {
 // RemoteConfigConfig holds the address of the remote config service.
 type RemoteConfigConfig struct {
 	BaseURL string `yaml:"base_url"`
-
-	// AgreementsNamespace names the dated-tariff namespace (conventionally
-	// "energy_agreements"). When EMPTY the legacy `energy_tariffs` document is
-	// used instead, which is what makes the migration opt-in: a deployment can
-	// take this binary with no config change and keep its existing behaviour.
-	//
-	// The two are never merged. Two tariff documents disagreeing about what a kWh
-	// cost has no safe resolution, so exactly one is authoritative and /healthz
-	// reports which. When this is set the namespace is REQUIRED: per the
-	// cold-start rule, naming a namespace that has never been fetched aborts
-	// startup rather than silently falling back to the legacy rate, because
-	// falling back would price a variable tariff at a fixed rate.
-	//
-	// Not site-scoped today. It may need to become so — a second property is
-	// generally on a different tariff — but nothing here assumes one way or the
-	// other yet.
-	AgreementsNamespace string `yaml:"agreements_namespace"`
 }
 
 // PricesConfig locates the half-hourly price archive.

@@ -464,9 +464,13 @@ and it cannot express a half-hourly tariff at all.
 Migration is opt-in via one local-config key:
 
 ```yaml
-remote_config:
+site:
   agreements_namespace: "energy_agreements"
 ```
+
+It lives in the `site:` block beside `devices_namespace` and `floorplan_namespace`, because a
+tariff is a property of the site: a second property is generally on a different tariff, in a
+different region, at different rates.
 
 Unset, the legacy document is authoritative. Set, the new one is — and the legacy
 document is not even fetched. **The two are never merged:** two documents disagreeing

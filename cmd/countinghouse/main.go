@@ -69,7 +69,7 @@ func main() {
 		FloorplanNamespace: cfg.Site.FloorplanNamespace,
 		// Empty means the legacy energy_tariffs document stays authoritative, so
 		// this binary can be deployed with no config change and behave as before.
-		AgreementsNamespace: cfg.RemoteConfig.AgreementsNamespace,
+		AgreementsNamespace: cfg.Site.AgreementsNamespace,
 	}
 	if cfg.RemoteConfig.BaseURL == "" {
 		// Explicit local-dev opt-out: nothing is fetched, so the cold check below is

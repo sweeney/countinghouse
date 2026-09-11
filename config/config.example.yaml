@@ -40,6 +40,22 @@ site:
   devices_namespace: devices_home
   floorplan_namespace: floorplan_home
 
+  # This site's dated-tariff namespace. Sits here beside the other two because a
+  # tariff is a property of the SITE: a second property is generally on a different
+  # tariff, in a different region, at different rates.
+  #
+  # Leave UNSET to keep using the legacy `energy_tariffs` single-rate document —
+  # that is what makes the migration opt-in, so this binary can be deployed with no
+  # config change at all. Set it to move to dated agreements, which is what a
+  # half-hourly (variable) tariff requires.
+  #
+  # The two are never merged: exactly one document is authoritative, and both
+  # /healthz and GET /tariffs report which. When set, the namespace is required — a
+  # named namespace that has never been fetched aborts startup rather than quietly
+  # falling back to the legacy rate, because falling back would price a half-hourly
+  # tariff at a flat number.
+  # agreements_namespace: "energy_agreements"
+
 # Countinghouse local configuration.
 # Device inventory and tariffs are fetched from the remote config service
 # (config.swee.net) and are NOT defined here.
@@ -64,17 +80,6 @@ identity:
 
 remote_config:
   base_url: "https://config.swee.net"
-
-  # Dated-tariff namespace. Leave UNSET to keep using the legacy `energy_tariffs`
-  # single-rate document; set it to opt in to dated agreements, which is what a
-  # half-hourly (variable) tariff requires.
-  #
-  # The two are never merged — exactly one document is authoritative, and
-  # /healthz and GET /tariffs both report which. When set, the namespace is
-  # required: a named namespace that has never been fetched aborts startup rather
-  # than quietly falling back to the legacy rate, because falling back would
-  # price a variable tariff at a fixed number.
-  # agreements_namespace: "energy_agreements"
 
 prices:
   # The half-hourly price archive: the one thing countinghouse writes.
