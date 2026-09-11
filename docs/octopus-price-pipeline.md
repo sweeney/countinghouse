@@ -264,7 +264,7 @@ and `spec_test.go` keeps the new routes honest.
 | 2 | Tariff effective-date history (`UNIT_PRICE` relation, real `TariffFor(t)`) | **Fixes a live bug**: pre-April-2026 windows are mispriced by 3.34p/kWh today |
 | 3 | `internal/prices`: store (append-only), validation gates A/B/C, quarantine, restatement detection | fake store mirroring `influx/fake.go` |
 | 4 | Collector: horizon probe, completeness tracking, the four triggers, `/healthz` + `/metrics` | `FakeClock` drives a whole publication day, late and partial |
-| 5 | Backfill mode | full history is ~24 paged requests, once |
+| 5 | ~~Backfill mode~~ — **not needed to start** | A first sync against an EMPTY archive already requests an unbounded range, so it pulls the supplier's whole history (verified: 711 days, 34k slots, one call that the client pages internally). A one-shot CLI stays useful only for a TARGETED re-fetch of a range believed wrong — and the daily sweep already heals gaps. Demoted to an optional convenience. |
 | 6 | Slot-resolution spend in `/bill` + `/devices/{id}/cost`; `MaxBuckets` bypass; unpriced reporting | unblocked — #27 fixed by #30 |
 | 7 | `/prices`, `/prices/upcoming`, `/prices/cheapest`, `/prices/stats` + OpenAPI + README | the behaviour-shaping half |
 
