@@ -15,7 +15,7 @@ const MaxBuckets = 1000
 //
 // Token is the Flux duration literal passed to aggregateWindow(every:) (and to
 // the influx series builders). Duration is the Go-side fixed length used to
-// step the canonical axis and to convert UPS mean-power to energy. Calendar
+// step the canonical axis and, via bucketHours, to energy-derive avg_w. Calendar
 // marks day-and-larger intervals whose real length is NOT a fixed Duration: a
 // London calendar day is 23h or 25h across a DST changeover, so the axis must
 // step by calendar date (time.Date day+1) rather than by adding Duration.

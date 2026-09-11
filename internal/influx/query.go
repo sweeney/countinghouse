@@ -24,8 +24,21 @@ type Row struct {
 	Location string
 	Field    string
 	// Value holds the record's _value when it is numeric (float64); it is the
-	// zero value for string-valued records.
+	// zero value for string-valued records AND for null ones — see Null, which
+	// is the only way to tell those apart.
 	Value float64
+	// Null reports that the record carried a null _value. Influx emits one for
+	// every bucket a device did not report in when a query asks for
+	// createEmpty: true, and a null decodes to the SAME float64 zero as a real
+	// reading of 0 — so without this flag "the device drew 0 W" and "the device
+	// said nothing" are one value (issues #29, #32).
+	//
+	// Consumers must decide which they mean. energy.demux drops null rows rather
+	// than folding a fabricated zero onto the axis, which is also what lets C13
+	// staleness see a device that produced only nulls: it ends up with no entry
+	// in powerByDevice at all, instead of an entry full of plausible-looking
+	// zeroes.
+	Null bool
 	// Text holds the record's _value when it is a string. The device_activity
 	// measurement publishes string `from`/`to` fields (e.g. "idle"→"active"),
 	// which the numeric Value cannot carry; Text preserves them. Empty for

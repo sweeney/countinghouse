@@ -257,11 +257,16 @@ func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 // wall-clock length, which is not the same as iv.Duration: a calendar-day bucket
 // spanning a DST change is 23h or 25h.
 //
-// This is what the UPS energy conversion (mean watts × hours / 1000) must use.
-// The head clip is load-bearing there: aggregateWindow computes bucket 0's mean
-// over the samples inside the QUERY RANGE, which begins at win.Start, so a mean
-// measured over one minute would otherwise be scaled across a whole 30-minute
-// interval (issue #27).
+// Two consumers need it, both of them DIVIDING energy by a duration rather than
+// multiplying a rate by one (UPS energy stopped being mean × hours in issue #32
+// — Influx clips those buckets itself now, since the query range is the exact
+// window):
+//
+//   - deriveUPSPower and deriveUnmonitored, which energy-derive avg_w as
+//     kwh × 1000 / hours. The head clip is load-bearing there: bucket 0's energy
+//     covers only the minute inside the window, so dividing it by the full grid
+//     interval would report a UPS holding a steady kilowatt as idling at 33 W.
+//   - anything reasoning about how much of a bucket the window actually covers.
 func bucketHours(buckets []time.Time, start, stop time.Time) []float64 {
 	hrs := make([]float64, len(buckets))
 	for i := range buckets {
@@ -916,9 +921,45 @@ func sortedDeviceIDs(devices map[string]config.DeviceConfig) []string {
 	return ids
 }
 
+// deriveUPSPower fills avg_w for the UPS set from the energy query 2 just
+// produced: kWh × 1000 / bucket_hours, which is the bucket's TIME-WEIGHTED mean
+// power (issue #32).
+//
+// A UPS is the one metered class with no counter, so its energy is an estimate
+// of an integral rather than a reading. Taking avg_w from that same integral is
+// the C8 argument applied where it belongs a second time: the published avg_w
+// and the published kwh are then two views of ONE number and cannot contradict
+// each other. The alternative — a separate mean(power_w) query — reintroduces
+// exactly the estimator gap this change closes, one field lower down: a bucket
+// whose samples cluster in its first minutes would report a healthy sample mean
+// beside an energy figure that disagrees with it.
+//
+// For the steady loads a UPS carries, sampled regularly, the time-weighted mean
+// and the sample mean coincide to well inside avg_w's 1dp — so this is not a
+// visible change in the ordinary case, only in the uneven one it exists for.
+//
+// Devices with NO energy rows are skipped deliberately, leaving them absent from
+// powerByDevice: a UPS that reported nothing all window must stay visible to C13
+// staleness rather than being handed a manufactured row of zeroes.
+func deriveUPSPower(upsIDs []string, bucketHours []float64, energyByDevice, powerByDevice map[string][]float64) {
+	for _, id := range upsIDs {
+		kwh := energyByDevice[id]
+		if kwh == nil {
+			continue // silent all window — leave it stale, do not invent 0 W
+		}
+		w := make([]float64, len(kwh))
+		for i := range kwh {
+			if i < len(bucketHours) && bucketHours[i] > 0 {
+				w[i] = kwh[i] * 1000.0 / bucketHours[i]
+			}
+		}
+		powerByDevice[id] = w
+	}
+}
+
 // BuildSeries is the orchestrator: it runs ~3 Influx queries (counter energy for
-// the counter set incl. meter; UPS mean-power→energy for the ups set; mean-power
-// for ALL metered devices), demuxes the bucketed rows onto the canonical axis
+// the counter set incl. meter; per-bucket power integral for the ups set;
+// mean-power for the counter set), demuxes the bucketed rows onto the canonical axis
 // and calls AssembleSeries. The query count is three regardless of window
 // alignment or device count.
 //
@@ -950,13 +991,12 @@ func BuildSeries(
 	tz := loc.String()
 
 	// Partition the metered inventory.
-	var counterIDs, upsIDs, allMeteredIDs []string
+	var counterIDs, upsIDs []string
 	for _, id := range sortedDeviceIDs(devices) {
 		path, ok := PathForClass(devices[id].Class)
 		if !ok {
 			continue
 		}
-		allMeteredIDs = append(allMeteredIDs, id)
 		switch path {
 		case PathCounter:
 			counterIDs = append(counterIDs, id)
@@ -981,21 +1021,24 @@ func BuildSeries(
 		demuxCounterTotals(rows, idx, energyByDevice, len(buckets))
 	}
 
-	// Query 2: UPS mean-power → energy (mean W × bucket-hours / 1000).
+	// Query 2: UPS energy, by integrating power_w over each bucket — the same
+	// reduction /devices/{id}/energy applies to the whole window (issue #32).
+	// The rows are already kWh, so the fold is the identity.
 	if len(upsIDs) > 0 {
-		flux := influx.BuildPowerMeanSeriesFlux(bucket, upsIDs, win.Start, win.Stop, iv.Token, tz)
+		flux := influx.BuildPowerIntegralSeriesFlux(bucket, upsIDs, win.Start, win.Stop, iv.Token, tz)
 		rows, err := q.Query(ctx, flux)
 		if err != nil {
 			return SeriesResponse{}, err
 		}
-		demux(rows, idx, energyByDevice, len(buckets), func(meanW float64, i int) float64 {
-			return meanW * hrs[i] / 1000.0
-		})
+		demux(rows, idx, energyByDevice, len(buckets), func(kwh float64, _ int) float64 { return kwh })
+		deriveUPSPower(upsIDs, hrs, energyByDevice, powerByDevice)
 	}
 
-	// Query 3: mean power for ALL metered devices (the avg_w series).
-	if len(allMeteredIDs) > 0 {
-		flux := influx.BuildPowerMeanSeriesFlux(bucket, allMeteredIDs, win.Start, win.Stop, iv.Token, tz)
+	// Query 3: mean power for the COUNTER devices (the avg_w series). A UPS is
+	// absent by design: its avg_w is energy-derived from query 2 instead, so it
+	// cannot disagree with its own kwh — see deriveUPSPower.
+	if len(counterIDs) > 0 {
+		flux := influx.BuildPowerMeanSeriesFlux(bucket, counterIDs, win.Start, win.Stop, iv.Token, tz)
 		rows, err := q.Query(ctx, flux)
 		if err != nil {
 			return SeriesResponse{}, err
@@ -1082,10 +1125,18 @@ func bucketIndex(buckets []time.Time) map[int64]int {
 
 // demux folds bucketed rows onto the canonical axis. Each row carries a
 // DeviceID, a Time and a Value; conv maps (value, bucketIndex) → the stored
-// quantity (identity for power, mean→energy for UPS). Rows whose time falls
+// quantity; both of its callers pass the identity, since the UPS energy query now
+// returns kWh directly rather than a mean to scale. Rows whose time falls
 // outside the axis are dropped. A row landing on a bucket SUMS into that bucket
 // (aggregateWindow yields one row per bucket per device, so this is normally an
 // assignment; summing is just safe).
+//
+// A NULL row is dropped, not folded: createEmpty: true fills unreported buckets
+// with nulls that decode to 0.0, and folding those would publish "0 W" for a
+// device that said nothing (issue #32). Dropping them leaves the bucket at the
+// slice's zero either way, but it also leaves a device that reported NOTHING
+// with no entry in dst at all — which is how C13 staleness tells a silent device
+// from a genuinely idle one.
 //
 // This serves the two POWER queries only. The counter series carries running
 // totals rather than per-bucket quantities and is folded by demuxCounterTotals.
@@ -1096,6 +1147,9 @@ func demux(rows []influx.Row, idx map[int64]int, dst map[string][]float64, n int
 	starts := sortedBucketStarts(idx)
 
 	for _, r := range rows {
+		if r.Null {
+			continue // absent bucket, not a reading of zero
+		}
 		i := resolveBucket(r.Time, idx, starts)
 		if i < 0 {
 			continue // outside the window

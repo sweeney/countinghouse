@@ -125,13 +125,33 @@ A bucket a counter device reported nothing in is `0`, and the energy that accrue
 lands in the next bucket that does have a reading. A device that reported nothing at all in
 the window is all zeroes, never a share of someone else's total.
 
-**`ups_sensor` is different and does not carry that guarantee.** A UPS publishes only
-`power_w`, so `/devices/{id}/energy` integrates it (`integral(unit: 1h)`, linearly
-interpolating across gaps) while the series computes `mean(power_w) × bucket_hours`. Those
-are two estimators of the same integral: they agree closely for the steady loads a UPS
-carries and for evenly-spaced samples, and diverge as reporting becomes uneven. The
-synthetic `unmonitored` series has no scalar counterpart at all, and its per-bucket
+**`ups_sensor` is estimated, not counted.** A UPS publishes only `power_w`, so there is no
+counter to read and both endpoints estimate an integral. They now estimate it the *same*
+way — `integral(unit: 1h, interpolate: "linear")`, whole-window for `/devices/{id}/energy`
+and per bucket for the series — so for a UPS that is reporting they agree. Until recently
+the series used `mean(power_w) × bucket_hours` instead, a sample mean that weights every
+reading equally however long it stood; for samples bunched into the start of a bucket that
+overstated the bucket by more than a factor of three.
+
+`avg_w` for a UPS is derived back out of that energy (`kwh × 1000 / bucket_hours`), so it is
+the bucket's **time-weighted** mean power and cannot contradict the `kwh` printed beside it.
+For a steady load on a regular cadence this is the same number the sample mean gave.
+
+One limit remains, and it is the one case where a UPS series and `/devices/{id}/energy` still
+part company: a bucket the UPS reported **nothing** in has nothing to integrate and publishes
+`0`, while the whole-window integral interpolates straight across the outage and counts the
+load. The series is the low one, by roughly the length of the outage. Closing that needs the
+readings either side of the gap, which a per-bucket query cannot see.
+
+The synthetic `unmonitored` series has no scalar counterpart at all, and its per-bucket
 clamping means its total is not the raw residual either.
+
+**Silence is no longer read as zero.** A bucket a device did not report in comes back from
+Influx as a null, which used to decode to a perfectly plausible `0 W`. Those buckets are now
+recognised as absent, so a device that reported nothing all window is counted by
+`stale_monitored_count` instead of appearing to have dutifully drawn zero watts — which was
+the exact masking that signal exists to catch. A device that really did report `0 W` is data,
+and is not flagged.
 
 Which windows the **grid snap** affects: `window=custom` with an off-grid `from`, and
 `window=<N>h` (e.g. `24h`), whose start inherits the current minute and second. `today`,

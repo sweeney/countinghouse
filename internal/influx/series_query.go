@@ -98,25 +98,75 @@ from(bucket: %q)
 	)
 }
 
-// BuildPowerMeanSeriesFlux builds the per-bucket mean instantaneous power
-// series (power_w) for a SET of devices, on DST-aware local buckets. It is used
-// for two purposes by the energy layer:
+// BuildPowerIntegralSeriesFlux builds the per-bucket ENERGY series for
+// power-only devices (ups_sensor), by integrating power_w over each bucket —
+// the same reduction BuildIntegralFlux applies to the whole window, just
+// windowed, so /series and /devices/{id}/energy estimate the UPS integral the
+// same way (issue #32).
 //
-//   - average power: the bucket mean is the avg_w reported directly.
-//   - UPS energy: mean watts × bucket-hours / 1000 → kWh (computed in Go, since
-//     bucket-hours vary across a DST changeover).
+// It replaces mean(power_w) x bucket_hours. That was a different estimator of
+// the same quantity: a bucket mean weights every sample equally no matter how
+// long it stood, while a trapezoidal integral weights by elapsed time. The two
+// agree for evenly-spaced samples — which is why this was invisible for two
+// steadily-reporting UPSs — and diverge exactly when reporting turns uneven,
+// i.e. when you most want the number.
+//
+// Two details are load-bearing:
+//
+//   - fn is a LAMBDA. aggregateWindow calls fn(column:, tables:<-), and
+//     integral takes `columns` (plural) plus unit/interpolate, so it cannot be
+//     passed by name the way mean or last can.
+//   - the regroup is regroupByDevice, NOT the window variant BuildIntegralFlux
+//     uses. integral reads its bounds from _start/_stop in the group key, and
+//     aggregateWindow's internal window() supplies those per bucket; grouping on
+//     them UPSTREAM would instead make every bucket its own table (see
+//     regroupByDevice). The two integral builders therefore regroup differently
+//     ON PURPOSE, which is the one place they are allowed to differ.
+//
+// createEmpty is false: a bucket the device did not report in has nothing to
+// integrate, and an empty bucket would arrive as a null decoding to 0.0 —
+// "drew nothing" wearing the clothes of "said nothing" (see Row.Null). Omitting
+// it keeps that distinction alive for the caller and for C13 staleness.
+//
+// The trailing map converts W.h to kWh, exactly as BuildIntegralFlux does.
+func BuildPowerIntegralSeriesFlux(bucket string, deviceIDs []string, start, stop time.Time, interval, tz string) string {
+	return fmt.Sprintf(`import "timezone"
+
+from(bucket: %q)
+  |> range(start: %s, stop: %s)
+  |> filter(fn: (r) => r._measurement == "device_power" and r._field == "power_w")
+  |> filter(fn: (r) => contains(value: r.device_id, set: %s))
+%s
+  |> aggregateWindow(every: %s, fn: (column, tables=<-) => tables |> integral(unit: 1h, interpolate: "linear"), timeSrc: "_start", location: timezone.location(name: %q), createEmpty: false)
+  |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))`,
+		bucket,
+		fluxTime(start),
+		fluxTime(stop),
+		deviceSet(deviceIDs),
+		regroupByDevice,
+		interval,
+		tz,
+	)
+}
+
+// BuildPowerMeanSeriesFlux builds the per-bucket mean instantaneous power
+// series (power_w) for a SET of devices, on DST-aware local buckets. It serves
+// avg_w for counter-class devices: the bucket mean IS the average power, so it
+// is reported directly.
+//
+// It no longer carries UPS energy. That used mean watts × bucket-hours, a
+// different estimator from the integral the scalar endpoint applies — see
+// BuildPowerIntegralSeriesFlux, which took the job (issue #32).
 //
 // A bucket mean is self-contained, so this reduces to one value per bucket with
 // no cross-bucket arithmetic and nothing to seed. createEmpty: true keeps the
 // axis dense; rows keep r.device_id for demuxing.
 //
-// Caveat inherited from that density: an empty bucket arrives as a null which
-// Client.Query decodes to 0.0, so a device that stopped reporting reads as a mean
-// of 0 W rather than as absent. For avg_w that is merely optimistic; for the UPS
-// energy path it under-reports the gap. The counter series avoids the same hazard
-// with createEmpty: false and a Go-side carry (see BuildCounterSeriesFlux); doing
-// the equivalent here is a separate change, since a mean cannot simply be carried
-// forward the way a running total can.
+// The density is still bought with nulls for unreported buckets, but they are no
+// longer silently worth 0 W: Client.Query flags them (Row.Null) and energy.demux
+// drops them, so an absent bucket stays absent and a device that produced only
+// nulls has no powerByDevice entry at all — which is precisely what C13
+// staleness looks for.
 func BuildPowerMeanSeriesFlux(bucket string, deviceIDs []string, start, stop time.Time, interval, tz string) string {
 	return fmt.Sprintf(`import "timezone"
 

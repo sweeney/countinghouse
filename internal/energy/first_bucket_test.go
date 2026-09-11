@@ -3,7 +3,6 @@ package energy
 import (
 	"context"
 	"math"
-	"strings"
 	"testing"
 	"time"
 
@@ -185,26 +184,23 @@ func TestBuildSeriesUPSClipsFirstBucketToWindowStart(t *testing.T) {
 	devices := map[string]config.DeviceConfig{
 		"network-ups": {Class: "ups_sensor", DisplayName: "UPS"},
 	}
-	// A steady 1 kW load: every bucket's mean is 1000 W.
-	var powerRows []influx.Row
-	for _, b := range buckets {
-		powerRows = append(powerRows, influx.Row{DeviceID: "network-ups", Field: "power_w", Value: 1000, Time: b})
-	}
-	q := &influx.FakeQuerier{QueryFunc: func(flux string) ([]influx.Row, error) {
-		if strings.Contains(flux, "power_w") {
-			return powerRows, nil
-		}
-		return nil, nil
-	}}
+	// A steady 1 kW load reporting every minute, from well before the window.
+	sim := influx.NewPowerSim(loc).AddSteady("network-ups",
+		time.Date(2026, 6, 11, 12, 0, 0, 0, loc),
+		time.Date(2026, 6, 11, 18, 0, 0, 0, loc),
+		time.Minute, 1000)
 
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+	resp, err := BuildSeries(context.Background(), &influx.FakeQuerier{QueryFunc: sim.Answer},
+		"statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
 	ups := resp.Series[0]
 
-	// Bucket 0 covers only 14:29->14:30 = 1 min at 1 kW = 0.0167 kWh.
-	if want := round.To(1000*(1.0/60)/1000, round.KWhDP); ups.KWh[0] != want {
+	// Bucket 0 covers only 14:29->14:30 = 1 min at 1 kW = 0.0167 kWh. Since issue
+	// #32 this clip is the QUERY's: the range starts at win.Start, so the first
+	// window is truncated to it and there is no full grid interval to mis-scale.
+	if want := round.To((1.0/60)*1000/1000, round.KWhDP); ups.KWh[0] != want {
 		t.Errorf("ups kwh[0] = %v, want %v (only 14:29->14:30 is inside the window)", ups.KWh[0], want)
 	}
 	for i := 1; i < len(buckets); i++ {
@@ -215,6 +211,139 @@ func TestBuildSeriesUPSClipsFirstBucketToWindowStart(t *testing.T) {
 	// Total is the window's true energy: 1h31m at 1 kW.
 	if want := round.To(0.5*3+1.0/60, round.KWhDP); math.Abs(ups.TotalKWh-want) > 1.5e-3 {
 		t.Errorf("ups total_kwh = %v, want ~%v (14:29->16:00 at 1 kW)", ups.TotalKWh, want)
+	}
+
+	// What bucketHours still owns is avg_w, which is energy-derived: bucket 0's
+	// minute of energy divided by its CLIPPED minute reads the true 1 kW. Divided
+	// by the full half-hour grid interval it would read ~33 W — a UPS apparently
+	// idling through the very bucket the caller asked about.
+	for i, w := range ups.AvgW {
+		if math.Abs(w-1000) > 0.1 {
+			t.Errorf("ups avg_w[%d] = %v, want 1000 (steady 1 kW; bucket 0 proves the head clip)", i, w)
+		}
+	}
+}
+
+// A UPS is the one metered class whose energy is an ESTIMATE rather than a
+// counter reading, so /series and /devices/{id}/energy have to agree on how they
+// estimate it. Since issue #32 both integrate power_w; before, the series
+// averaged the samples and multiplied by the bucket length.
+//
+// The sampling here is deliberately UNEVEN, because that is the only thing that
+// separates the two estimators — a steady load reported on a regular cadence
+// makes a sample mean and a time-weighted integral identical, which is exactly
+// why this went unnoticed against the two real UPSs. Bucket 0 sees 1 kW for one
+// minute and then 100 W for the rest of the half hour, but only three samples:
+// the sample mean reads 400 W across the whole bucket (0.2 kWh) where the true
+// time-weighted energy is 0.0575 kWh, a 248% overstatement in one bucket.
+//
+// Both sides read one PowerSim, so a disagreement is arithmetic rather than
+// fixture skew.
+func TestUPSSeriesTotalAgreesWithDeviceEnergyOnUnevenSampling(t *testing.T) {
+	loc := mustLondon(t)
+	start := time.Date(2026, 6, 11, 14, 0, 0, 0, loc)
+	stop := time.Date(2026, 6, 11, 15, 0, 0, 0, loc)
+	win := Window{Start: start, Stop: stop, Label: WindowCustom}
+	iv, _ := lookupInterval("30m")
+	devices := map[string]config.DeviceConfig{
+		"network-ups": {Class: "ups_sensor", DisplayName: "UPS"},
+	}
+
+	// Bucket 0: three samples in the first two minutes — 1 kW, then 100 W.
+	// Bucket 1: a normal one-minute cadence at 100 W.
+	at := []time.Time{start, start.Add(time.Minute), start.Add(2 * time.Minute)}
+	w := []float64{1000, 100, 100}
+	for ts := start.Add(30 * time.Minute); ts.Before(stop); ts = ts.Add(time.Minute) {
+		at = append(at, ts)
+		w = append(w, 100)
+	}
+	sim := influx.NewPowerSim(loc).AddSamples("network-ups", at, w)
+	q := &influx.FakeQuerier{QueryFunc: sim.Answer}
+
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
+		GroupByDevice, false, false, devices, testTariff(), nil, loc)
+	if err != nil {
+		t.Fatalf("BuildSeries: %v", err)
+	}
+	scalar, path, err := DeviceWindowKWh(context.Background(), q, "statehouse",
+		"network-ups", "ups_sensor", win.Start, win.Stop)
+	if err != nil {
+		t.Fatalf("DeviceWindowKWh: %v", err)
+	}
+	if path != PathIntegral {
+		t.Fatalf("path = %q, want %q", path, PathIntegral)
+	}
+
+	total := resp.Series[0].TotalKWh
+	// Per-bucket kWh is rounded to 3dp before summing; the cap keeps a long axis
+	// from hiding real drift, as in counter_anchor_test.go.
+	tol := 0.0005 * float64(len(resp.Buckets))
+	if tol > 0.01 {
+		tol = 0.01
+	}
+	if math.Abs(total-scalar) > tol {
+		t.Errorf("/series total_kwh = %.4f but /devices/network-ups/energy kwh = %.4f\n"+
+			"  delta %+.4f (tolerance %.4f)\n  kwh %v",
+			total, scalar, total-scalar, tol, resp.Series[0].KWh)
+	}
+
+	// Pin the fixture itself, so a future change that quietly made the sampling
+	// even again would fail here rather than making the agreement above trivial.
+	if want := 0.0575; math.Abs(resp.Series[0].KWh[0]-round.To(want, round.KWhDP)) > 1e-9 {
+		t.Errorf("bucket 0 = %v kWh, want %v — the sample mean would say 0.2",
+			resp.Series[0].KWh[0], want)
+	}
+}
+
+// The residual this change does NOT close, pinned so it cannot drift unnoticed:
+// a bucket the UPS reported nothing in has nothing to integrate and publishes 0,
+// while the whole-window integral bridges the outage. The two therefore part
+// company by the bridged energy, and the series is the low one.
+//
+// Fixing that needs the bracketing samples, which a per-bucket query cannot see.
+// It is recorded in the docs as a known limit rather than papered over.
+func TestUPSTotalOutageBucketReadsZeroAndUndercutsTheScalar(t *testing.T) {
+	loc := mustLondon(t)
+	start := time.Date(2026, 6, 11, 14, 0, 0, 0, loc)
+	stop := time.Date(2026, 6, 11, 16, 0, 0, 0, loc)
+	win := Window{Start: start, Stop: stop, Label: WindowCustom}
+	iv, _ := lookupInterval("30m")
+	devices := map[string]config.DeviceConfig{
+		"network-ups": {Class: "ups_sensor", DisplayName: "UPS"},
+	}
+	// Silent for the whole 14:30 bucket.
+	sim := influx.NewPowerSim(loc).AddSteadyWithGaps("network-ups", start, stop, time.Minute, 1000,
+		[2]time.Time{time.Date(2026, 6, 11, 14, 30, 0, 0, loc), time.Date(2026, 6, 11, 15, 0, 0, 0, loc)})
+	q := &influx.FakeQuerier{QueryFunc: sim.Answer}
+
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
+		GroupByDevice, false, false, devices, testTariff(), nil, loc)
+	if err != nil {
+		t.Fatalf("BuildSeries: %v", err)
+	}
+	ups := resp.Series[0]
+	if ups.KWh[1] != 0 {
+		t.Errorf("outage bucket kwh = %v, want 0 — nothing was reported to integrate", ups.KWh[1])
+	}
+	// And avg_w follows the energy rather than contradicting it.
+	if ups.AvgW[1] != 0 {
+		t.Errorf("outage bucket avg_w = %v, want 0 to match its own kwh", ups.AvgW[1])
+	}
+
+	scalar, _, err := DeviceWindowKWh(context.Background(), q, "statehouse",
+		"network-ups", "ups_sensor", start, stop)
+	if err != nil {
+		t.Fatalf("DeviceWindowKWh: %v", err)
+	}
+	// The scalar bridges the outage, so it is HIGHER by about the half hour lost.
+	if gap := scalar - ups.TotalKWh; math.Abs(gap-0.5) > 0.02 {
+		t.Errorf("scalar %.4f - series %.4f = %.4f, want ~0.5 (the bridged outage)", scalar, ups.TotalKWh, gap)
+	}
+
+	// The device is NOT stale: it reported for three of the four buckets. The
+	// staleness signal is for a device that said nothing at all.
+	if ups.AvgW[0] == 0 {
+		t.Errorf("avg_w[0] = 0, want the real load — only the outage bucket is empty")
 	}
 }
 

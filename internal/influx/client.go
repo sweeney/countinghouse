@@ -67,11 +67,16 @@ func (c *Client) Query(ctx context.Context, flux string) ([]Row, error) {
 			Field:    rec.Field(),
 			Time:     rec.Time(),
 		}
+		// A null _value matches neither arm and would otherwise leave Value at 0,
+		// indistinguishable from a real zero reading (issue #32). Record the
+		// absence rather than publishing a number the device never sent.
 		switch v := rec.Value().(type) {
 		case float64:
 			row.Value = v
 		case string:
 			row.Text = v
+		case nil:
+			row.Null = true
 		}
 		rows = append(rows, row)
 	}

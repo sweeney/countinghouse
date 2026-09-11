@@ -917,10 +917,12 @@ components:
             window: both are the same reset-safe counter reduction anchored at the
             first reading at or after `from`. A bucket such a device did not report
             in is 0, and the energy accrued meanwhile appears in the next bucket
-            that has a reading. A ups_sensor does NOT carry that guarantee — it
-            publishes only power_w, so the scalar endpoint integrates it while the
-            series takes mean power x bucket hours; the two are close for a steady
-            load and diverge as reporting becomes uneven.
+            that has a reading. A ups_sensor has no counter, so both endpoints
+            ESTIMATE its integral — the same way, per bucket here and over the
+            whole window there, so they agree while it is reporting. The one
+            exception is a bucket it reported nothing in: there is nothing to
+            integrate, so the series publishes 0 while the whole-window integral
+            interpolates across the outage and counts the load.
         cost:
           type: array
           items:
@@ -930,7 +932,14 @@ components:
           type: array
           items:
             type: number
-          description: Per-bucket mean power (W); summed across members for aggregated groups.
+          description: >
+            Per-bucket mean power (W); summed across members for aggregated
+            groups. For counter-class devices this is the mean of the readings in
+            the bucket. For a ups_sensor and for the synthetic "unmonitored"
+            series it is energy-derived (kwh x 1000 / bucket hours), i.e. the
+            bucket's TIME-weighted mean power, so it always agrees with the kwh
+            beside it. The two coincide for a steady load on a regular cadence.
+            A bucket with no telemetry reads 0; there is no "unknown" value.
         total_kwh:
           type: number
         total_cost:
@@ -975,6 +984,10 @@ components:
             telemetry in the window (likely dropped/offline). Their load shifts
             into the "unmonitored" series, inflating it, so a non-zero value flags
             a low-confidence split. Omitted for other groupings / no meter.
+            A device whose buckets came back empty counts here: an unreported
+            bucket arrives from Influx as a null and is recognised as absent
+            rather than as a reading of 0 W. A device that really did report 0 W
+            is reporting, and is not counted.
         stale_monitored_ids:
           type: array
           items:
@@ -1062,7 +1075,10 @@ components:
           description: VAT-inclusive GBP cost.
         avg_w:
           type: number
-          description: Mean power over the in-window part of the bucket (W).
+          description: >
+            Mean power over the in-window part of the bucket (W). Energy-derived
+            (and so time-weighted) for a ups_sensor and for "unmonitored" — see
+            Series.avg_w.
       required: [key, time, kwh, cost, avg_w]
 
     RowsResponse:
