@@ -134,8 +134,10 @@ though, and two things separate them:
 
 - **Bucket boundaries.** The whole-window integral sees the readings either side of a bucket
   edge; the per-bucket one does not. Where the load *steps* across an edge the two differ by
-  roughly half that step times the gap between the readings straddling it — for a UPS's
-  tens-of-watts moves at a 30s cadence, around `0.0002` kWh per boundary.
+  **at most** half that step times the gap between the readings straddling it — less when
+  those readings sit either side of the edge rather than on it, and nothing at all when they
+  straddle it evenly. For a UPS's tens-of-watts moves at a 30s cadence that bound is around
+  `0.0002` kWh per boundary.
 - **A bucket the UPS reported nothing in** has nothing to integrate and publishes `0`, while
   the whole-window integral interpolates straight across the outage and counts the load. The
   series is the low one, by roughly the length of the outage. Closing that needs the readings

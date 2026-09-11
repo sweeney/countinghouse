@@ -59,19 +59,30 @@ import (
 // hold forward and opens bucket i+1 with a flat hold back. Those coincide only
 // when the two samples either side are equal.
 //
-// When they are not, the per-bucket sum exceeds the whole-window integral by
+// When they are not, write a for the distance from the last reading BEFORE the
+// boundary to it, and b for the distance from the boundary to the first reading
+// at or after it. The bucketed reduction contributes P1*a + P2*b across that
+// gap; the whole-window one contributes the trapezoid (P1+P2)/2 * (a+b). So the
+// per-bucket sum differs from the whole-window integral by exactly
 //
-//	(P_before - P_after) / 2 * (the sample gap straddling the boundary)
+//	(P1 - P2) * (a - b) / 2
 //
-// per boundary — half the step, times the gap. Its size is set by how violently
-// the load moves and how slowly the device reports, not by the window or the
-// interval, and it is NOT always negligible: a 1 kW step at a 30s cadence is
-// 0.004 kWh, which rounds into the published 3dp. What makes it invisible here
-// is the workload rather than the arithmetic — a UPS steps by tens of watts, so
-// the real term is nearer 0.0002 kWh.
-// TestPowerSimDivergesWhenPowerStepsAcrossABoundary pins both the formula and
-// that distinction, and the endpoint comparisons elsewhere hold power constant
-// across their boundaries ON PURPOSE rather than by accident.
+// per boundary. Note what that is NOT: it is not half the step times the gap,
+// which is only the a >> b case, and it is not signed one way. It VANISHES when
+// the boundary bisects the gap (a == b) and REVERSES when the next reading is
+// further off than the previous one. Its magnitude is bounded by
+// |P1 - P2| * (a + b) / 2, reached when a reading lands exactly on the boundary.
+//
+// That bound is set by how violently the load moves and how slowly the device
+// reports, not by the window or the interval, and it is NOT always negligible:
+// a 1 kW step at a 30s cadence bounds at 0.004 kWh, which rounds into the
+// published 3dp. What makes it invisible here is the workload rather than the
+// arithmetic — a UPS steps by tens of watts, so the real term is nearer 0.0002.
+//
+// TestPowerSimDivergesWhenPowerStepsAcrossABoundary pins the exact expression
+// across several grid offsets rather than at one, so no single alignment is
+// load-bearing; the endpoint comparisons elsewhere hold power constant across
+// their boundaries ON PURPOSE rather than by accident.
 //
 // All of that is under the flat-hold model. If Flux instead interpolates at
 // window bounds — which interpolate: "linear" rather suggests — the per-bucket

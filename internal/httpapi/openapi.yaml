@@ -920,8 +920,9 @@ components:
             that has a reading. A ups_sensor has no counter, so both endpoints
             ESTIMATE its integral — the same way, per bucket here and over the
             whole window there — but they are close rather than identical. They
-            differ where the load steps across a bucket boundary, by roughly half
-            that step times the gap between the readings straddling it; and a
+            differ where the load steps across a bucket boundary, by at most half
+            that step times the gap between the readings straddling it, and less
+            the more evenly those readings straddle it; and a
             bucket the device reported nothing in publishes 0, while the
             whole-window integral interpolates across the outage and counts it.
         cost:

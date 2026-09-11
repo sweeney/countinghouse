@@ -227,16 +227,24 @@ func TestPowerSimMeanAndIntegralDifferOnUnevenSampling(t *testing.T) {
 // the gap stays visible and so a future edit to a fixture cannot quietly turn a
 // sim-model artefact into what looks like a code regression.
 //
-// A 900 W step straddling the 14:30 boundary at a one-minute cadence: the
-// whole-window integral trapezoids across the straddling gap, the bucketed one
-// flat-holds into the boundary from both sides, and they part company by
-// (P_before - P_after)/2 x gap = 900/2 x 1/60 h = 7.5 W.h.
+// It sweeps the sample grid ACROSS the boundary rather than testing one
+// alignment, because the term depends on where the readings fall either side of
+// it and not merely on the gap between them. With a = boundary - last reading
+// before, b = first reading at/after - boundary, the divergence is
+//
+//	(P1 - P2) * (a - b) / 2
+//
+// which is maximal when a reading lands on the boundary (b == 0), ZERO when the
+// boundary bisects the gap, and NEGATIVE when the next reading is further off
+// than the previous one. Pinning only the b == 0 alignment would make the
+// fixture load-bearing in exactly the way the agreement test's comment warns
+// against — an offset grid would then fail against a true delta of zero and
+// read as a code regression.
 //
 // This is a statement about THIS SIM's edge model, not about Flux — under a
 // bound-interpolating integral the sum would telescope exactly. Either way the
-// term is bounded by half the step times the sampling gap, so its size is set by
-// how violently the load moves and how slowly the device reports, not by the
-// window or the interval.
+// magnitude is bounded by |P1-P2|*(a+b)/2, so its size is set by how violently
+// the load moves and how slowly the device reports.
 func TestPowerSimDivergesWhenPowerStepsAcrossABoundary(t *testing.T) {
 	loc, err := time.LoadLocation("Europe/London")
 	if err != nil {
@@ -245,48 +253,69 @@ func TestPowerSimDivergesWhenPowerStepsAcrossABoundary(t *testing.T) {
 	start := time.Date(2026, 6, 11, 14, 0, 0, 0, loc)
 	stop := time.Date(2026, 6, 11, 15, 0, 0, 0, loc)
 	boundary := start.Add(30 * time.Minute)
+	const p1, p2 = 1000.0, 100.0
+	const cadence = time.Minute
 
-	var at []time.Time
-	var w []float64
-	for ts := start; ts.Before(stop); ts = ts.Add(time.Minute) {
-		at = append(at, ts)
-		if ts.Before(boundary) {
-			w = append(w, 1000)
-		} else {
-			w = append(w, 100)
+	for _, offset := range []time.Duration{0, 15 * time.Second, 30 * time.Second, 59 * time.Second} {
+		var at []time.Time
+		var w []float64
+		for ts := start.Add(offset); ts.Before(stop); ts = ts.Add(cadence) {
+			at = append(at, ts)
+			if ts.Before(boundary) {
+				w = append(w, p1)
+			} else {
+				w = append(w, p2)
+			}
+		}
+		sim := NewPowerSim(loc).AddSamples("network-ups", at, w)
+
+		whole, err := sim.Answer(BuildIntegralFlux("b", "network-ups", start, stop))
+		if err != nil {
+			t.Fatalf("offset %v: Answer: %v", offset, err)
+		}
+		bucketed, err := sim.Answer(BuildPowerIntegralSeriesFlux("b", []string{"network-ups"}, start, stop, "30m", "Europe/London"))
+		if err != nil {
+			t.Fatalf("offset %v: Answer: %v", offset, err)
+		}
+		var sum float64
+		for _, r := range bucketed {
+			sum += r.Value
+		}
+
+		// The readings either side of the boundary, from the fixture itself.
+		var beforeGap, afterGap time.Duration
+		for _, ts := range at {
+			if ts.Before(boundary) {
+				beforeGap = boundary.Sub(ts)
+				continue
+			}
+			afterGap = ts.Sub(boundary)
+			break
+		}
+		want := (p1 - p2) * (beforeGap - afterGap).Hours() / 2 / 1000
+
+		if got := sum - whole[0].Value; math.Abs(got-want) > 1e-9 {
+			t.Errorf("offset %v (a=%v b=%v): series %.4f - scalar %.4f = %+.6f, want %+.6f",
+				offset, beforeGap, afterGap, sum, whole[0].Value, got, want)
 		}
 	}
-	sim := NewPowerSim(loc).AddSamples("network-ups", at, w)
+}
 
-	whole, err := sim.Answer(BuildIntegralFlux("b", "network-ups", start, stop))
-	if err != nil {
-		t.Fatalf("Answer: %v", err)
+// The magnitude is what the docs quote, so pin the bound rather than the
+// adjective: maximal when a reading lands on the boundary, and the reason the
+// term is invisible for the real UPSs is the size of their steps, not the
+// arithmetic.
+func TestPowerSimBoundaryTermBound(t *testing.T) {
+	bound := func(stepW float64, gap time.Duration) float64 {
+		return stepW * gap.Hours() / 2 / 1000
 	}
-	bucketed, err := sim.Answer(BuildPowerIntegralSeriesFlux("b", []string{"network-ups"}, start, stop, "30m", "Europe/London"))
-	if err != nil {
-		t.Fatalf("Answer: %v", err)
+	// A violent step at a slow cadence rounds into the published 3dp...
+	if got := bound(1000, 30*time.Second); got < 0.001 {
+		t.Errorf("a 1 kW step at a 30s cadence bounds at %v kWh; the docs claim it is visible at 3dp", got)
 	}
-	var sum float64
-	for _, r := range bucketed {
-		sum += r.Value
-	}
-
-	// Half the step, times the one-minute gap straddling the boundary.
-	wantDelta := (1000 - 100) / 2.0 * (1.0 / 60) / 1000
-	if got := sum - whole[0].Value; math.Abs(got-wantDelta) > 1e-9 {
-		t.Errorf("series %.4f - scalar %.4f = %+.6f, want %+.6f (half the step x the straddling gap)",
-			sum, whole[0].Value, got, wantDelta)
-	}
-	// 0.0075 kWh — visible at the 3dp the API publishes. This fixture is
-	// deliberately extreme (a 900 W step at a one-minute cadence); the point of
-	// asserting it is that the term is NOT negligible in general, only at the
-	// scale the real UPSs operate at. That scale, checked separately so the
-	// claim is a number rather than an adjective:
-	const realisticStepW, realisticCadence = 50.0, 30 * time.Second
-	realistic := realisticStepW / 2.0 * realisticCadence.Hours() / 1000
-	if realistic >= 0.0005 {
-		t.Errorf("a %v W step at a %v cadence contributes %v kWh per boundary, which rounds into the published 3dp",
-			realisticStepW, realisticCadence, realistic)
+	// ...while a UPS's own moves do not.
+	if got := bound(50, 30*time.Second); got >= 0.0005 {
+		t.Errorf("a 50 W step at a 30s cadence bounds at %v kWh, which would round into the published 3dp", got)
 	}
 }
 
