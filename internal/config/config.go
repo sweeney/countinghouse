@@ -50,7 +50,6 @@ type SiteConfig struct {
 	// was deleted from the config service, and defaulting to a document that does not
 	// exist buys a silent empty snapshot rather than a diagnostic. Load refuses a
 	// config that leaves it unset.
-	DevicesNamespace string `yaml:"devices_namespace"`
 
 	// EnergyAgreementsNamespace names this site's dated-tariff namespace (conventionally
 	// "energy_agreements"). It sits here, beside the other two per-property
@@ -96,7 +95,6 @@ type SiteConfig struct {
 //	site: home
 //	site:
 //	  id: home
-//	  devices_namespace: devices_home
 func (s *SiteConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	var id string
 	if err := unmarshal(&id); err == nil {
@@ -244,101 +242,18 @@ func Load(path string) (Config, error) {
 	}
 	cfg.warnings = siteWarnings(cfg.Site)
 
-	// The namespace pointers are normally supplied by the shared `sites` document,
-	// so they cannot be required HERE when there is a config service to resolve
-	// them from — requiring both would force every operator to duplicate what
-	// `sites` already says, which is the drift this design removes.
+	// No namespace requirement here any more, and deliberately not in the
+	// base_url=="" branch either — that is the one case where NOTHING is fetched,
+	// so neither pointer is ever read and requiring them would refuse a config
+	// over values it then ignores. (An earlier version of this did exactly that.)
 	//
-	// The requirement has not gone away, it has moved: ResolveSiteNamespaces
-	// refuses when NEITHER source supplies them, which is the condition that
-	// actually matters. Without a config service, though, local config is the only
-	// source, so the check still belongs at load — and still fires before the
-	// service can serve zero devices or ids-where-names-belong.
-	if cfg.RemoteConfig.BaseURL == "" {
-		// Devices first: it is the namespace that decides whether any answer is
-		// right at all, so an operator fixing one key at a time is sent to that one
-		// before the namespace that only decides what things are called.
-		if err := requireDevicesNamespace(cfg.Site); err != nil {
-			return cfg, err
-		}
-		if err := requireFloorplanNamespace(cfg.Site); err != nil {
-			return cfg, err
-		}
-	}
+	// The requirement lives in ResolveSiteNamespaces instead, which runs precisely
+	// when there IS a config service and therefore when the pointers matter. An
+	// instance with no config service serves empty snapshots by explicit choice,
+	// and says so loudly at startup.
 	return cfg, nil
 }
 
-// requireDevicesNamespace refuses a config that does not name the namespace its devices
-// live in.
-//
-// This was a warning while `statehouse_devices` still existed and the fallback worked.
-// That namespace was deleted from the config service, so the default now names a
-// document that returns 404, and every layer below handles it correctly into silence:
-// the fetch fails, Refresh is fail-open and keeps the last-known snapshot, at startup
-// there is no last-known snapshot, and every endpoint then reports zero devices. For a
-// billing service that is a wrong answer wearing the shape of a right one.
-//
-// The namespace is deliberately NOT derived from the id. A namespace is a document that
-// either exists or does not, so guessing `devices_<id>` would turn a typo in `id` back
-// into a successful fetch of nothing — precisely the failure this refusal exists to
-// remove. Two facts, stated twice, checked against each other.
-func requireDevicesNamespace(s SiteConfig) error {
-	if s.DevicesNamespace != "" {
-		return nil
-	}
-	subject, id := "this instance", s.ID
-	if s.ID != "" {
-		subject = fmt.Sprintf("site %q", s.ID)
-	} else {
-		id = "<this site's id from the sites namespace>"
-	}
-	// Terse on purpose: this is read by someone whose service is down. The reasoning
-	// lives in this function's doc comment and in README.md; the error says what is
-	// missing and what to write.
-	// No trailing newline: staticcheck ST1005, and the logger quotes the value anyway.
-	return fmt.Errorf(
-		"%s names no devices_namespace, so it would fetch nothing and serve zero devices. Add:"+
-			"\n\nsite:\n  id: %s\n  devices_namespace: <the namespace published for this site>",
-		subject, id)
-}
-
-// requireFloorplanNamespace refuses a config that does not name the namespace its floor
-// and room records live in.
-//
-// The argument is the one requireDevicesNamespace makes, applied to a quieter failure.
-// An unnamed floorplan is not an error at any layer: the fetch never happens, /floors
-// and /rooms still list every floor and room holding a metered device, grouped series
-// still carry keys, and every kWh and cost is exactly right. What is lost is only the
-// names — so the endpoints answer with ids where labels belong and null where storey
-// order belongs, which is indistinguishable from a floorplan namespace that publishes
-// nothing. Nothing anywhere reports the difference between "not configured" and
-// "configured and empty", and the omission surfaces as a chart legend reading
-// "floor1.room-c" to a human, days later, if anyone looks.
-//
-// So it is declared or it is refused. Like the devices namespace it is NOT derived from
-// the site id: guessing `floorplan_<id>` would turn a typo into a successful fetch of
-// nothing, which is the failure this refusal removes rather than relocates.
-func requireFloorplanNamespace(s SiteConfig) error {
-	if s.FloorplanNamespace != "" {
-		return nil
-	}
-	subject, id := "this instance", s.ID
-	if s.ID != "" {
-		subject = fmt.Sprintf("site %q", s.ID)
-	} else {
-		id = "<this site's id from the sites namespace>"
-	}
-	// Terse for the same reason as requireDevicesNamespace: the why is in the doc
-	// comment above, the fix is in the message.
-	return fmt.Errorf(
-		"%s names no floorplan_namespace, so /floors, /rooms and grouped series would "+
-			"serve ids where names belong. Add (it is the namespace greenhouse reads):"+
-			"\n\nsite:\n  id: %s\n  devices_namespace: %s\n  floorplan_namespace: <the namespace published for this site>",
-		subject, id, orPlaceholder(s.DevicesNamespace, "<this site's devices namespace>"))
-}
-
-// orPlaceholder returns v, or placeholder when v is empty — so a refusal can echo the
-// keys the operator already set instead of blanking them out of the block it prints.
 func orPlaceholder(v, placeholder string) string {
 	if v != "" {
 		return v
@@ -354,10 +269,22 @@ func orPlaceholder(v, placeholder string) string {
 // other half — an id with no namespace — is no longer a warning but an error, since
 // there is nothing left for it to fall back to.
 func siteWarnings(s SiteConfig) []string {
-	if s.ID == "" && s.DevicesNamespace != "" {
-		return []string{fmt.Sprintf(
-			"devices_namespace %q is set but the site has no id, so this instance "+
-				"cannot report which property it serves", s.DevicesNamespace)}
+	if s.ID != "" {
+		return nil
+	}
+	// The remaining local pointers are fallbacks. Setting one without an id is
+	// still the mirror case: it would fetch the right documents while being unable
+	// to say which property they describe.
+	for _, c := range []struct{ field, value string }{
+		{"floorplan_namespace", s.FloorplanNamespace},
+		{"energy_agreements_namespace", s.EnergyAgreementsNamespace},
+	} {
+		if c.value != "" {
+			return []string{fmt.Sprintf(
+				"%s %q is set but the site has no id, so this instance cannot report "+
+					"which property it serves — and without an id the sites namespace "+
+					"cannot be resolved at all", c.field, c.value)}
+		}
 	}
 	return nil
 }

@@ -65,10 +65,10 @@ func main() {
 		BaseURL: cfg.RemoteConfig.BaseURL,
 		Tokens:  tokens,
 		Logger:  logger,
-		// The three namespace pointers are NOT set here. They are resolved below
-		// from the shared `sites` document, with these local values as the
-		// fallback — see ResolveNamespaces.
-		DevicesNamespace:          cfg.Site.DevicesNamespace,
+		// The namespace pointers are NOT set here. They are resolved below from the
+		// shared `sites` document — see ResolveNamespaces. The two local values are
+		// fallbacks for partially-filled site entries; devices_namespace has no
+		// local fallback at all, by design.
 		FloorplanNamespace:        cfg.Site.FloorplanNamespace,
 		EnergyAgreementsNamespace: cfg.Site.EnergyAgreementsNamespace,
 	}
@@ -130,19 +130,22 @@ func main() {
 	}
 
 	server := &httpapi.Server{
-		Listen:             cfg.HTTP.Listen,
-		Influx:             influxClient,
-		Bucket:             cfg.Influx.Bucket,
-		Clock:              testutil.RealClock{},
-		Loc:                location,
-		Config:             fetcher,
-		RemoteConfig:       fetcher,
-		IdentityURL:        cfg.Identity.BaseURL,
-		PublicURL:          cfg.HTTP.PublicURL,
-		Version:            version,
-		SiteID:             cfg.Site.ID,
-		DevicesNamespace:   cfg.Site.DevicesNamespace,
-		FloorplanNamespace: cfg.Site.FloorplanNamespace,
+		Listen:       cfg.HTTP.Listen,
+		Influx:       influxClient,
+		Bucket:       cfg.Influx.Bucket,
+		Clock:        testutil.RealClock{},
+		Loc:          location,
+		Config:       fetcher,
+		RemoteConfig: fetcher,
+		IdentityURL:  cfg.Identity.BaseURL,
+		PublicURL:    cfg.HTTP.PublicURL,
+		Version:      version,
+		SiteID:       cfg.Site.ID,
+		// The RESOLVED namespaces, not the local config values — /healthz must
+		// report what is actually being read, which is now usually what `sites`
+		// said rather than anything in this file.
+		DevicesNamespace:   fetcher.DevicesNamespace,
+		FloorplanNamespace: fetcher.FloorplanNamespace,
 		Floorplan:          fetcher,
 		Logger:             logger,
 		Prices:             priceHealth(collectors),
@@ -150,7 +153,7 @@ func main() {
 
 	logger.Info("starting", "config", *configPath, "http", cfg.HTTP.Listen,
 		"influx", cfg.Influx.URL, "timezone", cfg.House.Timezone, "version", version,
-		"site", cfg.Site.ID, "devices_namespace", cfg.Site.DevicesNamespace,
+		"site", cfg.Site.ID, "devices_namespace", fetcher.DevicesNamespace,
 		"floorplan_namespace", cfg.Site.FloorplanNamespace)
 
 	ctx, cancel := signalContext()

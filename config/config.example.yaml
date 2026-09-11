@@ -46,14 +46,15 @@ site:
   # `sites` and every other service follows while this one quietly keeps reading
   # the old document.
   #
-  # So leave them unset. They remain as a FALLBACK for two cases: a site whose
-  # `sites` entry has not been filled in yet, and local development with no config
-  # service at all (remote_config.base_url empty), where they are required because
-  # nothing else can supply them.
+  # So leave them unset. They remain as a FALLBACK for a site whose `sites` entry is
+  # only partly filled in. If you set one and `sites` disagrees, `sites` wins and a
+  # warning names both values.
   #
-  # If you do set one and `sites` disagrees, `sites` wins and a warning names both.
+  # devices_namespace has NO local fallback and is not settable here at all. It is
+  # the pointer that decides whether any answer is right — a stale local copy would
+  # not degrade a label, it would bill ANOTHER PROPERTY'S devices while the service
+  # looked entirely healthy. It comes from `sites` or the instance does not start.
   #
-  # devices_namespace: devices_home
   # floorplan_namespace: floorplan_home
   # energy_agreements_namespace: energy_agreements
 

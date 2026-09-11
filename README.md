@@ -485,11 +485,16 @@ the others are not — until it has been read there is nothing to fail open *ont
 could not even name what is missing. A failure there aborts, consistent with the cold-start
 rule.
 
-Local `site:` keys remain as a **fallback** for a site whose `sites` entry is not filled in
-yet, and for local development with no config service at all. Where both are set, **`sites`
-wins and a warning names both** — a stale local pointer silently overriding the correct remote
-one is exactly the drift this arrangement removes, but an operator's edit must not be ignored
-without a word.
+Local `site:` keys remain as a **fallback** for `floorplan_namespace` and
+`energy_agreements_namespace`, covering a site whose `sites` entry is only partly filled in.
+Where both are set, **`sites` wins and a warning names both** — a stale local pointer silently
+overriding the correct remote one is exactly the drift this arrangement removes, but an
+operator's edit must not be ignored without a word.
+
+**`devices_namespace` has no local fallback and cannot be set locally at all.** It is the
+pointer that decides whether any answer is right: a stale copy would not degrade a label, it
+would bill *another property's devices* while the service looked entirely healthy. It comes
+from `sites` or the instance does not start.
 
 Pointers are resolved **once, at startup**. A later SIGHUP reports a change but does not adopt
 it: repointing a running service at another property's data would swap the device inventory

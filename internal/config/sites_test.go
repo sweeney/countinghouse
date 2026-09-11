@@ -119,49 +119,60 @@ func TestResolveSiteNamespaces(t *testing.T) {
 		wantWarn    string
 	}{
 		{
-			name:        "pointers come from sites when local says nothing",
+			name:        "everything comes from sites when local says only the id",
 			local:       SiteConfig{ID: "home"},
 			sites:       sites,
 			wantDevices: "devices_home", wantFloor: "floorplan_home",
 			wantAgree: "energy_agreements",
 		},
 		{
-			// sites WINS over a local value, because a stale local value silently
-			// overriding the correct remote one is the drift this change exists to
+			// sites WINS over a disagreeing local value, because a stale local value
+			// silently overriding the correct remote one is the drift this exists to
 			// fix. But the disagreement is reported rather than swallowed — an
 			// operator's edit must never be quietly ignored.
-			name:        "sites wins over a disagreeing local value, loudly",
-			local:       SiteConfig{ID: "home", DevicesNamespace: "devices_old"},
+			name:        "sites wins over a disagreeing local fallback, loudly",
+			local:       SiteConfig{ID: "home", FloorplanNamespace: "floorplan_old"},
 			sites:       sites,
 			wantDevices: "devices_home", wantFloor: "floorplan_home",
 			wantAgree: "energy_agreements",
-			wantWarn:  "devices_old",
+			wantWarn:  "floorplan_old",
 		},
 		{
 			name:        "a local value agreeing with sites warns about nothing",
-			local:       SiteConfig{ID: "home", DevicesNamespace: "devices_home"},
+			local:       SiteConfig{ID: "home", FloorplanNamespace: "floorplan_home"},
 			sites:       sites,
 			wantDevices: "devices_home", wantFloor: "floorplan_home",
 			wantAgree: "energy_agreements",
 		},
 		{
-			// Local config is the fallback, which is what makes this migration
-			// safe: a deployment whose `sites` entry has not been filled in yet
-			// keeps working off its own config.
-			name: "local fills in what sites omits",
+			// Local config remains the fallback for floorplan and agreements, which
+			// is what makes the migration safe for a partly-filled site entry.
+			name: "local fills in the floorplan that sites omits",
 			local: SiteConfig{
-				ID: "schoolhouse", DevicesNamespace: "devices_school",
-				FloorplanNamespace: "floorplan_school",
+				ID: "schoolhouse", FloorplanNamespace: "floorplan_school",
 			},
-			sites:       sites,
+			sites: Sites{Sites: []SiteRecord{
+				{ID: "schoolhouse", DevicesNamespace: "devices_school"},
+			}},
 			wantDevices: "devices_school", wantFloor: "floorplan_school",
+		},
+		{
+			// devices_namespace has NO local fallback. It decides whether any answer
+			// is right at all, so a stale local copy would bill another property's
+			// devices while the service looked healthy.
+			name:    "a devices namespace missing from sites is refused, with no local rescue",
+			local:   SiteConfig{ID: "schoolhouse", FloorplanNamespace: "f"},
+			sites:   Sites{Sites: []SiteRecord{{ID: "schoolhouse"}}},
+			wantErr: "devices_namespace",
 		},
 		{
 			// An empty agreements pointer is NOT an error: it means stay on the
 			// legacy tariff document, which is the opt-in migration path.
-			name:        "no agreements pointer anywhere is legal",
-			local:       SiteConfig{ID: "schoolhouse", DevicesNamespace: "d", FloorplanNamespace: "f"},
-			sites:       sites,
+			name:  "no agreements pointer anywhere is legal",
+			local: SiteConfig{ID: "schoolhouse", FloorplanNamespace: "f"},
+			sites: Sites{Sites: []SiteRecord{
+				{ID: "schoolhouse", DevicesNamespace: "d"},
+			}},
 			wantDevices: "d", wantFloor: "f", wantAgree: "",
 		},
 		{
@@ -169,32 +180,29 @@ func TestResolveSiteNamespaces(t *testing.T) {
 			// error, not something to paper over: we would be serving a property
 			// nobody has described.
 			name:    "an unknown site id is refused",
-			local:   SiteConfig{ID: "nowhere", DevicesNamespace: "d", FloorplanNamespace: "f"},
+			local:   SiteConfig{ID: "nowhere", FloorplanNamespace: "f"},
 			sites:   sites,
 			wantErr: "nowhere",
 		},
 		{
-			// The existing rule, unchanged: both are required. An unnamed
-			// floorplan degrades to ids-as-labels, which is silence that reads as
-			// data.
-			name:    "a missing devices namespace is refused",
-			local:   SiteConfig{ID: "schoolhouse", FloorplanNamespace: "f"},
-			sites:   sites,
-			wantErr: "devices_namespace",
-		},
-		{
-			name:    "a missing floorplan namespace is refused",
-			local:   SiteConfig{ID: "schoolhouse", DevicesNamespace: "d"},
-			sites:   sites,
+			// The existing rule, unchanged: an unnamed floorplan degrades to
+			// ids-as-labels, which is silence that reads as data.
+			name:  "a missing floorplan namespace is refused",
+			local: SiteConfig{ID: "schoolhouse"},
+			sites: Sites{Sites: []SiteRecord{
+				{ID: "schoolhouse", DevicesNamespace: "d"},
+			}},
 			wantErr: "floorplan_namespace",
 		},
 		{
 			// With no sites document at all — a local-dev instance with no remote
-			// config — local config must still work on its own.
-			name:        "local config alone is sufficient",
-			local:       SiteConfig{ID: "home", DevicesNamespace: "d", FloorplanNamespace: "f", EnergyAgreementsNamespace: "a"},
-			sites:       Sites{},
-			wantDevices: "d", wantFloor: "f", wantAgree: "a",
+			// config — resolution still refuses, because devices has no local
+			// source. That is correct: such an instance fetches nothing anyway and
+			// main.go never calls this.
+			name:    "no sites document means no devices namespace",
+			local:   SiteConfig{ID: "home", FloorplanNamespace: "f"},
+			sites:   Sites{},
+			wantErr: "devices_namespace",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -236,7 +244,7 @@ func TestResolveSiteNamespaces(t *testing.T) {
 // cannot resolve anything, and guessing "the only site" would break the moment a
 // second one appeared.
 func TestResolveSiteNamespacesRequiresAnID(t *testing.T) {
-	_, _, err := ResolveSiteNamespaces(SiteConfig{DevicesNamespace: "d", FloorplanNamespace: "f"},
+	_, _, err := ResolveSiteNamespaces(SiteConfig{FloorplanNamespace: "f"},
 		parseSites(t, sitesDocFixture))
 	if err == nil {
 		t.Fatal("want an error when site.id is empty")
@@ -361,15 +369,21 @@ func TestFetcherResolveNamespacesFailsWhenSitesUnavailable(t *testing.T) {
 func TestFetcherResolveNamespacesFallsBackToLocal(t *testing.T) {
 	mux := http.NewServeMux()
 	// A sites document that knows the site but names none of its namespaces.
-	serveNamespace(mux, nsSites, Sites{Sites: []SiteRecord{{ID: "home", Name: "Home"}}})
+	serveNamespace(mux, nsSites, Sites{Sites: []SiteRecord{
+		{ID: "home", Name: "Home", DevicesNamespace: "devices_home"},
+	}})
 	f := newTestFetcher(t, mux, &staticTokenSource{token: "test-token"})
 
-	local := SiteConfig{ID: "home", DevicesNamespace: "devices_local", FloorplanNamespace: "floorplan_local"}
+	local := SiteConfig{ID: "home", FloorplanNamespace: "floorplan_local"}
 	if _, err := f.ResolveNamespaces(context.Background(), local); err != nil {
 		t.Fatalf("ResolveNamespaces: %v", err)
 	}
-	if f.DevicesNamespace != "devices_local" || f.FloorplanNamespace != "floorplan_local" {
-		t.Errorf("pointers = %q/%q, want the local values", f.DevicesNamespace, f.FloorplanNamespace)
+	// Devices still comes from sites (it has no local fallback); floorplan falls back.
+	if f.DevicesNamespace != "devices_home" {
+		t.Errorf("devices = %q, want the value from sites", f.DevicesNamespace)
+	}
+	if f.FloorplanNamespace != "floorplan_local" {
+		t.Errorf("floorplan = %q, want the local fallback", f.FloorplanNamespace)
 	}
 }
 
@@ -397,27 +411,25 @@ remote_config: { base_url: "https://config.example" }
 		if err != nil {
 			t.Fatalf("Load should defer to resolution: %v", err)
 		}
-		if cfg.Site.DevicesNamespace != "" {
-			t.Errorf("devices namespace = %q, want empty until resolved", cfg.Site.DevicesNamespace)
+		if cfg.Site.ID != "home" {
+			t.Errorf("site id = %q, want home", cfg.Site.ID)
 		}
 	})
 
-	t.Run("without a config service, local config is the only source and is required", func(t *testing.T) {
-		_, err := Load(write(`
-site: { id: home }
-remote_config: { base_url: "" }
-`))
-		if err == nil {
-			t.Fatal("want a refusal: nothing can supply the namespaces")
-		}
-		if !strings.Contains(err.Error(), "devices_namespace") {
-			t.Errorf("error %q should name the missing key", err)
-		}
-	})
-
-	t.Run("without a config service, complete local config loads", func(t *testing.T) {
+	t.Run("Load never refuses over the namespace pointers", func(t *testing.T) {
 		if _, err := Load(write(`
-site: { id: home, devices_namespace: devices_home, floorplan_namespace: floorplan_home }
+site: { id: home }
+remote_config: { base_url: "https://config.example" }
+`)); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+	})
+
+	t.Run("without a config service, a bare id loads too", func(t *testing.T) {
+		// Nothing is fetched in that mode, so neither pointer is ever read and
+		// requiring them would refuse a config over values it then ignores.
+		if _, err := Load(write(`
+site: { id: home }
 remote_config: { base_url: "" }
 `)); err != nil {
 			t.Fatalf("Load: %v", err)

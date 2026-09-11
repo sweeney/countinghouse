@@ -239,39 +239,28 @@ site:
 	}
 }
 
-func TestLoad_RefusesASiteThatNamesNoFloorplanNamespace(t *testing.T) {
-	dir := t.TempDir()
-	p := writeFile(t, dir, "config.yaml", `
-site:
-  id: "cottage"
-  devices_namespace: "devices_cottage"
-`)
-	_, err := Load(p)
+func TestResolve_RefusesASiteThatNamesNoFloorplanNamespace(t *testing.T) {
+	sites := Sites{Sites: []SiteRecord{{ID: "cottage", DevicesNamespace: "devices_cottage"}}}
+	_, _, err := ResolveSiteNamespaces(SiteConfig{ID: "cottage"}, sites)
 	if err == nil {
-		t.Fatal("a site naming no floorplan_namespace must refuse to load")
+		t.Fatal("a site naming no floorplan_namespace must refuse to start")
 	}
 	if !strings.Contains(err.Error(), "floorplan_namespace") {
 		t.Errorf("the error must name the missing key; got %q", err)
 	}
-	// An operator running two instances needs to know which config to edit, and
-	// what to write in it, without finding the README first.
+	// An operator running two instances needs to know which config to edit without
+	// finding the README first.
 	if !strings.Contains(err.Error(), "cottage") {
 		t.Errorf("the error must name the site it is refusing; got %q", err)
-	}
-	for _, want := range []string{"site:", "id:", "floorplan_namespace:"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal must show the block to add, missing %q in:\n%s", want, err)
-		}
 	}
 }
 
 // A config missing BOTH namespaces reports the devices one: it is the namespace
 // that decides whether any answer is right at all, and an operator fixing one key
 // at a time should be sent to that one first.
-func TestLoad_MissingBothNamespacesReportsDevicesFirst(t *testing.T) {
-	dir := t.TempDir()
-	p := writeFile(t, dir, "config.yaml", "site:\n  id: \"cottage\"\n")
-	_, err := Load(p)
+func TestResolve_MissingBothNamespacesReportsDevicesFirst(t *testing.T) {
+	sites := Sites{Sites: []SiteRecord{{ID: "cottage"}}}
+	_, _, err := ResolveSiteNamespaces(SiteConfig{ID: "cottage"}, sites)
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}

@@ -55,9 +55,14 @@ type SiteNamespaces struct {
 // disagreement is REPORTED rather than swallowed, because an operator's edit being
 // ignored without a word is its own kind of silent failure.
 //
-// Local config remains the fallback, which is what makes the migration safe: a
-// site whose `sites` entry has not been filled in yet keeps working off its own
-// config, and a local-dev instance with no remote config at all works unchanged.
+// Local config remains the fallback for the FLOORPLAN and AGREEMENTS pointers,
+// which is what makes the migration safe: a site whose `sites` entry is only
+// partly filled in keeps working off its own config.
+//
+// devices_namespace has NO local fallback. It is the pointer that decides whether
+// any answer is right at all — a stale local copy would not degrade a label, it
+// would bill another property's devices while the service looked entirely healthy —
+// so it comes from `sites` or the instance does not start.
 //
 // Returns warnings separately from the error so the caller can log them and carry
 // on — they are not failures.
@@ -71,7 +76,10 @@ func ResolveSiteNamespaces(local SiteConfig, sites Sites) (SiteNamespaces, []str
 
 	var warns []string
 	out := SiteNamespaces{
-		Devices:    local.DevicesNamespace,
+		// Devices has NO local fallback, deliberately. It is the pointer that
+		// decides whether any answer is right at all, so a stale local copy would
+		// not degrade a label — it would bill another property's devices while
+		// looking entirely healthy. It comes from `sites` or not at all.
 		Floorplan:  local.FloorplanNamespace,
 		Agreements: local.EnergyAgreementsNamespace,
 	}
@@ -89,7 +97,7 @@ func ResolveSiteNamespaces(local SiteConfig, sites Sites) (SiteNamespaces, []str
 				"config: site.id %q is not in the sites namespace (it knows %v); "+
 					"refusing to serve a property nobody has described", local.ID, known)
 		}
-		out.Devices = prefer(rec.DevicesNamespace, local.DevicesNamespace, "devices_namespace", &warns)
+		out.Devices = rec.DevicesNamespace
 		out.Floorplan = prefer(rec.FloorplanNamespace, local.FloorplanNamespace, "floorplan_namespace", &warns)
 		out.Agreements = prefer(rec.EnergyAgreementsNamespace, local.EnergyAgreementsNamespace, "energy_agreements_namespace", &warns)
 	}
@@ -99,9 +107,10 @@ func ResolveSiteNamespaces(local SiteConfig, sites Sites) (SiteNamespaces, []str
 	// is silence that reads as data.
 	if out.Devices == "" {
 		return SiteNamespaces{}, warns, fmt.Errorf(
-			"config: no devices_namespace for site %q, in sites or locally; there is no default "+
-				"and serving an empty device inventory would answer every question with zero kWh",
-			local.ID)
+			"config: site %q names no devices_namespace in the sites namespace; there is no "+
+				"default and no local fallback for this one, because a stale local copy would "+
+				"bill another property's devices while looking healthy. Add "+
+				"devices_namespace to the site's entry in `sites`", local.ID)
 	}
 	if out.Floorplan == "" {
 		return SiteNamespaces{}, warns, fmt.Errorf(
