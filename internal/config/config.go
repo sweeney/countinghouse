@@ -19,6 +19,7 @@ type Config struct {
 	Identity     IdentityConfig     `yaml:"identity"`
 	RemoteConfig RemoteConfigConfig `yaml:"remote_config"`
 	House        HouseConfig        `yaml:"house"`
+	Prices       PricesConfig       `yaml:"prices"`
 
 	// warnings are config states that are legal but probably not what the operator
 	// meant. Collected during Load, before defaults are filled in, because filling
@@ -142,6 +143,44 @@ type RemoteConfigConfig struct {
 	AgreementsNamespace string `yaml:"agreements_namespace"`
 }
 
+// PricesConfig locates the half-hourly price archive.
+//
+// This is local bootstrap config rather than remote for an unavoidable reason: it
+// is where the service keeps the data it needs in order to answer anything, so it
+// cannot itself be fetched.
+type PricesConfig struct {
+	// DBPath is the SQLite file holding the archive. Empty DISABLES the collector
+	// entirely, which is correct for a deployment whose agreements are all
+	// flat-rate — it has no half-hourly prices to keep.
+	//
+	// It is not optional once any agreement is half-hourly: see
+	// CheckArchiveRequired, which refuses that combination at startup rather than
+	// letting the service look healthy while being unable to price anything after
+	// the switchover.
+	//
+	// The parent directory must exist and be writable by the service user. The
+	// file is created mode 0600, along with the -wal and -shm files SQLite keeps
+	// beside it.
+	DBPath string `yaml:"db_path"`
+
+	// OctopusBaseURL is the supplier API root, defaulted by Default() and
+	// overridable so a local or staging deployment can be pointed at a stand-in.
+	//
+	// The default lives in Default() rather than inside the octopus client, which
+	// deliberately refuses to construct without a base URL — so a misconfigured
+	// test cannot quietly reach the live API. The default belongs at the edge,
+	// where it is visible in one place.
+	OctopusBaseURL string `yaml:"octopus_base_url"`
+}
+
+// DefaultOctopusBaseURL is the supplier's public API root. The price and standing
+// charge endpoints beneath it need no authentication.
+const DefaultOctopusBaseURL = "https://api.octopus.energy/v1"
+
+// Enabled reports whether a price archive is configured, and therefore whether
+// the collector should run.
+func (p PricesConfig) Enabled() bool { return p.DBPath != "" }
+
 // HouseConfig holds house-wide settings.
 type HouseConfig struct {
 	// Timezone names a tz database location (e.g. "Europe/London") used to
@@ -176,7 +215,8 @@ func Default() Config {
 			Org:    "swee.net",
 			Bucket: "statehouse",
 		},
-		House: HouseConfig{Timezone: "Europe/London"},
+		House:  HouseConfig{Timezone: "Europe/London"},
+		Prices: PricesConfig{OctopusBaseURL: DefaultOctopusBaseURL},
 	}
 }
 

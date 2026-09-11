@@ -368,3 +368,57 @@ func (e EnergyTariffs) AsAgreements() EnergyAgreements {
 func legacyName(fuel string) string {
 	return fmt.Sprintf("%s (from energy_tariffs)", fuel)
 }
+
+// VariableTariffCodes returns every distinct electricity tariff code whose prices
+// must be archived, sorted for determinism.
+//
+// It returns ALL of them, not just the currently effective one, because a
+// SUPERSEDED half-hourly agreement's prices are still needed to bill its window.
+// Dropping an old code would make a past month quietly unbillable the moment the
+// tariff changed — and the symptom would appear long after the cause.
+//
+// Electricity only: countinghouse does not bill gas, so a half-hourly gas
+// agreement must not conscript a collector.
+func (e EnergyAgreements) VariableTariffCodes() []string {
+	seen := map[string]bool{}
+	for _, a := range e.Agreements["electricity"] {
+		if a.Type == TariffTypeVariable && a.ID != "" {
+			seen[a.ID] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for code := range seen {
+		out = append(out, code)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CheckArchiveRequired refuses the one combination that would fail silently: a
+// half-hourly agreement with nowhere to keep prices.
+//
+// A flat-only deployment needs no archive and must not be made to configure one.
+// But a half-hourly agreement prices nothing without the archive, so a service
+// starting in that state would look healthy and then refuse every window after the
+// switchover — with the cause nowhere near the symptom. Refusing at boot puts the
+// two together.
+//
+// Called after the first successful fetch, because it is a question about the
+// remote document and the local config TOGETHER; neither alone can answer it.
+func CheckArchiveRequired(archivePath string, agreements EnergyAgreements) error {
+	if archivePath != "" {
+		return nil
+	}
+	for _, a := range agreements.Agreements["electricity"] {
+		if a.Type != TariffTypeVariable {
+			continue
+		}
+		return fmt.Errorf("config: electricity agreement %q (%s) is half-hourly, so its prices "+
+			"come from the archive — but no prices.db_path is configured, so nothing can be "+
+			"stored and every window it covers would be unpriceable", a.Name, a.ID)
+	}
+	return nil
+}

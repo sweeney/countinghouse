@@ -415,6 +415,45 @@ Rules, all enforced when the namespace is applied:
   is kept and `/healthz` degrades. Per *boot needs truth, running keeps the last
   truth*, a namespace that has never been fetched still aborts startup.
 
+### The price archive
+
+A half-hourly (`variable`) agreement has no unit rate in config — its prices live in a local
+SQLite archive that countinghouse fills from the supplier. This is the one thing the service
+writes; see `docs/octopus-price-data-model.md` for why it is SQLite rather than Influx.
+
+```yaml
+prices:
+  db_path: "/var/lib/countinghouse/prices.db"
+```
+
+- **Unset disables collection**, which is correct for a deployment whose agreements are all
+  flat-rate: there are no half-hourly prices to keep.
+- **Set it before any agreement becomes `variable`.** Startup refuses that combination rather
+  than booting successfully and then being unable to price anything after the switchover.
+- The parent directory must exist and be writable by the service user. The file and SQLite's
+  `-wal`/`-shm` companions are created mode 0600.
+- **Back it up.** It is rebuildable from the supplier today, and the entire reason to keep it
+  is the day that stops being true. Roughly 225 bytes a slot — measured at 7.8 MB for two
+  years of one tariff, so ~80 MB over twenty.
+
+No backfill step is needed: a first sync against an empty archive requests an unbounded range
+and so pulls the supplier's whole published history in one pass (measured: 34,894 slots in
+6.5 s). Afterwards each sync fetches only what is new, detected by a single ~350-byte probe.
+
+`GET /healthz` and `GET /metrics` gain a `prices` block, one entry per collected tariff —
+omitted entirely when no collector runs. Two fields answer different questions, and the
+difference matters:
+
+| field | means | use |
+|---|---|---|
+| `known_to` | end of the newest slot held | "prices are arriving" |
+| `complete_to` | end of the newest **fully populated** local day | **"we can bill this far"** |
+
+Alert on `complete_to`. A publication routinely advances the horizon across a whole day while
+leaving that day two slots short, so `known_to` alone will tell you yes when the answer is no.
+`complete_to` at or behind now means today cannot be priced in full, and degrades the
+top-level `status`.
+
 #### Migrating from `energy_tariffs`
 
 The legacy namespace still works untouched. It holds one current rate per fuel and no

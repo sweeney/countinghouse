@@ -752,7 +752,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	if count > 0 {
 		avgMs = float64(s.influxNanos.Load()) / float64(count) / 1e6
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"query_count":           count,
 		"query_errors":          s.queryErrors.Load(),
 		"influx_avg_latency_ms": round.To(avgMs, 2),
@@ -760,7 +760,13 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 		"version":               s.Version,
 		"uptime_seconds":        int(time.Since(s.started) / time.Second),
 		"goroutines":            runtime.NumGoroutine(),
-	})
+	}
+	// Omitted rather than empty when no collector runs, so a graph of zeroes never
+	// implies an archive that exists and is doing nothing.
+	if s.Prices != nil {
+		out["prices"] = s.Prices.PriceHealth()
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // writeError writes a JSON error body with the given status.

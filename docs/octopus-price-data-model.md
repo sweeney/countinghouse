@@ -25,7 +25,7 @@ Verified live, region `N`, product `AGILE-24-10-01`:
 | Slots per *local* day | 46 / 48 / **50** (2025-10-26 = 50, 2026-03-29 = 46) | Never key or bucket by local calendar day |
 | `valid_to` | `null` on open-ended rates | Intervals are half-open and may be unbounded |
 | Decimal places | `exc_vat` 1–2; `inc_vat` up to 5 (`62.11863`) | Don't round on ingest; don't recompute VAT |
-| Size | 17,520 rows/yr → 350k rows / 20 yr ≈ **17 MB in RAM** | **The entire archive fits in memory.** Query performance is a non-issue |
+| Size | 17,520 rows/yr → 350k rows / 20 yr | **Not a big-data problem.** Measured on the real archive: 7.8 MB for 34,894 slots, i.e. ~225 bytes/row once SQLite's index and text timestamps are counted — so ~80 MB over 20 years, not the ~17 MB an earlier estimate here assumed. Still trivial, and query performance is still a non-issue |
 
 That last row is the one that reframes everything. This is not a big-data problem. It is a
 *durability and correctness* problem about a small table.

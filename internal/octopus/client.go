@@ -310,10 +310,19 @@ func (c *Client) rates(ctx context.Context, tariff TariffCode, kind string, from
 	q.Set("page_size", strconv.Itoa(size))
 	if !from.IsZero() {
 		q.Set("period_from", formatUTC(from))
+		if !to.IsZero() {
+			q.Set("period_to", formatUTC(to))
+		}
 	}
-	if !to.IsZero() {
-		q.Set("period_to", formatUTC(to))
-	}
+	// period_to is DELIBERATELY dropped when there is no period_from: the API
+	// rejects an upper bound without a lower one, answering 400 with
+	// {"period_from":["This field is required when providing a `period_to`."]}.
+	//
+	// That combination is not hypothetical — it is exactly what a first sync
+	// against an empty archive produces, having no lower bound to offer but
+	// knowing the horizon. Dropping the bound costs nothing, because with no lower
+	// bound we want the supplier's whole history anyway and the horizon is by
+	// definition the newest thing in it.
 	endpoint.RawQuery = q.Encode()
 
 	var out []Rate

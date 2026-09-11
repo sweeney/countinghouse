@@ -767,6 +767,70 @@ components:
             per day even when the unit rate is half-hourly.
       required: [name, type, vat_rate, daily_standing_charge]
 
+    PriceHealth:
+      type: object
+      description: >-
+        One tariff's price-archive health. `known_to` and `complete_to` answer
+        DIFFERENT questions and a monitor reading only the first will be misled:
+        a publication can advance the horizon across a whole day while leaving
+        that day short of slots, which is observed behaviour rather than a
+        hypothetical.
+      properties:
+        tariff_code:
+          type: string
+          example: E-1R-AGILE-24-10-01-A
+        known_to:
+          type: string
+          format: date-time
+          description: >-
+            End of the newest slot held — "prices are arriving". Absent when the
+            archive is empty.
+        complete_to:
+          type: string
+          format: date-time
+          description: >-
+            End of the newest FULLY POPULATED local day — "we can bill this far".
+            This is the field to alert on: when it is at or behind now, today
+            cannot be priced in full. It stops at the first incomplete day rather
+            than taking the newest complete one, because a complete tomorrow
+            behind an incomplete today would not make today priceable.
+        last_attempt:
+          type: string
+          format: date-time
+          description: Moves on every sync, successful or not.
+        last_success:
+          type: string
+          format: date-time
+          description: >-
+            Moves only on a sync that worked. Lagging behind last_attempt means
+            collection is failing right now; it is cleared back into step on the
+            next success.
+        last_error:
+          type: string
+          description: The most recent failure, absent once a sync succeeds.
+        syncs:
+          type: integer
+        failures:
+          type: integer
+        inserted:
+          type: integer
+          description: Slots newly stored since start.
+        restated:
+          type: integer
+          description: >-
+            Prices the supplier revised AFTER we had already stored them. Rare,
+            and worth investigating: a bill already issued may have moved.
+        rejected:
+          type: integer
+          description: >-
+            Slots refused by validation and therefore not stored. Never silently
+            dropped — each is logged and counted.
+        warnings:
+          type: integer
+          description: >-
+            Slots stored but flagged as implausible (beyond the price cap or
+            sanity floor). Flagged rather than rejected: negative prices are real.
+
     TariffsResponse:
       type: object
       properties:
@@ -1487,8 +1551,9 @@ components:
           description: >-
             Aggregated downstream verdict. ok = all downstreams healthy;
             degraded = serving last-known-good config because a remote-config
-            fetch is failing (remote_config.*.ok = false); unavailable = Influx
-            is unreachable (data routes will 502). The HTTP status is 200 in all
+            fetch is failing (remote_config.*.ok = false), OR the price archive
+            cannot price today (see `prices`); unavailable = Influx is
+            unreachable (data routes will 502). The HTTP status is 200 in all
             three cases — /healthz reports health, it does not itself fail.
             On a running instance, degraded always means STALE and never EMPTY: a
             namespace that has never been fetched aborts startup instead, so any
@@ -1529,6 +1594,16 @@ components:
                 draw that distinction, since it only records the outcome of a
                 fetch.
               example: floorplan_home
+        prices:
+          type: array
+          description: >-
+            Price-archive health, one entry per half-hourly tariff being
+            collected. OMITTED ENTIRELY when no collector runs, which is the
+            normal state for a deployment whose tariff agreements are all
+            flat-rate — an empty array would read as a broken archive rather than
+            as no archive.
+          items:
+            $ref: "#/components/schemas/PriceHealth"
         remote_config:
           type: object
           description: >-

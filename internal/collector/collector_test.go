@@ -119,6 +119,12 @@ func (f *fakeFetcher) UnitRates(_ context.Context, _ octopus.TariffCode, from, t
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rateCalls = append(f.rateCalls, rateCall{from, to})
+	// The real API answers 400 for an upper bound without a lower one. A fake that
+	// accepted it would let that bug back in — and did, once: the hermetic suite
+	// passed while the live fetch failed on a first sync.
+	if from.IsZero() && !to.IsZero() {
+		return nil, fmt.Errorf("fake: period_to without period_from is rejected by the real API")
+	}
 	if len(f.failures) > 0 {
 		err := f.failures[0]
 		f.failures = f.failures[1:]

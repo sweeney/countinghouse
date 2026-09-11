@@ -142,6 +142,13 @@ type Server struct {
 	// unknown, and grouped series stay labelled by id, rather than failing.
 	Floorplan FloorplanProvider
 
+	// Prices reports price-archive health for /healthz and /metrics. Nil when no
+	// collector runs, which is the normal case for a deployment whose tariff
+	// agreements are all flat-rate: both blocks are then omitted rather than
+	// rendered empty, since a zeroed block would read as a broken archive rather
+	// than as no archive.
+	Prices PricesProvider
+
 	// RemoteConfig surfaces per-namespace remote-config fetch status on
 	// /healthz. The real impl is the Fetcher (which satisfies ConfigStatus);
 	// tests may inject a fake or leave it nil (then /healthz omits the field).
@@ -309,6 +316,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		InfluxReachable bool                              `json:"influx_reachable"`
 		Site            *siteHealth                       `json:"site,omitempty"`
 		RemoteConfig    map[string]config.NamespaceStatus `json:"remote_config,omitempty"`
+		Prices          []PriceHealth                     `json:"prices,omitempty"`
 	}
 	h := health{
 		Version:    s.Version,
@@ -331,6 +339,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.RemoteConfig != nil {
 		h.RemoteConfig = s.RemoteConfig.Statuses()
 	}
+	if s.Prices != nil {
+		h.Prices = s.Prices.PriceHealth()
+	}
 
 	// Derive the aggregated verdict so a monitor watching the top-level status
 	// (the obvious thing to alert on) sees an outage. Influx is the hard
@@ -346,6 +357,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 				h.Status = "degraded"
 				break
 			}
+		}
+		// A price problem degrades on the same reasoning as a config namespace: the
+		// archive still holds what it held, so historical windows still price, but
+		// we are either not keeping up or cannot price TODAY — and the top-level
+		// status is what a monitor actually watches.
+		if degraded, _ := priceVerdict(h.Prices, s.clock().Now()); degraded {
+			h.Status = "degraded"
 		}
 	}
 

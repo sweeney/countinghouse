@@ -245,11 +245,16 @@ func (c *Collector) Sync(ctx context.Context) (SyncResult, error) {
 	case !known.IsZero() && !horizon.After(known):
 		res.UpToDate = true
 	default:
-		from := known.Add(-fetchOverlap)
+		from, to := known.Add(-fetchOverlap), horizon
 		if known.IsZero() {
-			from = time.Time{} // unbounded: let the supplier's history decide
+			// Nothing held: ask for EVERYTHING rather than for [unbounded, horizon).
+			// Both bounds go, not just the lower one — an upper bound without a
+			// lower one is not a well-formed request (the supplier rejects it), and
+			// it would be meaningless here anyway, since the horizon is by
+			// definition the newest thing the supplier has.
+			from, to = time.Time{}, time.Time{}
 		}
-		fetched, err := c.fetchRange(ctx, from, horizon)
+		fetched, err := c.fetchRange(ctx, from, to)
 		if err != nil {
 			return SyncResult{}, c.fail(err)
 		}

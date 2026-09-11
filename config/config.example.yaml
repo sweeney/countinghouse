@@ -76,5 +76,21 @@ remote_config:
   # price a variable tariff at a fixed number.
   # agreements_namespace: "energy_agreements"
 
+prices:
+  # The half-hourly price archive: the one thing countinghouse writes.
+  #
+  # Leave UNSET for a deployment whose tariff agreements are all flat-rate — it has
+  # no half-hourly prices to keep, and the collector simply does not run. Set it as
+  # soon as any agreement is `variable`: startup REFUSES that combination, because
+  # a half-hourly agreement with nowhere to store prices can price nothing, and the
+  # service would otherwise look healthy while failing every window after the
+  # switchover.
+  #
+  # The parent directory must exist and be writable by the service user. The file is
+  # created mode 0600, as are the -wal and -shm files SQLite keeps beside it. Back
+  # it up: it is rebuildable from the supplier today, and the whole reason to keep
+  # it is the day that stops being true.
+  db_path: "/var/lib/countinghouse/prices.db"
+
 house:
   timezone: "Europe/London"

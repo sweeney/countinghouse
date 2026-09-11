@@ -49,9 +49,13 @@ MISSING 2 slot(s):
 -> gap is at the TAIL, not interior
 ```
 
-Historical BST days all carry 48, so this is a transient partial publication, not a rule. A
-collector that treated "horizon advanced" as "day published" would have stored a day with a
-hole in it and stopped looking. Two separate states are therefore needed:
+Historical BST days all carry 48, so the tail does fill in eventually — but it is NOT a
+one-off. The identical pattern appeared again the next day at a similar time (2026-09-11,
+shortly after publication: `known_to` 23:00 BST on the 12th, i.e. 46 of that day's 48 slots),
+so publishing two slots short and topping up later looks systematic rather than accidental.
+
+A collector that treated "horizon advanced" as "day published" would therefore store a day
+with a hole in it and stop looking, every single day. Two separate states are therefore needed:
 
 | State | Meaning | Drives |
 |---|---|---|

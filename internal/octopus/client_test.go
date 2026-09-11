@@ -625,3 +625,49 @@ func TestUnitRatesBoundsPaginationLoop(t *testing.T) {
 	}
 	t.Logf("bounded after %d requests", len(ts.got()))
 }
+
+// The API REJECTS period_to without period_from — verified against the live API,
+// which answers 400 with
+// {"period_from":["This field is required when providing a `period_to`."]}.
+//
+// The unbounded case is real and common: a first sync against an empty archive has
+// no lower bound to offer, but does know the horizon. Sending only the upper bound
+// fails the whole fetch, so the client must drop it. That costs nothing — with no
+// lower bound we want everything the supplier has, and the horizon is by definition
+// the newest thing available.
+func TestUnitRatesOmitsPeriodToWhenFromIsUnbounded(t *testing.T) {
+	ts := serveFixture(t, "unit_rates_simple.json")
+	c := newClient(t, ts, nil)
+
+	to := time.Date(2026, 9, 12, 22, 0, 0, 0, time.UTC)
+	if _, err := c.UnitRates(context.Background(), agileN(t), time.Time{}, to); err != nil {
+		t.Fatalf("UnitRates: %v", err)
+	}
+
+	q := ts.got()[0].Query
+	if _, present := q["period_from"]; present {
+		t.Errorf("period_from should be absent, got %q", q.Get("period_from"))
+	}
+	if _, present := q["period_to"]; present {
+		t.Errorf("period_to = %q, but the API refuses it without period_from; "+
+			"it must be dropped rather than sent alone", q.Get("period_to"))
+	}
+}
+
+// The converse IS legal: a lower bound alone is accepted.
+func TestUnitRatesAllowsPeriodFromWithoutPeriodTo(t *testing.T) {
+	ts := serveFixture(t, "unit_rates_simple.json")
+	c := newClient(t, ts, nil)
+
+	from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := c.UnitRates(context.Background(), agileN(t), from, time.Time{}); err != nil {
+		t.Fatalf("UnitRates: %v", err)
+	}
+	q := ts.got()[0].Query
+	if q.Get("period_from") != "2026-09-01T00:00:00Z" {
+		t.Errorf("period_from = %q", q.Get("period_from"))
+	}
+	if _, present := q["period_to"]; present {
+		t.Errorf("period_to should be absent, got %q", q.Get("period_to"))
+	}
+}
