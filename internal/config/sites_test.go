@@ -27,12 +27,15 @@ import (
 // The shape as it should be authored, using the renamed key. Not a verbatim copy
 // of the live document, which is free to carry extra fields we ignore.
 //
-// The coordinates and scheme names are PLACEHOLDERS. This repo is public, and a
-// site's latitude/longitude is its street address to within a few metres — so the
-// fixture carries round numbers that exercise the same parsing (positive and
-// negative, integral and fractional) without publishing where anything is. Nothing
-// in countinghouse reads these fields; they are here precisely to prove that
-// unknown fields are tolerated rather than rejected.
+// Every LOCATION DETAIL here is a placeholder: coordinates, scheme names, and the
+// second site's id and name. This repo is public, and a property is identifiable by
+// any of them — a latitude to four decimal places is a street address, and a named
+// building is worse. The coordinates are round numbers that exercise the same
+// parsing (positive and negative, integral and fractional), and the second site
+// exists only to prove that a record with no namespace pointers resolves and that
+// Find picks the right one of several. Nothing in countinghouse reads the
+// coordinates at all; they are here to prove unknown fields are tolerated rather
+// than rejected.
 const sitesDocFixture = `{
   "sites": [
     {
@@ -46,8 +49,8 @@ const sitesDocFixture = `{
       "bin_scheme": "scheme_one"
     },
     {
-      "id": "schoolhouse",
-      "name": "The Old Schoolhouse",
+      "id": "cottage",
+      "name": "Second Site",
       "latitude": 52.0,
       "longitude": 1.0,
       "bin_scheme": "scheme_two"
@@ -99,12 +102,12 @@ func TestSitesFind(t *testing.T) {
 	}
 	// A site present but with no pointers resolves — it exists — and the caller
 	// decides whether the missing pointers are fatal.
-	school, ok := s.Find("schoolhouse")
+	second, ok := s.Find("cottage")
 	if !ok {
-		t.Fatal("schoolhouse should resolve; it IS in the document")
+		t.Fatal("cottage should resolve; it IS in the document")
 	}
-	if school.DevicesNamespace != "" || school.EnergyAgreementsNamespace != "" {
-		t.Errorf("schoolhouse should have no pointers configured: %+v", school)
+	if second.DevicesNamespace != "" || second.EnergyAgreementsNamespace != "" {
+		t.Errorf("cottage should have no pointers configured: %+v", second)
 	}
 }
 
@@ -156,29 +159,29 @@ func TestResolveSiteNamespaces(t *testing.T) {
 			// is what makes the migration safe for a partly-filled site entry.
 			name: "local fills in the floorplan that sites omits",
 			local: SiteConfig{
-				ID: "schoolhouse", FloorplanNamespace: "floorplan_school",
+				ID: "cottage", FloorplanNamespace: "floorplan_cottage",
 			},
 			sites: Sites{Sites: []SiteRecord{
-				{ID: "schoolhouse", DevicesNamespace: "devices_school"},
+				{ID: "cottage", DevicesNamespace: "devices_cottage"},
 			}},
-			wantDevices: "devices_school", wantFloor: "floorplan_school",
+			wantDevices: "devices_cottage", wantFloor: "floorplan_cottage",
 		},
 		{
 			// devices_namespace has NO local fallback. It decides whether any answer
 			// is right at all, so a stale local copy would bill another property's
 			// devices while the service looked healthy.
 			name:    "a devices namespace missing from sites is refused, with no local rescue",
-			local:   SiteConfig{ID: "schoolhouse", FloorplanNamespace: "f"},
-			sites:   Sites{Sites: []SiteRecord{{ID: "schoolhouse"}}},
+			local:   SiteConfig{ID: "cottage", FloorplanNamespace: "f"},
+			sites:   Sites{Sites: []SiteRecord{{ID: "cottage"}}},
 			wantErr: "devices_namespace",
 		},
 		{
 			// An empty agreements pointer is NOT an error: it means stay on the
 			// legacy tariff document, which is the opt-in migration path.
 			name:  "no agreements pointer anywhere is legal",
-			local: SiteConfig{ID: "schoolhouse", FloorplanNamespace: "f"},
+			local: SiteConfig{ID: "cottage", FloorplanNamespace: "f"},
 			sites: Sites{Sites: []SiteRecord{
-				{ID: "schoolhouse", DevicesNamespace: "d"},
+				{ID: "cottage", DevicesNamespace: "d"},
 			}},
 			wantDevices: "d", wantFloor: "f", wantAgree: "",
 		},
@@ -195,9 +198,9 @@ func TestResolveSiteNamespaces(t *testing.T) {
 			// The existing rule, unchanged: an unnamed floorplan degrades to
 			// ids-as-labels, which is silence that reads as data.
 			name:  "a missing floorplan namespace is refused",
-			local: SiteConfig{ID: "schoolhouse"},
+			local: SiteConfig{ID: "cottage"},
 			sites: Sites{Sites: []SiteRecord{
-				{ID: "schoolhouse", DevicesNamespace: "d"},
+				{ID: "cottage", DevicesNamespace: "d"},
 			}},
 			wantErr: "floorplan_namespace",
 		},
