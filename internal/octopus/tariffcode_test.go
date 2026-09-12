@@ -20,51 +20,54 @@ func TestProductFromTariff(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:    "single-register electricity, the Agile tariff we bill on",
-			tariff:  "E-1R-AGILE-24-10-01-N",
+			// Region A throughout, deliberately: the GSP letter is derived from a
+			// property's address, so the real one is not something a public repo's
+			// tests should carry. Which letter it is makes no difference to parsing.
+			name:    "single-register electricity, the Agile product",
+			tariff:  "E-1R-AGILE-24-10-01-A",
 			product: "AGILE-24-10-01",
-			region:  "N",
+			region:  "A",
 		},
 		{
 			name:    "single-register electricity, a fixed product",
-			tariff:  "E-1R-OE-FIX-12M-25-09-09-N",
+			tariff:  "E-1R-OE-FIX-12M-25-09-09-A",
 			product: "OE-FIX-12M-25-09-09",
-			region:  "N",
+			region:  "A",
 		},
 		{
 			name:    "a variable product, whose rates carry payment methods",
-			tariff:  "E-1R-VAR-22-11-01-N",
+			tariff:  "E-1R-VAR-22-11-01-B",
 			product: "VAR-22-11-01",
-			region:  "N",
+			region:  "B",
 		},
 		{
 			// Economy 7 and similar are two-register. We do not bill one today,
 			// but the code shape is legal and must parse rather than be rejected:
 			// silently refusing a valid tariff is how a future migration breaks.
 			name:    "two-register electricity parses the same way",
-			tariff:  "E-2R-VAR-22-11-01-N",
+			tariff:  "E-2R-VAR-22-11-01-D",
 			product: "VAR-22-11-01",
-			region:  "N",
+			region:  "D",
 		},
 		{
 			// Gas uses the same grammar. Countinghouse bills electricity only, so
 			// this is not reached today, but the parser should not be the thing
 			// that decides that.
 			name:    "gas parses, fuel is reported rather than assumed",
-			tariff:  "G-1R-OE-FIX-18M-26-09-08-N",
+			tariff:  "G-1R-OE-FIX-18M-26-09-08-E",
 			product: "OE-FIX-18M-26-09-08",
-			region:  "N",
+			region:  "E",
 		},
 		{
-			name:    "every GSP letter is accepted, not just ours",
+			name:    "every GSP letter is accepted, not just the one we bill on",
 			tariff:  "E-1R-AGILE-24-10-01-C",
 			product: "AGILE-24-10-01",
 			region:  "C",
 		},
 		{name: "empty", tariff: "", wantErr: true},
-		{name: "no register segment", tariff: "E-AGILE-24-10-01-N", wantErr: true},
+		{name: "no register segment", tariff: "E-AGILE-24-10-01-A", wantErr: true},
 		{name: "no region suffix", tariff: "E-1R-AGILE-24-10-01", wantErr: true},
-		{name: "region is not a single letter", tariff: "E-1R-AGILE-24-10-01-NN", wantErr: true},
+		{name: "region is not a single letter", tariff: "E-1R-AGILE-24-10-01-AA", wantErr: true},
 		{name: "region is a digit", tariff: "E-1R-AGILE-24-10-01-1", wantErr: true},
 		{name: "nothing between register and region", tariff: "E-1R-N", wantErr: true},
 		{
@@ -74,7 +77,7 @@ func TestProductFromTariff(t *testing.T) {
 			tariff:  "E-1R-../../secrets-N",
 			wantErr: true,
 		},
-		{name: "whitespace is refused rather than trimmed", tariff: "E-1R-AGILE-24-10-01-N ", wantErr: true},
+		{name: "whitespace is refused rather than trimmed", tariff: "E-1R-AGILE-24-10-01-A ", wantErr: true},
 		{name: "lowercase is refused rather than upcased", tariff: "e-1r-agile-24-10-01-n", wantErr: true},
 	}
 
@@ -106,7 +109,7 @@ func TestProductFromTariff(t *testing.T) {
 // The fuel is reported so callers can refuse what they do not bill, rather than
 // the parser deciding. Countinghouse bills electricity; gas is read and ignored.
 func TestParseTariffCodeReportsFuel(t *testing.T) {
-	elec, err := ParseTariffCode("E-1R-AGILE-24-10-01-N")
+	elec, err := ParseTariffCode("E-1R-AGILE-24-10-01-A")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +117,7 @@ func TestParseTariffCodeReportsFuel(t *testing.T) {
 		t.Error("E-1R-… should report as electricity")
 	}
 
-	gas, err := ParseTariffCode("G-1R-OE-FIX-18M-26-09-08-N")
+	gas, err := ParseTariffCode("G-1R-OE-FIX-18M-26-09-08-E")
 	if err != nil {
 		t.Fatal(err)
 	}

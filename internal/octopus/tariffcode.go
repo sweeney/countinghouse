@@ -23,8 +23,8 @@ import (
 // TariffCode is a parsed Octopus tariff code.
 //
 // The grammar is `{fuel}-{registers}R-{product}-{gsp}`, e.g.
-// `E-1R-AGILE-24-10-01-N`: electricity, single register, product
-// `AGILE-24-10-01`, grid-supply-point region `N`.
+// `E-1R-AGILE-24-10-01-A`: electricity, single register, product
+// `AGILE-24-10-01`, grid-supply-point region `A`.
 //
 // Product matters because it is a SEPARATE path segment from the tariff on
 // every rate endpoint, and callers generally hold only the tariff code — it is
@@ -112,9 +112,9 @@ func ParseTariffCode(code string) (TariffCode, error) {
 // NormaliseGroupID converts a grid-supply-point group id into the form tariff
 // codes use.
 //
-// `GET /industry/grid-supply-points/?postcode=…` answers with `{"group_id":"_N"}`
+// `GET /industry/grid-supply-points/?postcode=…` answers with `{"group_id":"_A"}`
 // — note the leading underscore — while tariff codes spell the same region as a
-// bare `N`. Feeding `_N` into a tariff code builds a path for a tariff that does
+// bare `A`. Feeding `_A` into a tariff code builds a path for a tariff that does
 // not exist, so the two spellings are reconciled in one documented place rather
 // than at each call site.
 func NormaliseGroupID(groupID string) string {

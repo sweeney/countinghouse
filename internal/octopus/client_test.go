@@ -28,7 +28,7 @@ import (
 // tests exercise the same path-building the collector will.
 func agileN(t *testing.T) TariffCode {
 	t.Helper()
-	tc, err := ParseTariffCode("E-1R-AGILE-24-10-01-N")
+	tc, err := ParseTariffCode("E-1R-AGILE-24-10-01-A")
 	if err != nil {
 		t.Fatalf("fixture tariff code should parse: %v", err)
 	}
@@ -341,7 +341,7 @@ func TestStandingChargesOpenEndedValidTo(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("made %d requests, want 1", len(got))
 	}
-	wantPath := "/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-N/standing-charges/"
+	wantPath := "/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-A/standing-charges/"
 	if got[0].Path != wantPath {
 		t.Errorf("path = %q, want %q", got[0].Path, wantPath)
 	}
@@ -356,12 +356,12 @@ func TestUnitRatesCarriesPaymentMethod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	varN, err := ParseTariffCode("E-1R-VAR-22-11-01-N")
+	varB, err := ParseTariffCode("E-1R-VAR-22-11-01-B")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	rates, err := c.UnitRates(context.Background(), varN, time.Time{}, time.Time{})
+	rates, err := c.UnitRates(context.Background(), varB, time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatalf("UnitRates: %v", err)
 	}
@@ -446,7 +446,7 @@ func TestUnitRatesSendsUTCPeriodParams(t *testing.T) {
 	if q.Get("period_to") != "2026-09-12T00:00:00Z" {
 		t.Errorf("period_to = %q, want 2026-09-12T00:00:00Z", q.Get("period_to"))
 	}
-	wantPath := "/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-N/standard-unit-rates/"
+	wantPath := "/products/AGILE-24-10-01/electricity-tariffs/E-1R-AGILE-24-10-01-A/standard-unit-rates/"
 	if got[0].Path != wantPath {
 		t.Errorf("path = %q, want %q", got[0].Path, wantPath)
 	}

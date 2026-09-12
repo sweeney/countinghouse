@@ -468,7 +468,7 @@ GET /prices/upcoming?hours=12
 ```
 
 ```json
-{ "tariff_code": "E-1R-AGILE-24-10-01-N",
+{ "tariff_code": "E-1R-AGILE-24-10-01-A",
   "unit": "p/kWh", "vat_included": true,
   "summary": { "slots": 24, "current": 45.85, "min": -2.62, "mean": 24.48, "max": 50.22 },
   "slots": [

@@ -37,11 +37,17 @@ authentication**:
 `tariff_code` is `E-1R-{product}-{GSP}`, e.g. `E-1R-AGILE-24-10-01-C` for London.
 The GSP is a single letter (A–P, 14 regions) derived from the postcode or the MPAN.
 
-> ❌ **Our region is `N` (South Scotland), not `C`.** Verified by resolving the site's
-> postcode through `/industry/grid-supply-points/`, which returns `_N`. Our tariff is
-> **`E-1R-AGILE-24-10-01-N`**, live from **2026-09-10** — today.
-> Note the endpoint returns `_N` *with* a leading underscore while tariff codes use bare `N`.
-> Region N's standing charge is **59.1606p/day ex-VAT**, not London's 37.6525p.
+> ❌ **The region is not `C`** — `C` is London, and every example that hardcodes it is
+> wrong anywhere else. Resolve it for the actual site via
+> `/industry/grid-supply-points/`, and note the endpoint returns the letter **with a
+> leading underscore** (`_A`) while tariff codes use it bare (`A`). `NormaliseGroupID`
+> exists for exactly that.
+>
+> The region is not recorded here: it is derived from the property's postcode, and this
+> repo is public. Examples throughout use `A`. It matters beyond path-building, because
+> **the standing charge differs by region** — ours is 59.1606p/day ex-VAT against
+> London's 37.6525p, a 57% difference, so a region mix-up is a silently wrong bill
+> rather than a 404.
 
 Query parameters: `period_from`, `period_to` (ISO 8601, **always with a trailing `Z`** —
 local-time values are misread across the DST changeover), `page_size` (default 100,

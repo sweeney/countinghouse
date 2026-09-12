@@ -26,24 +26,31 @@ import (
 
 // The shape as it should be authored, using the renamed key. Not a verbatim copy
 // of the live document, which is free to carry extra fields we ignore.
+//
+// The coordinates and scheme names are PLACEHOLDERS. This repo is public, and a
+// site's latitude/longitude is its street address to within a few metres — so the
+// fixture carries round numbers that exercise the same parsing (positive and
+// negative, integral and fractional) without publishing where anything is. Nothing
+// in countinghouse reads these fields; they are here precisely to prove that
+// unknown fields are tolerated rather than rejected.
 const sitesDocFixture = `{
   "sites": [
     {
       "id": "home",
       "name": "Home",
-      "latitude": 55.9487,
-      "longitude": -3.2011,
+      "latitude": 51.5,
+      "longitude": -0.1,
       "floorplan_namespace": "floorplan_home",
       "devices_namespace": "devices_home",
       "energy_agreements_namespace": "energy_agreements",
-      "bin_scheme": "edinburgh"
+      "bin_scheme": "scheme_one"
     },
     {
       "id": "schoolhouse",
       "name": "The Old Schoolhouse",
-      "latitude": 57.293,
-      "longitude": -4.045,
-      "bin_scheme": "highland"
+      "latitude": 52.0,
+      "longitude": 1.0,
+      "bin_scheme": "scheme_two"
     }
   ]
 }`

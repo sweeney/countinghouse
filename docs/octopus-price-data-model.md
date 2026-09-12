@@ -12,12 +12,12 @@ Decisions needing the user are marked **OPEN**.
 
 ## 0. The facts that constrain the schema
 
-Verified live, region `N`, product `AGILE-24-10-01`:
+Verified live against the account's own region, product `AGILE-24-10-01`:
 
 | Fact | Value | What it forces |
 |---|---|---|
-| Our GSP region | **`_N`** (South Scotland), resolved from the site postcode | Not `C`. The API returns `_N` with a leading underscore; tariff codes use bare `N`. **Strip it.** |
-| Our tariff | `E-1R-AGILE-24-10-01-N`, live **from 2026-09-10** | The switchover is *today* |
+| GSP region | Resolved from the site postcode; **not** `C` (London), which every copied example uses | The API answers `_A` with a leading underscore; tariff codes use bare `A`. **Strip it.** Not recorded here — the region narrows the property's location, and this repo is public. |
+| Our tariff | `E-1R-AGILE-24-10-01-A` (region letter as above), live **from 2026-09-10** | The switchover is *today* |
 | Slots held to date | 34,798 | Full product history is re-fetchable — for now |
 | `(tariff_code, valid_from)` unique? | **NO** | `payment_method` splits VAR tariffs into `DIRECT_DEBIT` / `NON_DIRECT_DEBIT` rows *for the same slot*. It must be in the key. |
 | Price range seen | −11.11 … +76.67 p/kWh | Signed. No unsigned types, no clamping at 0 |
@@ -211,12 +211,14 @@ Two hard rules that fall out of the verified value domain:
 
 The current `energy_tariffs` namespace conflates two different things: *what a tariff costs*
 and *which tariff we were on*. Agile forces them apart, and the account API confirms the
-separation is real — it returns our agreements as explicit dated records:
+separation is real — it returns agreements as explicit dated records, one per tariff you
+were on (shape below; region letter and dates illustrative, since a real agreement
+history says where a property is and when it changed supplier):
 
 ```
-E-1R-VAR-22-11-01-N         2025-06-04 -> 2025-09-23
-E-1R-OE-FIX-12M-25-09-09-N  2025-09-23 -> 2026-09-10
-E-1R-AGILE-24-10-01-N       2026-09-10 -> 2027-09-10
+E-1R-VAR-22-11-01-A         2025-06-04 -> 2025-09-23
+E-1R-OE-FIX-12M-25-09-09-A  2025-09-23 -> 2026-09-10
+E-1R-AGILE-24-10-01-A       2026-09-10 -> 2027-09-10
 ```
 
 So the model is three relations:
@@ -243,7 +245,7 @@ cost(window) = Σ over (consumption bucket ∩ agreement ∩ unit_price interval
 
 ### The unification worth noticing
 
-**A flat tariff is a spot-price curve with very long slots.** `E-1R-OE-FIX-12M-25-09-09-N`
+**A flat tariff is a spot-price curve with very long slots.** `E-1R-OE-FIX-12M-25-09-09-A`
 is literally two `UNIT_PRICE` rows (24.2348p until 2026-03-31T23:00Z, then 20.8948p). Agile
 is 17,520 rows a year. *Same relation, same key, same algorithm* — only the row count
 differs.
@@ -274,7 +276,7 @@ unreproducible and nothing records that it changed.
 So `retrieved_at` is part of the record, and the store is append-only:
 
 ```json
-{"tariff_code":"E-1R-AGILE-24-10-01-N","payment_method":"","valid_from":"2026-09-10T21:30:00Z",
+{"tariff_code":"E-1R-AGILE-24-10-01-A","payment_method":"","valid_from":"2026-09-10T21:30:00Z",
  "valid_to":"2026-09-10T22:00:00Z","exc_p":28.52,"inc_p":29.946,"retrieved_at":"2026-09-10T16:05:02Z"}
 ```
 
@@ -384,7 +386,7 @@ at exactly `0.00p`, so zero is data and absence is not.
 // Money stays in pence with both VAT forms; conversion to £ happens in the cost
 // layer where Tariff.Multiplier() already lives.
 type Slot struct {
-    TariffCode    string     // "E-1R-AGILE-24-10-01-N"
+    TariffCode    string     // "E-1R-AGILE-24-10-01-A"
     PaymentMethod string     // "" | "DIRECT_DEBIT" | "NON_DIRECT_DEBIT" — in the key
     ValidFrom     time.Time  // UTC instant, inclusive
     ValidTo       *time.Time // exclusive; nil = open-ended

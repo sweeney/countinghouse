@@ -206,7 +206,7 @@ two different dashboards agree on what "cheap" means:
 
 ```json
 {
-  "tariff_code": "E-1R-AGILE-24-10-01-N",
+  "tariff_code": "E-1R-AGILE-24-10-01-A",
   "generated_at": "2026-09-10T17:08:00+01:00",
   "known_to": "2026-09-11T23:00:00+01:00",
   "complete_to": "2026-09-11T22:00:00+01:00",
