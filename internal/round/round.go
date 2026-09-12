@@ -16,7 +16,12 @@ const (
 	KWhDP   = 3 // kWh — ~Wh resolution.
 	MoneyDP = 4 // money (£) — sub-penny, keeps tiny per-device costs meaningful.
 	WDP     = 1 // watts.
-	CovDP   = 4 // coverage / duty fractions.
+	// RateDP is for an effective £/kWh rate. Five places because a rate is a money
+	// value DIVIDED by energy: Octopus quotes 23.38p/kWh, which grossed up for VAT
+	// is £0.245490/kWh, and rounding that to money precision would throw away real
+	// resolution in the number consumers compare devices and days on.
+	RateDP = 5
+	CovDP  = 4 // coverage / duty fractions.
 )
 
 // To rounds x to dp decimal places (half away from zero, so negative inputs —

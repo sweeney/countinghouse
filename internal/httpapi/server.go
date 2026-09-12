@@ -33,8 +33,22 @@ type ConfigProvider interface {
 	// Devices returns the current statehouse_devices snapshot keyed by
 	// device_id. Used for class-based query routing and bill grouping.
 	Devices() map[string]config.DeviceConfig
-	// Tariffs returns the current energy_tariffs snapshot.
-	Tariffs() config.EnergyTariffs
+	// Tariffs returns the authoritative tariff document as a TariffSource.
+	//
+	// An interface, not a concrete document: countinghouse can be configured
+	// against the legacy `energy_tariffs` single rate or the dated
+	// `energy_agreements` blocks, and no handler should know which. Both answer
+	// TariffFor(t) and PeriodsBetween identically.
+	Tariffs() config.TariffSource
+
+	// Agreements returns the same document in the dated-block shape, so /tariffs
+	// serves one response shape either way. A legacy document is presented as a
+	// single open-ended fixed agreement.
+	Agreements() config.EnergyAgreements
+
+	// TariffNamespace names whichever namespace is authoritative, so a consumer
+	// need not deduce it from the shape of the answer.
+	TariffNamespace() string
 }
 
 // FloorplanProvider supplies the floorplan snapshot behind /floors and /rooms,
@@ -127,6 +141,24 @@ type Server struct {
 	// or leave it nil — the catalogs then report names, order and category as
 	// unknown, and grouped series stay labelled by id, rather than failing.
 	Floorplan FloorplanProvider
+
+	// Prices reports price-archive health for /healthz and /metrics. Nil when no
+	// collector runs, which is the normal case for a deployment whose tariff
+	// agreements are all flat-rate: both blocks are then omitted rather than
+	// rendered empty, since a zeroed block would read as a broken archive rather
+	// than as no archive.
+	Prices PricesProvider
+
+	// Backups reports the price archive's offsite backup state. Nil when no backup
+	// is configured — development, or any deployment with no archive — and the
+	// /healthz block is then omitted rather than rendered empty.
+	Backups BackupProvider
+
+	// PriceReader serves the /prices endpoints from the archive. Nil when no
+	// archive is configured, and those routes then answer 503 — the route exists
+	// and would work elsewhere, so it is a deployment state rather than a bad
+	// request or a missing endpoint.
+	PriceReader PriceReader
 
 	// RemoteConfig surfaces per-namespace remote-config fetch status on
 	// /healthz. The real impl is the Fetcher (which satisfies ConfigStatus);
@@ -226,6 +258,10 @@ func newMux(s *Server) *http.ServeMux {
 	mux.Handle("GET /series", auth(http.HandlerFunc(s.handleSeries)))
 	mux.Handle("GET /bill", auth(http.HandlerFunc(s.handleBill)))
 	mux.Handle("GET /tariffs", auth(http.HandlerFunc(s.handleTariffs)))
+	mux.Handle("GET /prices", auth(http.HandlerFunc(s.handlePrices)))
+	mux.Handle("GET /prices/upcoming", auth(http.HandlerFunc(s.handleUpcomingPrices)))
+	mux.Handle("GET /prices/cheapest", auth(http.HandlerFunc(s.handleCheapestPrice)))
+	mux.Handle("GET /prices/stats", auth(http.HandlerFunc(s.handlePriceStats)))
 	mux.Handle("GET /metrics", auth(http.HandlerFunc(s.handleMetrics)))
 	return mux
 }
@@ -295,6 +331,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		InfluxReachable bool                              `json:"influx_reachable"`
 		Site            *siteHealth                       `json:"site,omitempty"`
 		RemoteConfig    map[string]config.NamespaceStatus `json:"remote_config,omitempty"`
+		Prices          []PriceHealth                     `json:"prices,omitempty"`
+		Backup          *BackupHealth                     `json:"backup,omitempty"`
 	}
 	h := health{
 		Version:    s.Version,
@@ -317,6 +355,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.RemoteConfig != nil {
 		h.RemoteConfig = s.RemoteConfig.Statuses()
 	}
+	if s.Prices != nil {
+		h.Prices = s.Prices.PriceHealth()
+	}
+	if s.Backups != nil {
+		h.Backup = s.Backups.BackupHealth()
+	}
 
 	// Derive the aggregated verdict so a monitor watching the top-level status
 	// (the obvious thing to alert on) sees an outage. Influx is the hard
@@ -332,6 +376,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 				h.Status = "degraded"
 				break
 			}
+		}
+		// A price problem degrades on the same reasoning as a config namespace: the
+		// archive still holds what it held, so historical windows still price, but
+		// we are either not keeping up or cannot price TODAY — and the top-level
+		// status is what a monitor actually watches.
+		if degraded, _ := priceVerdict(h.Prices, s.clock().Now()); degraded {
+			h.Status = "degraded"
+		}
+		// And the same reasoning for the backup: nothing served depends on last
+		// night's upload, so this cannot be "unavailable" — but the archive is the
+		// one thing here that is not rebuildable from Influx, and an unprotected
+		// archive that reports "ok" is the failure worth catching.
+		if degraded, _ := backupVerdict(h.Backup, s.clock().Now()); degraded {
+			h.Status = "degraded"
 		}
 	}
 

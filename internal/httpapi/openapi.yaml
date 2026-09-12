@@ -23,6 +23,10 @@ security:
 tags:
   - name: data
     description: Energy, cost, bill, series and event endpoints (require a Bearer JWT).
+  - name: prices
+    description: >
+      Half-hourly spot prices: the archive, the forward curve, and the cheapest
+      window for a deferrable load.
   - name: system
     description: Health and API spec endpoints.
 
@@ -95,8 +99,30 @@ paths:
     get:
       summary: Device cost
       description: >
-        Windowed kWh and VAT-inclusive GBP cost for one device, at the tariff
-        effective at the window start.
+        Windowed kWh and VAT-inclusive GBP cost for one device.
+
+
+        How the cost is derived depends on the tariff(s) covering the window, and
+        `attribution` says which was used. Under a FIXED tariff it is kWh x the unit
+        rate (`attribution: flat_rate`). Under a HALF-HOURLY tariff there is no single
+        unit rate, so each half hour's energy is priced at that half hour's own
+        published rate and summed (`attribution: counter_slot`); `tariff` is then
+        absent, because reporting a representative rate would be read as the price.
+        A window spanning a tariff change prices each side on its own tariff, with
+        its own VAT rate.
+
+
+        `effective_rate` is the VAT-inclusive GBP/kWh actually paid. It is the number
+        that makes a slot-priced figure interpretable — whether this device ran cheap
+        or dear against the day — and for a low-draw device over a single day it
+        carries a few percent of quantisation noise, because plug counters tick in
+        0.1 kWh steps that land in whichever half hour reported them. Rates of either
+        SIGN are normal: negative half-hourly prices produce a credit.
+
+
+        `unpriced_kwh` is energy in half hours no rate is held for. It is NOT included
+        in `cost` and is absent when zero — its presence means the answer is
+        incomplete, never that the energy was free.
       operationId: getDeviceCost
       tags: [data]
       parameters:
@@ -247,6 +273,19 @@ paths:
       description: >
         Per-device cost breakdown plus standing charge, total, and
         reconciliation against the whole-house meter for the window.
+
+
+        Energy is priced as for /devices/{id}/cost, and `attribution` reports how:
+        `flat_rate` under a single fixed tariff, `counter_slot` when any part of the
+        window is half-hourly (each half hour's energy at that half hour's rate). The
+        per-device costs sum exactly to `energy_cost` either way.
+
+
+        The standing charge is reported ONCE, on the bill, and is never apportioned
+        across devices: no device causes it, so splitting it would invent a number
+        that reads like a measurement. It is apportioned across TARIFF SEGMENTS
+        instead — a window spanning a switchover is charged each side's daily rate for
+        its own days — and a partial day is billed pro rata rather than rounded up.
       operationId: getBill
       tags: [data]
       parameters:
@@ -287,6 +326,139 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /prices:
+    get:
+      tags: [prices]
+      summary: Half-hourly prices over a window
+      description: >
+        The price curve for a window, past or future — the archive and the forward
+        curve are the same table, which is the point of keeping prices rather than
+        only fetching what is next. Returns 503 when the instance has no price
+        archive configured, and `half_hourly: false` with a `flat_price` when the
+        tariff covering the window is flat-rate rather than half-hourly.
+      operationId: getPrices
+      parameters:
+        - { $ref: "#/components/parameters/Window" }
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+      responses:
+        "200":
+          description: The curve, with per-slot band and rank
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceCurveResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "503":
+          description: No price archive configured, or no tariff covers the window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /prices/upcoming:
+    get:
+      tags: [prices]
+      summary: Everything known about the near future
+      description: >
+        The dashboard endpoint. Carries the curve plus the derivations a consumer
+        would otherwise compute — and would compute differently from the next
+        consumer: per-slot `band`, `rank` and `percentile`, a `summary` including
+        the price in force right now, and the cheapest contiguous window for each
+        of several durations. A duration that does not fit the window is OMITTED
+        rather than shortened.
+      operationId: getUpcomingPrices
+      parameters:
+        - name: hours
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 48, default: 24 }
+          description: >
+            How far ahead to report. Capped at 48 because the supplier publishes
+            at most about a day and a half ahead.
+      responses:
+        "200":
+          description: The forward curve with bands, ranks and cheapest runs
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UpcomingPricesResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "503":
+          description: No price archive configured, or no tariff is in force
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /prices/cheapest:
+    get:
+      tags: [prices]
+      summary: The cheapest contiguous window for a deferrable load
+      description: >
+        Answers "when should this run". Two behaviours worth knowing: a run will
+        never span a GAP in the prices, because a window whose prices we do not
+        hold cannot honestly be called cheap; and `before` is a deadline for
+        FINISHING, not for starting, since a load that overruns into expensive
+        time was not scheduled. A duration that is not a whole number of half hours
+        rounds UP.
+      operationId: getCheapestPrice
+      parameters:
+        - name: duration
+          in: query
+          required: true
+          schema: { type: string, example: 3h }
+          description: Go duration, e.g. 90m or 3h. Must be positive and at most 24h.
+        - name: before
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+          description: The run must FINISH at or before this instant.
+      responses:
+        "200":
+          description: The cheapest window found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CheapestRunResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404":
+          description: >
+            No contiguous window of that length exists in the prices held. A
+            well-formed question with no answer, as distinct from a bad request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: No price archive configured, or the tariff is not half-hourly
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /prices/stats:
+    get:
+      tags: [prices]
+      summary: Per-day price aggregates
+      description: >
+        Daily min, max, mean, spread and plunge-slot count, grouped by LOCAL
+        calendar day — the only framing in which a 23- or 25-hour day makes sense.
+        `spread` is the number that says whether shifting load that day was worth
+        the bother. Unlike the curve endpoints these figures are EX-VAT, because
+        they are analytical values compared against each other rather than a price
+        on a screen; `vat_included` states it either way.
+      operationId: getPriceStats
+      parameters:
+        - { $ref: "#/components/parameters/Window" }
+        - { $ref: "#/components/parameters/From" }
+        - { $ref: "#/components/parameters/To" }
+      responses:
+        "200":
+          description: Per-day aggregates
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceStatsResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "503":
+          description: No price archive configured, or the tariff is not half-hourly
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
 
   /metrics:
     get:
@@ -708,19 +880,286 @@ components:
           type: string
       required: [error]
 
-    Tariff:
+    Agreement:
       type: object
+      description: >
+        One dated tariff commitment: which tariff applied, between when and when,
+        and what it cost. Intervals are half-open — `from` inclusive, `to`
+        exclusive. A legacy single-rate configuration is presented as one
+        agreement with neither bound.
       properties:
-        unit_rate:
-          type: number
-          description: GBP per kWh, ex-VAT.
-        daily_standing_charge:
-          type: number
-          description: GBP per day, ex-VAT.
+        from:
+          type: string
+          format: date-time
+          description: >
+            Inclusive start. Absent only on the synthesised block representing a
+            legacy single-rate configuration, which asserts nothing about when its
+            rate began.
+        to:
+          type: string
+          format: date-time
+          description: Exclusive end. Absent when the agreement is still current.
+        name:
+          type: string
+          description: Human label for the tariff, e.g. "Agile Octopus".
+          example: Agile Octopus
+        type:
+          type: string
+          enum: [fixed, variable]
+          description: >
+            `fixed` carries its own `unit_rate`. `variable` does NOT: its price
+            varies within the agreement (half-hourly), so there is no single
+            number to report and the half-hourly curve must be read from the price
+            endpoints instead. Note this is narrower than the industry sense of
+            "variable" — a supplier's standard variable rate, one number that
+            changes every few months, is configured as successive `fixed`
+            agreements because it has no intra-agreement curve.
+        id:
+          type: string
+          description: >
+            Supplier tariff code. Always present on a `variable` agreement, where
+            it is the key its half-hourly prices are stored under; optional on a
+            `fixed` one.
+          example: E-1R-AGILE-24-10-01-A
         unit:
           type: string
+          example: kWh
         vat_rate:
           type: number
+          description: Carried per agreement, so a historical VAT change prices correctly.
+        unit_rate:
+          type: number
+          description: >
+            GBP per kWh, ex-VAT. Present on `fixed` agreements only — absent on
+            `variable`, deliberately.
+        daily_standing_charge:
+          type: number
+          description: >
+            GBP per day, ex-VAT. Present on both types: a standing charge is flat
+            per day even when the unit rate is half-hourly.
+      required: [name, type, vat_rate, daily_standing_charge]
+
+    PriceSlot:
+      type: object
+      description: >
+        One half hour of the curve, with the derivations served rather than left to
+        each consumer — so two dashboards agree on what "cheap" means.
+      properties:
+        valid_from: { type: string, format: date-time }
+        valid_to:   { type: string, format: date-time }
+        price:
+          type: number
+          description: >
+            Pence per kWh, VAT INCLUSIVE. Signed: negative means being paid to
+            consume, and exactly 0.00 is a real price.
+        rank:
+          type: integer
+          description: Position by price within the window, 1 being the CHEAPEST.
+        percentile:
+          type: number
+          description: Position in [0,1], 0 being the cheapest. For deriving your own banding.
+        band:
+          type: string
+          enum: [plunge, cheap, normal, peak]
+          description: >
+            Classification against the window's mean. `plunge` is any price at or
+            below zero, kept separate because free energy is categorically
+            different from merely cheap. The others sit +/-15% from the mean, which
+            is deliberately NOT a percentile split — a tercile would label a third
+            of a flat day a peak, which is false.
+      required: [valid_from, price, rank, band]
+
+    PriceCurveSummary:
+      type: object
+      properties:
+        slots: { type: integer }
+        min:   { type: number }
+        max:   { type: number }
+        mean:  { type: number }
+        current:
+          type: number
+          description: >
+            The price of the slot covering now. Absent when no held slot covers it.
+
+    PriceRun:
+      type: object
+      description: A contiguous stretch of slots, and what it averages.
+      properties:
+        from:  { type: string, format: date-time }
+        to:    { type: string, format: date-time }
+        slots: { type: integer }
+        mean_price:
+          type: number
+          description: Mean pence per kWh across the run, VAT inclusive.
+
+    PriceCurveResponse:
+      type: object
+      properties:
+        window:      { type: string }
+        from:        { type: string, format: date-time }
+        to:          { type: string, format: date-time }
+        tariff_code: { type: string }
+        half_hourly:
+          type: boolean
+          description: >
+            False when the tariff covering the window is flat-rate. `slots` is then
+            empty and `flat_price` carries the rate — a different shape of answer
+            rather than an empty curve, so it is not mistaken for a broken archive.
+        flat_price:  { type: number }
+        unit:        { type: string, example: p/kWh }
+        vat_included: { type: boolean }
+        summary:     { $ref: "#/components/schemas/PriceCurveSummary" }
+        slots:
+          type: array
+          items: { $ref: "#/components/schemas/PriceSlot" }
+        complete:
+          type: boolean
+          description: Whether every half hour of the window holds a price.
+
+    UpcomingPricesResponse:
+      type: object
+      properties:
+        tariff_code:  { type: string }
+        half_hourly:  { type: boolean }
+        flat_price:   { type: number }
+        unit:         { type: string, example: p/kWh }
+        vat_included: { type: boolean }
+        generated_at: { type: string, format: date-time }
+        from:         { type: string, format: date-time }
+        to:           { type: string, format: date-time }
+        known_to:
+          type: string
+          format: date-time
+          description: >
+            End of the newest slot held for this tariff — how far prices run at all,
+            which may be beyond the requested window.
+        summary: { $ref: "#/components/schemas/PriceCurveSummary" }
+        slots:
+          type: array
+          items: { $ref: "#/components/schemas/PriceSlot" }
+        cheapest:
+          type: object
+          description: >
+            Cheapest contiguous window per duration, keyed 30m/1h/2h/3h. A duration
+            that does not fit the window is OMITTED rather than shortened — a run
+            labelled 3h must actually be three hours.
+          additionalProperties: { $ref: "#/components/schemas/PriceRun" }
+        missing:
+          type: array
+          description: >
+            Half-hour starts within the window that hold no price. Stated rather
+            than left to be inferred from a short `slots` array.
+          items: { type: string, format: date-time }
+        complete: { type: boolean }
+
+    CheapestRunResponse:
+      allOf:
+        - $ref: "#/components/schemas/PriceRun"
+        - type: object
+          properties:
+            tariff_code:  { type: string }
+            unit:         { type: string, example: p/kWh }
+            vat_included: { type: boolean }
+            searched_to:
+              type: string
+              format: date-time
+              description: How far ahead the search looked.
+
+    PriceDayStats:
+      type: object
+      properties:
+        day:
+          type: string
+          description: Local calendar date, YYYY-MM-DD.
+        slots:  { type: integer, description: "46, 48 or 50 depending on the DST changeover." }
+        min:    { type: number }
+        max:    { type: number }
+        mean:   { type: number }
+        spread:
+          type: number
+          description: max − min. Whether shifting load that day was worth the bother.
+        plunge_slots:
+          type: integer
+          description: Half hours priced at or below zero.
+
+    PriceStatsResponse:
+      type: object
+      properties:
+        window:      { type: string }
+        from:        { type: string, format: date-time }
+        to:          { type: string, format: date-time }
+        tariff_code: { type: string }
+        unit:        { type: string, example: p/kWh }
+        vat_included:
+          type: boolean
+          description: False here — these are analytical ex-VAT figures, unlike the curve endpoints.
+        days:
+          type: array
+          items: { $ref: "#/components/schemas/PriceDayStats" }
+
+    PriceHealth:
+      type: object
+      description: >-
+        One tariff's price-archive health. `known_to` and `complete_to` answer
+        DIFFERENT questions and a monitor reading only the first will be misled:
+        a publication can advance the horizon across a whole day while leaving
+        that day short of slots, which is observed behaviour rather than a
+        hypothetical.
+      properties:
+        tariff_code:
+          type: string
+          example: E-1R-AGILE-24-10-01-A
+        known_to:
+          type: string
+          format: date-time
+          description: >-
+            End of the newest slot held — "prices are arriving". Absent when the
+            archive is empty.
+        complete_to:
+          type: string
+          format: date-time
+          description: >-
+            End of the newest FULLY POPULATED local day — "we can bill this far".
+            This is the field to alert on: when it is at or behind now, today
+            cannot be priced in full. It stops at the first incomplete day rather
+            than taking the newest complete one, because a complete tomorrow
+            behind an incomplete today would not make today priceable.
+        last_attempt:
+          type: string
+          format: date-time
+          description: Moves on every sync, successful or not.
+        last_success:
+          type: string
+          format: date-time
+          description: >-
+            Moves only on a sync that worked. Lagging behind last_attempt means
+            collection is failing right now; it is cleared back into step on the
+            next success.
+        last_error:
+          type: string
+          description: The most recent failure, absent once a sync succeeds.
+        syncs:
+          type: integer
+        failures:
+          type: integer
+        inserted:
+          type: integer
+          description: Slots newly stored since start.
+        restated:
+          type: integer
+          description: >-
+            Prices the supplier revised AFTER we had already stored them. Rare,
+            and worth investigating: a bill already issued may have moved.
+        rejected:
+          type: integer
+          description: >-
+            Slots refused by validation and therefore not stored. Never silently
+            dropped — each is logged and counted.
+        warnings:
+          type: integer
+          description: >-
+            Slots stored but flagged as implausible (beyond the price cap or
+            sanity floor). Flagged rather than rejected: negative prices are real.
 
     TariffsResponse:
       type: object
@@ -728,11 +1167,19 @@ components:
         currency:
           type: string
           example: GBP
-        tariffs:
+        source:
+          type: string
+          description: >
+            The config namespace that answered. Reported rather than inferred,
+            because the response shape is deliberately identical either way.
+          example: energy_agreements
+        agreements:
           type: object
-          description: Tariffs keyed by fuel (e.g. electricity, gas).
+          description: Agreements keyed by fuel (e.g. electricity, gas), oldest first.
           additionalProperties:
-            $ref: "#/components/schemas/Tariff"
+            type: array
+            items:
+              $ref: "#/components/schemas/Agreement"
 
     DeviceEnergyResponse:
       type: object
@@ -768,14 +1215,37 @@ components:
           example: GBP
         window:
           type: string
+        attribution:
+          type: string
+          enum: [flat_rate, counter_slot]
+          description: >-
+            How cost was derived. flat_rate: kWh x one unit rate, exact.
+            counter_slot: each half hour's counter delta priced at that half hour's
+            own rate — sums exactly over the window, but noisy for a low-draw device
+            over a single day (0.1 kWh counter quantisation).
+        effective_rate:
+          type: number
+          description: >-
+            VAT-inclusive GBP/kWh actually paid (cost / priced kWh). May be NEGATIVE:
+            a half-hourly tariff can pay you to consume. 0 when there is no energy.
+        unpriced_kwh:
+          type: number
+          description: >-
+            Energy in half hours no rate is held for. NOT included in cost; absent
+            when zero. Non-zero means this answer is incomplete, not that the energy
+            was free.
         tariff:
           type: object
+          description: >-
+            The single rate charged. Present ONLY under attribution=flat_rate; a
+            half-hourly tariff has no single rate, and a representative one would be
+            read as the price. Ask /prices for the curve instead.
           properties:
             unit_rate:
               type: number
             vat_rate:
               type: number
-      required: [device_id, kwh, cost, currency, window]
+      required: [device_id, kwh, cost, currency, window, attribution, effective_rate]
 
     DeviceCostBreakdown:
       type: object
@@ -807,6 +1277,16 @@ components:
           type: number
         cost:
           type: number
+        effective_rate:
+          type: number
+          description: >-
+            VAT-inclusive GBP/kWh this device actually paid (cost / priced kWh). May
+            be negative. 0 when the device used no energy.
+        unpriced_kwh:
+          type: number
+          description: >-
+            This device's energy in half hours no rate is held for. NOT included in
+            cost; absent when zero.
 
     Reconciliation:
       type: object
@@ -849,12 +1329,99 @@ components:
             $ref: "#/components/schemas/DeviceCostBreakdown"
         energy_cost:
           type: number
+          description: Sum of the per-device costs. Excludes the standing charge.
         standing_charge:
           type: number
+          description: >-
+            VAT-inclusive GBP for the window, apportioned across tariff segments and
+            pro rata for a partial day. Charged once here and NEVER split across
+            devices — no device causes it.
         total:
           type: number
+          description: >-
+            energy_cost + standing_charge. Can be lower than standing_charge alone
+            when negative half-hourly prices make energy_cost a credit.
+        attribution:
+          type: string
+          enum: [flat_rate, counter_slot]
+          description: >-
+            How the energy costs were derived; counter_slot when any part of the
+            window is half-hourly. See /devices/{id}/cost.
+        effective_rate:
+          type: number
+          description: >-
+            VAT-inclusive GBP/kWh across all monitored energy (energy_cost / priced
+            kWh). On a half-hourly tariff this is the single number saying how well
+            the house played the price curve. May be negative.
+        unpriced_kwh:
+          type: number
+          description: >-
+            Monitored energy no rate was held for, summed across devices. Absent when
+            zero; non-zero means this bill is INCOMPLETE, not that the energy was
+            free.
         reconciliation:
           $ref: "#/components/schemas/Reconciliation"
+
+    BackupHealth:
+      type: object
+      description: >-
+        State of the price archive's offsite backup to Cloudflare R2. The archive is
+        the one thing countinghouse writes and the only state not rebuildable from
+        Influx, so whether it is actually backed up is reported rather than assumed.
+
+
+        Nothing here is a credential and nothing that is one may be added: /healthz is
+        built to be polled by anything. Bucket and env are locations; error text is
+        scrubbed of anything credential-shaped before it is served.
+      required: [bucket, env, successes, failures]
+      properties:
+        bucket:
+          type: string
+          description: R2 bucket the archive is uploaded to.
+          example: countinghouse-sqlite
+        env:
+          type: string
+          enum: [production, development]
+          description: >-
+            The R2 key prefix. Objects land at
+            `{env}/backups/countinghouse/{YYYY}/{MM}/{DD}/countinghouse-{RFC3339}.sqlite3`.
+        schedule:
+          type: string
+          enum: [daily, weekly, monthly, off]
+          description: >-
+            When scheduled backups run. `off` means on-demand only, and suppresses the
+            staleness verdict — an old backup is then what was asked for.
+        hour:
+          type: integer
+          description: UTC hour (0-23) scheduled backups run at. 0 is midnight, not unset.
+        last_attempt:
+          type: string
+          format: date-time
+          description: >-
+            Moves on every run, succeeded or not. Absent before the first run.
+        last_success:
+          type: string
+          format: date-time
+          description: >-
+            Moves only on a run that worked, so a last_success lagging behind
+            last_attempt means backups are failing NOW. Absent until one succeeds.
+        last_key:
+          type: string
+          description: >-
+            Object key of the most recent successful upload, so the newest backup can
+            be found without listing the bucket. Survives a later failure: the last
+            good backup is still the last good backup.
+          example: production/backups/countinghouse/2026/09/12/countinghouse-2026-09-12T03:00:00Z.sqlite3
+        last_error:
+          type: string
+          description: >-
+            Why the most recent run failed, scrubbed of anything credential-shaped.
+            Cleared by a success, so one bad night does not degrade the service
+            forever.
+        successes:
+          type: integer
+        failures:
+          type: integer
 
     MetricsResponse:
       type: object
@@ -878,6 +1445,21 @@ components:
           type: integer
         goroutines:
           type: integer
+        prices:
+          type: array
+          description: >-
+            Price-archive counters, one entry per half-hourly tariff being collected
+            (same shape as /healthz). Omitted when no collector runs, so a graph of
+            zeroes never implies an archive that exists and is doing nothing.
+          items:
+            $ref: "#/components/schemas/PriceHealth"
+        backup:
+          allOf:
+            - $ref: "#/components/schemas/BackupHealth"
+          description: >-
+            Offsite-backup state for the price archive; omitted when none is
+            configured. `successes`/`failures` are the counters to alert on — the
+            timestamps need a notion of "too old", which /healthz already applies.
 
     Series:
       type: object
@@ -1434,8 +2016,10 @@ components:
           description: >-
             Aggregated downstream verdict. ok = all downstreams healthy;
             degraded = serving last-known-good config because a remote-config
-            fetch is failing (remote_config.*.ok = false); unavailable = Influx
-            is unreachable (data routes will 502). The HTTP status is 200 in all
+            fetch is failing (remote_config.*.ok = false), OR the price archive
+            cannot price today (see `prices`), OR the archive's offsite backup is
+            failing, has never succeeded, or is stale (see `backup`); unavailable = Influx is
+            unreachable (data routes will 502). The HTTP status is 200 in all
             three cases — /healthz reports health, it does not itself fail.
             On a running instance, degraded always means STALE and never EMPTY: a
             namespace that has never been fetched aborts startup instead, so any
@@ -1476,6 +2060,24 @@ components:
                 draw that distinction, since it only records the outcome of a
                 fetch.
               example: floorplan_home
+        prices:
+          type: array
+          description: >-
+            Price-archive health, one entry per half-hourly tariff being
+            collected. OMITTED ENTIRELY when no collector runs, which is the
+            normal state for a deployment whose tariff agreements are all
+            flat-rate — an empty array would read as a broken archive rather than
+            as no archive.
+          items:
+            $ref: "#/components/schemas/PriceHealth"
+        backup:
+          allOf:
+            - $ref: "#/components/schemas/BackupHealth"
+          description: >-
+            Offsite-backup state for the price archive. OMITTED ENTIRELY when no
+            backup is configured, which is the normal state in development and on
+            any deployment with no archive — a zeroed block would read as a broken
+            backup rather than as no backup.
         remote_config:
           type: object
           description: >-

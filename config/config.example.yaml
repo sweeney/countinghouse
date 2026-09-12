@@ -36,9 +36,27 @@
 #                      surfaces days later as a legend reading "floor1.room-c" to a
 #                      human. Declared or refused; there is no quiet middle.
 site:
+  # WHICH property this instance serves. This is the only site key you normally
+  # need: it is a deployment decision, like the listen port.
   id: home
-  devices_namespace: devices_home
-  floorplan_namespace: floorplan_home
+
+  # The namespace pointers below are normally supplied by the shared `sites`
+  # namespace in the config service — which already holds them, and which other
+  # services read too. Declaring them here as well is how they DRIFT: rename one in
+  # `sites` and every other service follows while this one quietly keeps reading
+  # the old document.
+  #
+  # So leave them unset. They remain as a FALLBACK for a site whose `sites` entry is
+  # only partly filled in. If you set one and `sites` disagrees, `sites` wins and a
+  # warning names both values.
+  #
+  # devices_namespace has NO local fallback and is not settable here at all. It is
+  # the pointer that decides whether any answer is right — a stale local copy would
+  # not degrade a label, it would bill ANOTHER PROPERTY'S devices while the service
+  # looked entirely healthy. It comes from `sites` or the instance does not start.
+  #
+  # floorplan_namespace: floorplan_home
+  # energy_agreements_namespace: energy_agreements
 
 # Countinghouse local configuration.
 # Device inventory and tariffs are fetched from the remote config service
@@ -64,6 +82,61 @@ identity:
 
 remote_config:
   base_url: "https://config.swee.net"
+
+prices:
+  # The half-hourly price archive: the one thing countinghouse writes.
+  #
+  # Leave UNSET for a deployment whose tariff agreements are all flat-rate — it has
+  # no half-hourly prices to keep, and the collector simply does not run. Set it as
+  # soon as any agreement is `variable`: startup REFUSES that combination, because
+  # a half-hourly agreement with nowhere to store prices can price nothing, and the
+  # service would otherwise look healthy while failing every window after the
+  # switchover.
+  #
+  # The parent directory must exist and be writable by the service user. The file is
+  # created mode 0600, as are the -wal and -shm files SQLite keeps beside it.
+  db_path: "/var/lib/countinghouse/prices.db"
+
+  # Offsite backup of the archive to Cloudflare R2.
+  #
+  # The archive is rebuildable from the supplier today, and the whole reason to keep
+  # it is the day that stops being true — so this is the clause that makes keeping it
+  # mean something. `VACUUM INTO` takes a consistent snapshot, so a backup can run
+  # while the collector is writing.
+  #
+  # Leave the WHOLE BLOCK OUT to disable backups, which is right for development and
+  # for any deployment with no archive. A PARTIAL block is refused at startup: a
+  # backup that is quietly not happening is worse than no backup, because you believe
+  # the archive is safe and find out otherwise at the only moment it matters.
+  #
+  # backup:
+  #   # The R2 key prefix: "production" or "development", and nothing else. The
+  #   # restore tooling matches those literals, so any other value files backups
+  #   # where no restore looks. REQUIRED and deliberately not defaulted — defaulting
+  #   # either way silently puts one environment's backups in the other's prefix.
+  #   env: "production"
+  #
+  #   # One bucket per service, so the R2 API token can be scoped to it: a leaked
+  #   # countinghouse credential then cannot read or overwrite identity's backups.
+  #   bucket: "countinghouse-sqlite"
+  #
+  #   account_id: "REPLACE_ME"
+  #   access_key_id: "REPLACE_ME"
+  #
+  #   # Supply the secret inline, or point secret_access_key_file at a file holding
+  #   # it (the file is read only when the inline value is empty) — the same pattern
+  #   # as influx.token/token_file. Prefer the file: it keeps the credential out of a
+  #   # config document that is otherwise harmless to copy around. A named file that
+  #   # is missing or empty is a startup refusal, not a warning.
+  #   secret_access_key: ""
+  #   secret_access_key_file: "/etc/countinghouse/r2-secret"
+  #
+  #   # daily (default) | weekly (Sundays) | monthly (1st) | off.
+  #   # "off" stops the timer only; on-demand backups still work.
+  #   schedule: "daily"
+  #
+  #   # UTC hour 0-23. 0 means MIDNIGHT, not "unset".
+  #   hour: 3
 
 house:
   timezone: "Europe/London"

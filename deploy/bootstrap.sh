@@ -139,6 +139,23 @@ echo "  wrote /etc/$SERVICE/config.yaml (listen :$PORT)"
 echo "  NOTE: name site.devices_namespace before starting — the service will refuse otherwise"
 fi
 
+echo "=== Price archive backup (R2) ==="
+# Not minted here: an R2 API token is created in the Cloudflare dashboard, so this
+# only prepares the file with the right ownership and says what goes in it. The
+# service reads it via prices.backup.secret_access_key_file, and refuses to start if
+# the path is named but missing or empty — so an unfinished setup is loud.
+if [ -s /etc/$SERVICE/r2-secret ]; then
+    echo "  /etc/$SERVICE/r2-secret already present"
+else
+    umask 077
+    : > /etc/$SERVICE/r2-secret
+    chown root:$SERVICE /etc/$SERVICE/r2-secret; chmod 640 /etc/$SERVICE/r2-secret
+    echo "  created empty /etc/$SERVICE/r2-secret"
+    echo "  NOTE: backups are OFF until you fill it in and add the prices.backup block."
+    echo "        Scope the R2 token to the countinghouse bucket alone, so this"
+    echo "        credential cannot reach another service's backups."
+fi
+
 echo "=== systemd unit ==="
 # KEEP IN SYNC with deploy/countinghouse.service
 cat > /etc/systemd/system/$SERVICE.service <<'UNIT'

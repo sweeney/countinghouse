@@ -21,7 +21,12 @@ type fakeConfig struct {
 }
 
 func (f fakeConfig) Devices() map[string]config.DeviceConfig { return f.devices }
-func (f fakeConfig) Tariffs() config.EnergyTariffs           { return f.tariffs }
+
+// The fake holds a LEGACY document and derives the rest, so these tests also
+// exercise the legacy-to-agreements presentation end to end.
+func (f fakeConfig) Tariffs() config.TariffSource        { return f.tariffs }
+func (f fakeConfig) Agreements() config.EnergyAgreements { return f.tariffs.AsAgreements() }
+func (f fakeConfig) TariffNamespace() string             { return "energy_tariffs" }
 
 const (
 	testUnitRate = 0.2089
@@ -416,23 +421,47 @@ func TestTariffs(t *testing.T) {
 	if m["currency"] != "GBP" {
 		t.Errorf("currency = %v want GBP", m["currency"])
 	}
-	tariffs, ok := m["tariffs"].(map[string]any)
+	// Which document answered is reported rather than left to be inferred from
+	// the shape, because the shape is deliberately the same either way.
+	if m["source"] != "energy_tariffs" {
+		t.Errorf("source = %v, want the namespace that answered", m["source"])
+	}
+
+	agreements, ok := m["agreements"].(map[string]any)
 	if !ok {
-		t.Fatalf("tariffs not an object: %v", m)
+		t.Fatalf("agreements not an object: %v", m)
 	}
 	// Split by fuel: electricity and gas both present.
-	elec, ok := tariffs["electricity"].(map[string]any)
+	elecList, ok := agreements["electricity"].([]any)
 	if !ok {
-		t.Fatalf("no electricity tariff: %v", tariffs)
+		t.Fatalf("no electricity agreements: %v", agreements)
 	}
+	// A legacy single-rate document presents as exactly one agreement, so a
+	// consumer written against the dated shape works unchanged against either.
+	if len(elecList) != 1 {
+		t.Fatalf("got %d electricity agreements, want 1 synthesised from the legacy document", len(elecList))
+	}
+	elec := elecList[0].(map[string]any)
 	if !approx(elec["unit_rate"].(float64), testUnitRate) {
-		t.Errorf("electricity.unit_rate = %v", elec["unit_rate"])
+		t.Errorf("electricity unit_rate = %v", elec["unit_rate"])
 	}
 	if !approx(elec["daily_standing_charge"].(float64), testStanding) {
-		t.Errorf("electricity.daily_standing_charge = %v", elec["daily_standing_charge"])
+		t.Errorf("electricity daily_standing_charge = %v", elec["daily_standing_charge"])
 	}
-	if _, ok := tariffs["gas"].(map[string]any); !ok {
-		t.Errorf("expected gas tariff present for extensibility: %v", tariffs)
+	if elec["type"] != "fixed" {
+		t.Errorf("type = %v, want fixed — the legacy document is a single flat rate", elec["type"])
+	}
+	// The legacy document says nothing about when its rate began or ends, so
+	// neither bound is invented. A year-1 timestamp here would read as data.
+	if _, present := elec["from"]; present {
+		t.Errorf("from = %v, want the field absent", elec["from"])
+	}
+	if _, present := elec["to"]; present {
+		t.Errorf("to = %v, want the field absent", elec["to"])
+	}
+
+	if _, ok := agreements["gas"].([]any); !ok {
+		t.Errorf("expected gas present for extensibility: %v", agreements)
 	}
 }
 

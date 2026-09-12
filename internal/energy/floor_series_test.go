@@ -43,7 +43,7 @@ func twoBuckets(t *testing.T) []time.Time {
 // and no group_fn is needed.
 func TestAssembleByFloorSumsItsRooms(t *testing.T) {
 	buckets := twoBuckets(t)
-	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), GroupByFloor, nil)
+	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(), GroupByFloor, nil)
 
 	byKey := map[string]Series{}
 	for _, s := range out {
@@ -73,7 +73,7 @@ func TestAssembleByFloorSumsItsRooms(t *testing.T) {
 // device, room and class groupings apply.
 func TestAssembleByFloorExcludesTheMeter(t *testing.T) {
 	buckets := twoBuckets(t)
-	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), GroupByFloor, nil)
+	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(), GroupByFloor, nil)
 	for _, s := range out {
 		if s.KWh[0] >= 5 {
 			t.Errorf("series %q carries meter-sized energy %v — the meter was not excluded", s.Key, s.KWh)
@@ -86,7 +86,7 @@ func TestAssembleByFloorExcludesTheMeter(t *testing.T) {
 // on — exactly as group_by=room already keys it.
 func TestAssembleByFloorKeysWholePropertyDevicesUnderHouse(t *testing.T) {
 	buckets := twoBuckets(t)
-	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), GroupByFloor, nil)
+	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(), GroupByFloor, nil)
 	byKey := map[string]Series{}
 	for _, s := range out {
 		byKey[s.Key] = s
@@ -108,7 +108,7 @@ func TestAssembleByFloorKeysWholePropertyDevicesUnderHouse(t *testing.T) {
 // derived from the "<floor>.<slug>" shape of its room id.
 func TestAssembleByFloorOmitsUndeclaredFloors(t *testing.T) {
 	buckets := twoBuckets(t)
-	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), GroupByFloor, nil)
+	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(), GroupByFloor, nil)
 	for _, s := range out {
 		if s.Key == "" || s.Key == "floor2.room-b" {
 			t.Errorf("unplaced device produced series %q; an undeclared floor is UNKNOWN", s.Key)
@@ -144,7 +144,7 @@ func TestAssembleGroupedLabelsWithFloorplanNames(t *testing.T) {
 	buckets := twoBuckets(t)
 	labels := map[string]string{"floor1.room-a": "Room A", "floor1": "Floor One"}
 
-	rooms := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), GroupByRoom, labels)
+	rooms := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(), GroupByRoom, labels)
 	byKey := map[string]Series{}
 	for _, s := range rooms {
 		byKey[s.Key] = s
@@ -172,7 +172,7 @@ func TestAssembleGroupedLabelsWithFloorplanNames(t *testing.T) {
 		t.Errorf("label = %q, want the id as the fallback", c.Label)
 	}
 
-	floors := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), GroupByFloor, labels)
+	floors := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(), GroupByFloor, labels)
 	for _, s := range floors {
 		if s.Key == "floor1" && s.Label != "Floor One" {
 			t.Errorf("floor1 label = %q, want Floor One", s.Label)
@@ -187,7 +187,7 @@ func TestAssembleGroupedLabelsWithFloorplanNames(t *testing.T) {
 // out the id a legend falls back to.
 func TestAssembleGroupedIgnoresEmptyNames(t *testing.T) {
 	buckets := twoBuckets(t)
-	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(),
+	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(),
 		GroupByRoom, map[string]string{"floor1.room-a": ""})
 	for _, s := range out {
 		if s.Label == "" {
@@ -199,7 +199,7 @@ func TestAssembleGroupedIgnoresEmptyNames(t *testing.T) {
 // Class grouping is not a place: it takes no floorplan name and no room.
 func TestAssembleByClassIsUnaffectedByFloorplanNames(t *testing.T) {
 	buckets := twoBuckets(t)
-	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(),
+	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(),
 		GroupByClass, map[string]string{"media_power_device": "Should Not Appear"})
 	for _, s := range out {
 		if s.Label != s.Key {
@@ -221,7 +221,7 @@ func TestAssembleByClassIsUnaffectedByFloorplanNames(t *testing.T) {
 // belongs to no place for exactly the same reason.
 func TestAssembleByRoomLeavesTheHouseKeyRoomless(t *testing.T) {
 	buckets := twoBuckets(t)
-	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), GroupByRoom, nil)
+	out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(), GroupByRoom, nil)
 
 	var found bool
 	for _, s := range out {
@@ -247,7 +247,7 @@ func TestAssembleGroupedNeverRelabelsTheHouseKey(t *testing.T) {
 	labels := map[string]string{houseCoverageKey: "The Whole House"}
 
 	for _, groupBy := range []string{GroupByRoom, GroupByFloor} {
-		out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testTariff(), groupBy, labels)
+		out := AssembleSeries(buckets, nil, floorInventory(), floorEnergy(), nil, testPricer(), groupBy, labels)
 		for _, s := range out {
 			if s.Key == houseCoverageKey && s.Label != houseCoverageKey {
 				t.Errorf("group_by=%s: house series labelled %q, want the reserved key itself",

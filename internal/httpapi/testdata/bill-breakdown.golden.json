@@ -1,4 +1,5 @@
 {
+  "attribution": "flat_rate",
   "currency": "GBP",
   "devices": [
     {
@@ -6,6 +7,7 @@
       "cost": 0.3071,
       "device_id": "network-ups",
       "display_name": "Network UPS",
+      "effective_rate": 0.21935,
       "kwh": 1.4,
       "room": "basement.network-cabinet"
     },
@@ -14,10 +16,12 @@
       "cost": 0.1535,
       "device_id": "winefridge",
       "display_name": "Wine Fridge",
+      "effective_rate": 0.21935,
       "kwh": 0.7,
       "room": "groundfloor.kitchen"
     }
   ],
+  "effective_rate": 0.21935,
   "energy_cost": 0.4606,
   "reconciliation": {
     "coverage": 0,

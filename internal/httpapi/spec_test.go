@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -25,24 +27,38 @@ func specPaths(t *testing.T, body []byte) map[string]struct{} {
 	return out
 }
 
-// registeredPaths mirrors the routes registered in newMux.
-// Keep this in sync with newMux — the path coverage test will catch drift.
-var registeredPaths = []string{
-	"/healthz",
-	"/openapi.json",
-	"/devices",
-	"/floors",
-	"/rooms",
-	"/devices/{id}/energy",
-	"/devices/{id}/cost",
-	"/devices/{id}/series",
-	"/devices/{id}/events",
-	"/devices/{id}/intervals",
-	"/events",
-	"/series",
-	"/bill",
-	"/tariffs",
-	"/metrics",
+// registeredPaths returns the route patterns newMux actually registers, read from
+// the source of server.go.
+//
+// It used to be a hand-maintained slice whose comment claimed "the path coverage
+// test will catch drift" — which it could not, because the test compared that
+// slice against the spec and never against the mux. A route added to newMux and to
+// neither passed both checks silently, which is how four /prices routes reached a
+// green build undocumented.
+//
+// Reading the source is unusual but it is the only way to get this right: net/http
+// offers no way to enumerate a ServeMux's patterns, so the alternative is a second
+// hand-maintained list that can drift exactly as the first one did.
+func registeredPaths(t *testing.T) []string {
+	t.Helper()
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("read server.go to enumerate routes: %v", err)
+	}
+	// Matches mux.Handle("GET /x", …) and mux.HandleFunc("/x", …).
+	re := regexp.MustCompile(`mux\.Handle(?:Func)?\("(?:[A-Z]+ )?([^"]+)"`)
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(string(src), -1) {
+		if p := m[1]; !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("found no routes in server.go; the pattern this test greps for has changed")
+	}
+	return out
 }
 
 func TestOpenAPIJSON_PublicNoAuth(t *testing.T) {
@@ -123,8 +139,9 @@ func TestOpenAPIJSON_PathCoverage(t *testing.T) {
 
 	specSet := specPaths(t, w.Body.Bytes())
 
-	wantSet := make(map[string]struct{}, len(registeredPaths))
-	for _, p := range registeredPaths {
+	routes := registeredPaths(t)
+	wantSet := make(map[string]struct{}, len(routes))
+	for _, p := range routes {
 		wantSet[p] = struct{}{}
 	}
 

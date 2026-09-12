@@ -1,0 +1,14 @@
+{
+  "count": 1,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "value_exc_vat": 59.1606,
+      "value_inc_vat": 62.11863,
+      "valid_from": "2024-09-30T23:00:00Z",
+      "valid_to": null,
+      "payment_method": null
+    }
+  ]
+}

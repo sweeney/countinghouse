@@ -46,7 +46,7 @@ func TestSelfGroupingIncludesTheMeter(t *testing.T) {
 	energyBy := map[string][]float64{"electricity_meter": {0.5, 0.75}}
 	powerBy := map[string][]float64{"electricity_meter": {500, 750}}
 
-	out := AssembleSeries(meterBuckets(), []float64{1, 1}, meterOnlyInventory(), energyBy, powerBy, testTariff(), GroupBySelf, nil)
+	out := AssembleSeries(meterBuckets(), []float64{1, 1}, meterOnlyInventory(), energyBy, powerBy, testPricer(), GroupBySelf, nil)
 
 	if len(out) != 1 {
 		t.Fatalf("want 1 series for the meter, got %d: %+v", len(out), out)
@@ -80,8 +80,8 @@ func TestSelfGroupingMatchesHouseMeterSeries(t *testing.T) {
 	powerBy := map[string][]float64{"electricity_meter": {500, 750}, "fridge": {100, 200}}
 	buckets, hrs := meterBuckets(), []float64{1, 1}
 
-	self := AssembleSeries(buckets, hrs, meterOnlyInventory(), energyBy, powerBy, testTariff(), GroupBySelf, nil)
-	house := AssembleSeries(buckets, hrs, meterFullInventory(), energyBy, powerBy, testTariff(), GroupByHouse, nil)
+	self := AssembleSeries(buckets, hrs, meterOnlyInventory(), energyBy, powerBy, testPricer(), GroupBySelf, nil)
+	house := AssembleSeries(buckets, hrs, meterFullInventory(), energyBy, powerBy, testPricer(), GroupByHouse, nil)
 
 	meter := OnlySeries(house, "meter")
 	if len(self) != 1 || len(meter) != 1 {
@@ -114,7 +114,7 @@ func TestFleetGroupingsStillExcludeTheMeter(t *testing.T) {
 	powerBy := map[string][]float64{"electricity_meter": {500, 750}, "fridge": {50, 50}, "kettle": {100, 100}}
 
 	for _, groupBy := range []string{GroupByDevice, GroupByRoom, GroupByClass} {
-		out := AssembleSeries(meterBuckets(), []float64{1, 1}, inv, energyBy, powerBy, testTariff(), groupBy, nil)
+		out := AssembleSeries(meterBuckets(), []float64{1, 1}, inv, energyBy, powerBy, testPricer(), groupBy, nil)
 		for _, s := range out {
 			if s.Key == "electricity_meter" || s.Class == EnergyMeterClass {
 				t.Errorf("group_by=%s leaked the meter: %+v", groupBy, s)
@@ -141,8 +141,8 @@ func TestSelfGroupingMatchesDeviceGroupingForAPlug(t *testing.T) {
 	energyBy := map[string][]float64{"fridge": {0.1, 0.2}}
 	powerBy := map[string][]float64{"fridge": {100, 200}}
 
-	self := AssembleSeries(meterBuckets(), []float64{1, 1}, inv, energyBy, powerBy, testTariff(), GroupBySelf, nil)
-	dev := AssembleSeries(meterBuckets(), []float64{1, 1}, inv, energyBy, powerBy, testTariff(), GroupByDevice, nil)
+	self := AssembleSeries(meterBuckets(), []float64{1, 1}, inv, energyBy, powerBy, testPricer(), GroupBySelf, nil)
+	dev := AssembleSeries(meterBuckets(), []float64{1, 1}, inv, energyBy, powerBy, testPricer(), GroupByDevice, nil)
 	if !reflect.DeepEqual(self, dev) {
 		t.Errorf("self grouping changed a plug's series:\n self = %+v\n dev  = %+v", self, dev)
 	}
@@ -152,7 +152,7 @@ func TestSelfGroupingMatchesDeviceGroupingForAPlug(t *testing.T) {
 // (PathForClass) rejects it before assembly, and assembly must agree.
 func TestSelfGroupingSkipsNonMeteredClasses(t *testing.T) {
 	inv := map[string]config.DeviceConfig{"hall-sensor": {Class: "environmental_sensor", Room: "groundfloor.hall"}}
-	out := AssembleSeries(meterBuckets(), []float64{1, 1}, inv, nil, nil, testTariff(), GroupBySelf, nil)
+	out := AssembleSeries(meterBuckets(), []float64{1, 1}, inv, nil, nil, testPricer(), GroupBySelf, nil)
 	if len(out) != 0 {
 		t.Errorf("want no series for a non-metered class, got %+v", out)
 	}
