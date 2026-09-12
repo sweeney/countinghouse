@@ -30,15 +30,6 @@ import (
 
 const testTariffCode = "E-1R-AGILE-24-10-01-A"
 
-func tariff(t *testing.T) octopus.TariffCode {
-	t.Helper()
-	tc, err := octopus.ParseTariffCode(testTariffCode)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	return tc
-}
-
 func ts(t *testing.T, s string) time.Time {
 	t.Helper()
 	v, err := time.Parse(time.RFC3339, s)

@@ -285,13 +285,6 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
-func orPlaceholder(v, placeholder string) string {
-	if v != "" {
-		return v
-	}
-	return placeholder
-}
-
 // siteWarnings reports a half-filled site block that is legal and works.
 //
 // Only the mirror case is left: a namespace with no id fetches the right devices and
