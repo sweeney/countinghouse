@@ -99,8 +99,30 @@ paths:
     get:
       summary: Device cost
       description: >
-        Windowed kWh and VAT-inclusive GBP cost for one device, at the tariff
-        effective at the window start.
+        Windowed kWh and VAT-inclusive GBP cost for one device.
+
+
+        How the cost is derived depends on the tariff(s) covering the window, and
+        `attribution` says which was used. Under a FIXED tariff it is kWh x the unit
+        rate (`attribution: flat_rate`). Under a HALF-HOURLY tariff there is no single
+        unit rate, so each half hour's energy is priced at that half hour's own
+        published rate and summed (`attribution: counter_slot`); `tariff` is then
+        absent, because reporting a representative rate would be read as the price.
+        A window spanning a tariff change prices each side on its own tariff, with
+        its own VAT rate.
+
+
+        `effective_rate` is the VAT-inclusive GBP/kWh actually paid. It is the number
+        that makes a slot-priced figure interpretable — whether this device ran cheap
+        or dear against the day — and for a low-draw device over a single day it
+        carries a few percent of quantisation noise, because plug counters tick in
+        0.1 kWh steps that land in whichever half hour reported them. Rates of either
+        SIGN are normal: negative half-hourly prices produce a credit.
+
+
+        `unpriced_kwh` is energy in half hours no rate is held for. It is NOT included
+        in `cost` and is absent when zero — its presence means the answer is
+        incomplete, never that the energy was free.
       operationId: getDeviceCost
       tags: [data]
       parameters:
@@ -251,6 +273,19 @@ paths:
       description: >
         Per-device cost breakdown plus standing charge, total, and
         reconciliation against the whole-house meter for the window.
+
+
+        Energy is priced as for /devices/{id}/cost, and `attribution` reports how:
+        `flat_rate` under a single fixed tariff, `counter_slot` when any part of the
+        window is half-hourly (each half hour's energy at that half hour's rate). The
+        per-device costs sum exactly to `energy_cost` either way.
+
+
+        The standing charge is reported ONCE, on the bill, and is never apportioned
+        across devices: no device causes it, so splitting it would invent a number
+        that reads like a measurement. It is apportioned across TARIFF SEGMENTS
+        instead — a window spanning a switchover is charged each side's daily rate for
+        its own days — and a partial day is billed pro rata rather than rounded up.
       operationId: getBill
       tags: [data]
       parameters:
@@ -1180,14 +1215,37 @@ components:
           example: GBP
         window:
           type: string
+        attribution:
+          type: string
+          enum: [flat_rate, counter_slot]
+          description: >-
+            How cost was derived. flat_rate: kWh x one unit rate, exact.
+            counter_slot: each half hour's counter delta priced at that half hour's
+            own rate — sums exactly over the window, but noisy for a low-draw device
+            over a single day (0.1 kWh counter quantisation).
+        effective_rate:
+          type: number
+          description: >-
+            VAT-inclusive GBP/kWh actually paid (cost / priced kWh). May be NEGATIVE:
+            a half-hourly tariff can pay you to consume. 0 when there is no energy.
+        unpriced_kwh:
+          type: number
+          description: >-
+            Energy in half hours no rate is held for. NOT included in cost; absent
+            when zero. Non-zero means this answer is incomplete, not that the energy
+            was free.
         tariff:
           type: object
+          description: >-
+            The single rate charged. Present ONLY under attribution=flat_rate; a
+            half-hourly tariff has no single rate, and a representative one would be
+            read as the price. Ask /prices for the curve instead.
           properties:
             unit_rate:
               type: number
             vat_rate:
               type: number
-      required: [device_id, kwh, cost, currency, window]
+      required: [device_id, kwh, cost, currency, window, attribution, effective_rate]
 
     DeviceCostBreakdown:
       type: object
@@ -1219,6 +1277,16 @@ components:
           type: number
         cost:
           type: number
+        effective_rate:
+          type: number
+          description: >-
+            VAT-inclusive GBP/kWh this device actually paid (cost / priced kWh). May
+            be negative. 0 when the device used no energy.
+        unpriced_kwh:
+          type: number
+          description: >-
+            This device's energy in half hours no rate is held for. NOT included in
+            cost; absent when zero.
 
     Reconciliation:
       type: object
@@ -1261,10 +1329,36 @@ components:
             $ref: "#/components/schemas/DeviceCostBreakdown"
         energy_cost:
           type: number
+          description: Sum of the per-device costs. Excludes the standing charge.
         standing_charge:
           type: number
+          description: >-
+            VAT-inclusive GBP for the window, apportioned across tariff segments and
+            pro rata for a partial day. Charged once here and NEVER split across
+            devices — no device causes it.
         total:
           type: number
+          description: >-
+            energy_cost + standing_charge. Can be lower than standing_charge alone
+            when negative half-hourly prices make energy_cost a credit.
+        attribution:
+          type: string
+          enum: [flat_rate, counter_slot]
+          description: >-
+            How the energy costs were derived; counter_slot when any part of the
+            window is half-hourly. See /devices/{id}/cost.
+        effective_rate:
+          type: number
+          description: >-
+            VAT-inclusive GBP/kWh across all monitored energy (energy_cost / priced
+            kWh). On a half-hourly tariff this is the single number saying how well
+            the house played the price curve. May be negative.
+        unpriced_kwh:
+          type: number
+          description: >-
+            Monitored energy no rate was held for, summed across devices. Absent when
+            zero; non-zero means this bill is INCOMPLETE, not that the energy was
+            free.
         reconciliation:
           $ref: "#/components/schemas/Reconciliation"
 

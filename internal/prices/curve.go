@@ -353,3 +353,23 @@ func (c Curve) DailyStats(loc *time.Location) []DayStats {
 	}
 	return out
 }
+
+// RateAt returns the VAT-inclusive £/kWh for the slot covering t, satisfying
+// energy.Pricer.
+//
+// £ rather than the pence the archive stores, because the cost layer works in
+// pounds; and VAT-inclusive because that is what is actually charged. The
+// supplier's own inc-VAT figure is used rather than one computed from ex-VAT — it
+// carries more precision than any rounding policy we would pick, and Gate A has
+// already checked the two agree.
+//
+// False means NO PRICE IS HELD for that half hour, which a caller must surface as
+// unpriced energy. Returning zero would charge nothing for real consumption.
+func (c Curve) RateAt(t time.Time) (float64, bool) {
+	for _, s := range c.Slots {
+		if s.Covers(t) {
+			return s.IncVATPence / 100, true
+		}
+	}
+	return 0, false
+}

@@ -71,7 +71,7 @@ func assertSeriesMatchesScalar(t *testing.T, sim *influx.CounterSim, win Window,
 	devices := map[string]config.DeviceConfig{"winefridge": {Class: "continuous_power_device"}}
 
 	resp, err := BuildSeries(context.Background(), &influx.FakeQuerier{QueryFunc: sim.Answer},
-		"b", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+		"b", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestCounterSeriesSilentDeviceIsAllZeroBesideABusyOne(t *testing.T) {
 	}
 
 	resp, err := BuildSeries(context.Background(), &influx.FakeQuerier{QueryFunc: sim.Answer},
-		"b", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+		"b", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}

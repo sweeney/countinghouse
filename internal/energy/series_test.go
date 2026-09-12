@@ -185,8 +185,12 @@ func TestBucketStartsDSTSpringForward(t *testing.T) {
 
 // ---- AssembleSeries: device grouping ---------------------------------------
 
-func testTariff() config.Tariff {
-	return config.Tariff{UnitRate: 0.2089, VATRate: 0.05}
+// testPricer is the flat rate these tests price at. It returns a PRICER rather
+// than a tariff because cost is no longer a single multiplication — see
+// pricer.go, and note that building this from a half-hourly tariff would
+// correctly yield a pricer that knows nothing.
+func testPricer() Pricer {
+	return FlatPricerFor(config.Tariff{UnitRate: 0.2089, VATRate: 0.05})
 }
 
 func threeBuckets(loc *time.Location) []time.Time {
@@ -207,7 +211,7 @@ func TestAssembleByDeviceZeroFillAndCost(t *testing.T) {
 	energy := map[string][]float64{"winefridge": {0.05, 0, 0.04}}
 	power := map[string][]float64{"winefridge": {52.1, 0, 41.8}}
 
-	out := AssembleSeries(buckets, nil, devices, energy, power, testTariff(), GroupByDevice, nil)
+	out := AssembleSeries(buckets, nil, devices, energy, power, testPricer(), GroupByDevice, nil)
 	if len(out) != 1 {
 		t.Fatalf("series count = %d, want 1", len(out))
 	}
@@ -234,9 +238,17 @@ func TestAssembleByDeviceZeroFillAndCost(t *testing.T) {
 	if s.TotalKWh != 0.09 {
 		t.Errorf("total kwh = %v, want 0.09", s.TotalKWh)
 	}
-	wantTotalCost := round.To(0.011+0+round.To(0.04*0.2089*1.05, 4), 4)
+	// The total is the RAW sum rounded once, not the sum of the rounded per-bucket
+	// values: 0.01096725 + 0 + 0.0087738 = 0.01974105 → 0.0197. Summing the wire
+	// values would give 0.011 + 0.0088 = 0.0198 — a hundredth of a penny here, and
+	// several pence over a month of half-hourly buckets now that /bill reads this
+	// total. See TestSeriesTotalCostDoesNotAccumulateRoundingError.
+	wantTotalCost := round.To(0.05*0.2089*1.05+0.04*0.2089*1.05, 4)
 	if s.TotalCost != wantTotalCost {
 		t.Errorf("total cost = %v, want %v", s.TotalCost, wantTotalCost)
+	}
+	if s.TotalCost == round.To(s.Cost[0]+s.Cost[1]+s.Cost[2], 4) {
+		t.Error("the total equals the sum of the ROUNDED buckets; it must accumulate raw")
 	}
 }
 
@@ -251,7 +263,7 @@ func TestAssembleByDeviceExcludesMeter(t *testing.T) {
 		"winefridge":        {0.1, 0.1, 0.1},
 		"electricity_meter": {5, 5, 5},
 	}
-	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByDevice, nil)
+	out := AssembleSeries(buckets, nil, devices, energy, nil, testPricer(), GroupByDevice, nil)
 	if len(out) != 1 || out[0].Key != "winefridge" {
 		t.Fatalf("meter not excluded from device grouping: %+v", out)
 	}
@@ -263,7 +275,7 @@ func TestAssembleByDeviceFallbackLabel(t *testing.T) {
 	devices := map[string]config.DeviceConfig{
 		"toaster": {Class: "short_burst_power_device"}, // no DisplayName
 	}
-	out := AssembleSeries(buckets, nil, devices, nil, nil, testTariff(), GroupByDevice, nil)
+	out := AssembleSeries(buckets, nil, devices, nil, nil, testPricer(), GroupByDevice, nil)
 	if len(out) != 1 || out[0].Label != "toaster" {
 		t.Errorf("label fallback wrong: %+v", out)
 	}
@@ -293,7 +305,7 @@ func TestAssembleByRoomSumsKitchen(t *testing.T) {
 		"toaster":    {100, 0, 200},
 		"office_pc":  {300, 300, 300},
 	}
-	out := AssembleSeries(buckets, nil, devices, energy, power, testTariff(), GroupByRoom, nil)
+	out := AssembleSeries(buckets, nil, devices, energy, power, testPricer(), GroupByRoom, nil)
 	if len(out) != 2 {
 		t.Fatalf("room series = %d, want 2 (kitchen, office)", len(out))
 	}
@@ -323,7 +335,7 @@ func TestAssembleByRoomExcludesMeter(t *testing.T) {
 		"winefridge":        {1, 1, 1},
 		"electricity_meter": {9, 9, 9},
 	}
-	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByRoom, nil)
+	out := AssembleSeries(buckets, nil, devices, energy, nil, testPricer(), GroupByRoom, nil)
 	if len(out) != 1 || out[0].Key != "kitchen" {
 		t.Errorf("meter room leaked into grouping: %+v", out)
 	}
@@ -344,7 +356,7 @@ func TestAssembleByClass(t *testing.T) {
 		"b": {0.2, 0.2, 0.2},
 		"c": {0.5, 0.5, 0.5},
 	}
-	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByClass, nil)
+	out := AssembleSeries(buckets, nil, devices, energy, nil, testPricer(), GroupByClass, nil)
 	if len(out) != 2 {
 		t.Fatalf("class series = %d, want 2", len(out))
 	}
@@ -380,7 +392,7 @@ func TestAssembleHouseDualSeries(t *testing.T) {
 		"network-ups":       {50, 50, 50},
 		"electricity_meter": {1000, 1000, 1000},
 	}
-	out := AssembleSeries(buckets, []float64{1, 1, 1}, devices, energy, power, testTariff(), GroupByHouse, nil)
+	out := AssembleSeries(buckets, []float64{1, 1, 1}, devices, energy, power, testPricer(), GroupByHouse, nil)
 	if len(out) != 3 {
 		t.Fatalf("house series = %d, want 3 (monitored, unmonitored, meter)", len(out))
 	}
@@ -450,7 +462,7 @@ func TestAssembleHouseUnmonitoredClamp(t *testing.T) {
 		"winefridge":        {100, 100, 100},
 		"electricity_meter": {1000, 1000, 1000},
 	}
-	out := AssembleSeries(buckets, []float64{1, 1, 1}, devices, energy, power, testTariff(), GroupByHouse, nil)
+	out := AssembleSeries(buckets, []float64{1, 1, 1}, devices, energy, power, testPricer(), GroupByHouse, nil)
 	unmon := out[1]
 	if unmon.Key != houseUnmonitoredKey {
 		t.Fatalf("series[1] key = %q", unmon.Key)
@@ -510,11 +522,11 @@ func TestDeriveUnmonitoredUnclamped(t *testing.T) {
 	meter := Series{KWh: []float64{0.3, 0.3, 0.3}, AvgW: []float64{300, 300, 300}}
 
 	hrs := []float64{1, 1, 1}
-	clamped := deriveUnmonitored(buckets, hrs, monitored, meter, testTariff(), false)
+	clamped := deriveUnmonitored(buckets, hrs, monitored, meter, testPricer(), false)
 	if clamped.KWh[0] != 0 {
 		t.Errorf("clamped kwh[0] = %v, want 0", clamped.KWh[0])
 	}
-	unclamped := deriveUnmonitored(buckets, hrs, monitored, meter, testTariff(), true)
+	unclamped := deriveUnmonitored(buckets, hrs, monitored, meter, testPricer(), true)
 	if unclamped.KWh[0] >= 0 {
 		t.Errorf("unclamped kwh[0] = %v, want negative (0.3−0.5)", unclamped.KWh[0])
 	}
@@ -533,7 +545,7 @@ func TestAssembleHouseNoMeter(t *testing.T) {
 		"winefridge": {Class: "continuous_power_device"},
 	}
 	energy := map[string][]float64{"winefridge": {0.1, 0.1, 0.1}}
-	out := AssembleSeries(buckets, nil, devices, energy, nil, testTariff(), GroupByHouse, nil)
+	out := AssembleSeries(buckets, nil, devices, energy, nil, testPricer(), GroupByHouse, nil)
 	if len(out) != 1 || out[0].Key != houseMonitoredKey {
 		t.Errorf("house without meter should be one monitored series: %+v", out)
 	}
@@ -599,7 +611,7 @@ func TestBuildSeriesEndToEnd(t *testing.T) {
 		},
 	}
 
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -713,7 +725,7 @@ func TestBuildSeriesNonAlignedCustomWindow(t *testing.T) {
 		},
 	}
 
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -773,7 +785,7 @@ func TestBuildSeriesUnmonitoredAvgWEnergyDerived(t *testing.T) {
 		},
 	}
 
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByHouse, false, false, devices, testTariff(), nil, loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByHouse, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -809,7 +821,7 @@ func TestBuildSeriesQueryError(t *testing.T) {
 		"winefridge": {Class: "continuous_power_device"},
 	}
 	q := &influx.FakeQuerier{Err: context.DeadlineExceeded}
-	if _, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc); err == nil {
+	if _, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc); err == nil {
 		t.Fatal("BuildSeries should propagate query error")
 	}
 }
@@ -825,7 +837,7 @@ func TestBuildSeriesNoMeteredDevices(t *testing.T) {
 		"doorbell": {Class: "binary_sensor"},
 	}
 	q := &influx.FakeQuerier{}
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -846,7 +858,7 @@ func TestBuildSeriesDefaultGroupByReported(t *testing.T) {
 	}
 	iv, _ := lookupInterval("1h")
 	q := &influx.FakeQuerier{}
-	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, "", false, false, nil, testTariff(), nil, loc)
+	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, "", false, false, nil, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -878,7 +890,7 @@ func TestBuildSeriesUPSPartialFinalBucket(t *testing.T) {
 	sim := influx.NewPowerSim(loc).AddSteady("network-ups", start, stop, time.Minute, 100)
 
 	resp, err := BuildSeries(context.Background(), &influx.FakeQuerier{QueryFunc: sim.Answer},
-		"statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+		"statehouse", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}

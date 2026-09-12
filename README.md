@@ -37,13 +37,13 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /floors` | Floor catalog (id, name, order, elevation, device_count) — the vocabulary behind `floors=` and `group_by=floor`. |
 | `GET /rooms` | Room catalog (id, name, floor, category, area, device_count) — the vocabulary behind `rooms=` and `group_by=room`. |
 | `GET /devices/{id}/energy?window=&from=&to=` | Windowed kWh for one device (`source`: counter/integral). |
-| `GET /devices/{id}/cost?window=…` | Windowed kWh + VAT-inclusive cost at the effective tariff. |
+| `GET /devices/{id}/cost?window=…` | Windowed kWh + VAT-inclusive cost. `attribution` says how it was priced (`flat_rate` / `counter_slot`), `effective_rate` the GBP/kWh it works out to, `unpriced_kwh` any energy no rate was held for. |
 | `GET /devices/{id}/series?window=&interval=&shape=` | Single-device time-series (kWh / cost / avg W per bucket), for any energy-capable device **including the whole-house meter** (excluded from `/series?group_by=device`, but a request for one device cannot double-count). Reserved id `unmonitored` serves the rest-of-home series in the same shape — the *same* shape, so it omits the house-only `coverage`/`stale_monitored_*` signals even though deriving it needs the whole-house decomposition; `group_by=house` carries those beside the identical values (404 when no meter is configured). |
 | `GET /devices/{id}/events?window=` | State-transition events (for vertical-line overlays). |
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
 | `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter. `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
-| `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
+| `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered. |
 | `GET /prices` | Half-hourly price curve over a window, past or future. |
 | `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
@@ -582,6 +582,65 @@ variable tariff at a fixed number.
 `GET /tariffs` serves the **dated-block shape either way** — a legacy document is
 presented as a single agreement with neither bound — so a consumer handles one shape
 rather than two.
+
+### How spend is calculated
+
+A fixed tariff has one number, so cost is one multiplication. A half-hourly tariff has
+forty-eight a day, of **either sign**, and `unit_rate` in config is deliberately absent
+— the curve lives in the archive. So the cost path asks two questions in order: what
+prices the energy in this window, and at what resolution must the energy be measured to
+apply it?
+
+```
+  FIXED TARIFF                          HALF-HOURLY TARIFF
+  one increase() over the window        per-half-hour counter deltas
+           x one rate                   each x that half hour's own rate
+  ┌────────────────────────────┐        ┌──┬──┬──┬──┬──┬──┬──┬──┬──┬──┐
+  │        2.80 kWh            │        │.1│.1│.1│.1│.1│.1│.1│.1│.1│..│ kWh
+  └────────────────────────────┘        ├──┼──┼──┼──┼──┼──┼──┼──┼──┼──┤
+           x 20.89p                     │23│21│18│ 9│-2│-3│-2│ 4│17│..│ p
+  ───────────────────────────────       └──┴──┴──┴──┴──┴──┴──┴──┴──┴──┘
+  = £0.6150  (exact, one query)         = Σ  (exact, one 48-bucket query)
+  attribution: flat_rate                attribution: counter_slot
+```
+
+`attribution` is on the wire because the **method** is load-bearing for how closely a
+figure should be read:
+
+- **`flat_rate`** — one whole-window energy figure times one rate. Exact over any
+  window, and the path a flat deployment keeps taking, byte for byte. A month's bill
+  stays one query per device rather than 1488 buckets for the same answer.
+- **`counter_slot`** — each half hour's counter delta priced at that half hour's own
+  rate. Chosen over two alternatives and recorded in `docs/per-device-attribution.md`.
+  Per-device costs sum *exactly* to `energy_cost`, and *when* a device ran is preserved,
+  which is the entire point of the tariff. The cost is that plug counters tick in
+  0.1 kWh steps, so a single day's figure for a low-draw device carries a few percent of
+  quantisation noise — measured at +1.6% over a month for continuous loads against
+  −9.7% for deferrable ones, roughly 6:1 signal to noise, which is why the decision went
+  this way.
+
+A window spanning a **switchover** is billed one segment per agreement, each at its own
+rate and VAT multiplier, with the boundary half hour belonging to the *later* tariff.
+The standing charge is apportioned the same way — each side's daily rate for its own
+days, pro rata for a partial day — and is charged **once, on the bill, never split
+across devices**: no device causes a standing charge, so apportioning it would invent a
+number that reads like a measurement.
+
+Two fields exist because a cost on its own is not interpretable:
+
+- **`effective_rate`** — VAT-inclusive GBP/kWh actually paid, `cost ÷ priced kWh`. On the
+  bill it is the single number saying how well the house played the curve. It can be
+  **negative**: Agile prices go below zero, and consuming then is a credit, which the
+  whole pipeline carries through rather than clamping.
+- **`unpriced_kwh`** — energy in half hours no rate is held for. It is **not** folded
+  into `cost` and is absent when zero, so its presence always means the answer is
+  incomplete. Charging nothing for real energy is the silent failure this path exists to
+  prevent: a visible gap beats a plausible total.
+
+`/series` and `/bill` price buckets through **one** shared function, so a chart and a
+bill cannot disagree about what a window cost. Totals accumulate at full precision and
+round once — summing per-bucket costs already rounded for the wire drifts a month's
+half-hourly bill by several pence.
 
 ## Run locally
 

@@ -135,31 +135,52 @@ func (s *Server) handleDeviceCost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tariff, ok := s.Config.Tariffs().TariffFor(win.Start)
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "no electricity tariff configured")
-		return
-	}
-
-	kwh, _, err := s.deviceWindowKWh(r, id, dev.Class, win)
+	plan, err := s.planFor(r.Context(), win.Start, win.Stop)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 
-	cost := energy.DeviceCostFor(kwh, tariff)
+	// Cost this one device through the shared path: scalar when a single flat
+	// tariff covers the window, per-half-hour counter deltas otherwise. The
+	// inventory passed to the build is this device alone, so a half-hourly
+	// /devices/{id}/cost costs one device's worth of query, not the fleet's.
+	costed := []energy.DeviceCost{{DeviceID: id, Class: dev.Class}}
+	only := map[string]config.DeviceConfig{id: dev}
+	if err := s.costDevices(r, win, plan, only, costed); err != nil {
+		influxFailed(w, err)
+		return
+	}
+	dc := costed[0]
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"device_id": id,
-		"kwh":       round.To(kwh, round.KWhDP),
-		"cost":      round.To(cost, round.MoneyDP),
+		"kwh":       round.To(dc.KWh, round.KWhDP),
+		"cost":      round.To(dc.Cost, round.MoneyDP),
 		"currency":  "GBP",
 		"window":    win.Label,
-		"tariff": map[string]any{
-			"unit_rate": tariff.UnitRate,
-			"vat_rate":  tariff.VATRate,
-		},
-	})
+		// How the cost was arrived at, and the rate it works out to. Under
+		// counter_slot the effective rate is the number that makes the cost
+		// readable — whether this device ran cheap or dear against the day —
+		// because there is no single unit_rate to report instead.
+		"attribution":    plan.attribution(),
+		"effective_rate": round.To(energy.EffectiveRate(dc.Cost, dc.KWh-dc.UnpricedKWh), round.RateDP),
+	}
+	// Energy no rate was held for is reported, never charged at nothing. Absent
+	// when zero, so its presence always means something.
+	if dc.UnpricedKWh != 0 {
+		out["unpriced_kwh"] = round.To(dc.UnpricedKWh, round.KWhDP)
+	}
+	// A single flat tariff still reports the rate it charged. A half-hourly one has
+	// no single rate to report, and naming a representative number here would be
+	// read as THE price: consumers wanting the curve ask /prices.
+	if plan.scalar {
+		out["tariff"] = map[string]any{
+			"unit_rate": plan.flat.UnitRate,
+			"vat_rate":  plan.flat.VATRate,
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // resolveSeriesParams resolves the window and interval shared by the series
@@ -184,10 +205,10 @@ func (s *Server) resolveSeriesParams(w http.ResponseWriter, r *http.Request) (en
 // for /metrics. BuildSeries issues up to three Influx queries internally; we
 // count the whole series build as one logical query so the per-query latency
 // average stays comparable across endpoints.
-func (s *Server) buildSeries(r *http.Request, win energy.Window, iv energy.Interval, groupBy string, includeUnmonitored, unclamped bool, devices map[string]config.DeviceConfig, tariff config.Tariff) (energy.SeriesResponse, error) {
+func (s *Server) buildSeries(r *http.Request, win energy.Window, iv energy.Interval, groupBy string, includeUnmonitored, unclamped bool, devices map[string]config.DeviceConfig, pricer energy.Pricer) (energy.SeriesResponse, error) {
 	start := time.Now()
 	resp, err := energy.BuildSeries(r.Context(), s.Influx, s.Bucket, win, iv, groupBy,
-		includeUnmonitored, unclamped, devices, tariff, s.groupLabels(groupBy), s.loc())
+		includeUnmonitored, unclamped, devices, pricer, s.groupLabels(groupBy), s.loc())
 	s.queryCount.Add(1)
 	s.influxNanos.Add(int64(time.Since(start)))
 	if err != nil {
@@ -454,13 +475,13 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tariff, ok := s.Config.Tariffs().TariffFor(win.Start)
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "no electricity tariff configured")
+	pricer, err := s.pricerFor(r.Context(), win.Start, win.Stop)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 
-	resp, err := s.buildSeries(r, win, iv, groupBy, includeUnmonitored, unclamped, devices, tariff)
+	resp, err := s.buildSeries(r, win, iv, groupBy, includeUnmonitored, unclamped, devices, pricer)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
@@ -527,9 +548,9 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tariff, ok := s.Config.Tariffs().TariffFor(win.Start)
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "no electricity tariff configured")
+	pricer, err := s.pricerFor(r.Context(), win.Start, win.Stop)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 
@@ -545,7 +566,7 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 	// 500. A single-device response carries one series by definition; the
 	// rest-of-home quantity has its own id (/devices/unmonitored/series).
 	single := map[string]config.DeviceConfig{id: dev}
-	resp, err := s.buildSeries(r, win, iv, energy.GroupBySelf, false, false, single, tariff)
+	resp, err := s.buildSeries(r, win, iv, energy.GroupBySelf, false, false, single, pricer)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
@@ -600,13 +621,13 @@ func (s *Server) handleUnmonitoredSeries(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	tariff, ok := s.Config.Tariffs().TariffFor(win.Start)
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "no electricity tariff configured")
+	pricer, err := s.pricerFor(r.Context(), win.Start, win.Stop)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 
-	resp, err := s.buildSeries(r, win, iv, energy.GroupByHouse, false, unclamped, devices, tariff)
+	resp, err := s.buildSeries(r, win, iv, energy.GroupByHouse, false, unclamped, devices, pricer)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
@@ -628,9 +649,9 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tariff, ok := s.Config.Tariffs().TariffFor(win.Start)
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "no electricity tariff configured")
+	plan, err := s.planFor(r.Context(), win.Start, win.Stop)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 
@@ -664,14 +685,14 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 	// diffing two bills or rendering a table.
 	sort.Slice(billable, func(i, j int) bool { return billable[i].DeviceID < billable[j].DeviceID })
 
-	for i := range billable {
-		dc := &billable[i]
-		kwh, _, err := s.deviceWindowKWh(r, dc.DeviceID, dc.Class, win)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "influx query failed for "+dc.DeviceID+": "+err.Error())
-			return
-		}
-		dc.KWh = kwh
+	// Energy and money for every billable device, scalar on a single flat tariff and
+	// per-half-hour counter deltas otherwise. The inventory is passed whole so the
+	// bucketed path issues ONE set of queries for the fleet rather than one per
+	// device, which is also what makes the per-device costs sum exactly to the
+	// monitored total (decision C1).
+	if err := s.costDevices(r, win, plan, devices, billable); err != nil {
+		influxFailed(w, err)
+		return
 	}
 
 	// Whole-house meter total. If no electricity meter is configured we pass
@@ -688,7 +709,13 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		meterKWh = kwh
 	}
 
-	bill := energy.AssembleBill(win, billable, meterKWh, meterPresent, tariff)
+	// The standing charge rides on the bill and is never apportioned across devices:
+	// no device causes it, so splitting it would invent a number that reads like a
+	// measurement (decision D2).
+	bill := energy.AssembleBill(win, billable, meterKWh, meterPresent, energy.BillPricing{
+		StandingCharge: plan.standing,
+		Attribution:    plan.attribution(),
+	})
 	writeJSON(w, http.StatusOK, roundBill(bill))
 }
 
@@ -698,8 +725,12 @@ func roundBill(b energy.Bill) energy.Bill {
 	for i := range b.Devices {
 		b.Devices[i].KWh = round.To(b.Devices[i].KWh, round.KWhDP)
 		b.Devices[i].Cost = round.To(b.Devices[i].Cost, round.MoneyDP)
+		b.Devices[i].EffectiveRate = round.To(b.Devices[i].EffectiveRate, round.RateDP)
+		b.Devices[i].UnpricedKWh = round.To(b.Devices[i].UnpricedKWh, round.KWhDP)
 	}
 	b.EnergyCost = round.To(b.EnergyCost, round.MoneyDP)
+	b.EffectiveRate = round.To(b.EffectiveRate, round.RateDP)
+	b.UnpricedKWh = round.To(b.UnpricedKWh, round.KWhDP)
 	b.StandingCharge = round.To(b.StandingCharge, round.MoneyDP)
 	b.Total = round.To(b.Total, round.MoneyDP)
 	b.Reconciliation.MonitoredKWh = round.To(b.Reconciliation.MonitoredKWh, round.KWhDP)

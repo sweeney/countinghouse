@@ -2,6 +2,24 @@ package energy
 
 import "github.com/sweeney/countinghouse/internal/config"
 
+// Attribution names how the energy cost in a response was derived.
+//
+// It is on the wire because under a half-hourly tariff the METHOD is load-bearing
+// for how closely a per-device figure should be read. A consumer that cannot tell
+// slot-priced counter deltas from a flat multiplication has no way to know that a
+// single day's fridge cost carries a few percent of quantisation noise.
+const (
+	// AttributionFlatRate: kWh x one unit rate. Exact over any window.
+	AttributionFlatRate = "flat_rate"
+
+	// AttributionCounterSlot: each half hour's counter delta priced at that half
+	// hour's own rate — decision C1, docs/per-device-attribution.md. Sums exactly
+	// to the monitored house cost, preserves WHEN a device ran (the entire point of
+	// a half-hourly tariff), and is noisy for a low-draw device over a single day
+	// because a 0.1 kWh counter tick lands in whichever slot reported it.
+	AttributionCounterSlot = "counter_slot"
+)
+
 // DeviceCost is one billable device's energy and money for a window. KWh is the
 // metered energy; Cost is the VAT-inclusive £ cost for that energy at the
 // window's tariff. DisplayName/Room/Class are descriptive passthrough from
@@ -17,6 +35,19 @@ type DeviceCost struct {
 	Class  string  `json:"class"`
 	KWh    float64 `json:"kwh"`
 	Cost   float64 `json:"cost"`
+
+	// EffectiveRate is the VAT-inclusive £/kWh actually paid: Cost / KWh. Under
+	// counter_slot attribution this is what makes a per-device figure readable —
+	// it says whether this device ran cheap or dear against the day — and so it is
+	// what turns the quantisation noise from puzzling into interpretable. Zero
+	// energy has no effective rate and reports 0 rather than NaN.
+	EffectiveRate float64 `json:"effective_rate"`
+
+	// UnpricedKWh is this device's energy in half hours the price archive holds no
+	// rate for. It is deliberately NOT folded into Cost: charging nothing for real
+	// energy is the silent failure this whole path exists to prevent, so the gap is
+	// reported instead. Omitted when zero, which is the normal case.
+	UnpricedKWh float64 `json:"unpriced_kwh,omitempty"`
 }
 
 // Reconciliation compares the sum of monitored devices against the whole-house
@@ -54,6 +85,31 @@ type Bill struct {
 	StandingCharge float64        `json:"standing_charge"`
 	Total          float64        `json:"total"`
 	Reconciliation Reconciliation `json:"reconciliation"`
+
+	// Attribution is how the energy costs above were derived — see the constants.
+	Attribution string `json:"attribution"`
+
+	// EffectiveRate is the VAT-inclusive £/kWh across all monitored energy. On a
+	// half-hourly tariff it is the single number that says how well the house
+	// played the curve, which is the question the tariff exists to ask.
+	EffectiveRate float64 `json:"effective_rate"`
+
+	// UnpricedKWh is monitored energy no rate was held for, summed across devices.
+	// Non-zero means this bill is INCOMPLETE, not that the energy was free.
+	UnpricedKWh float64 `json:"unpriced_kwh,omitempty"`
+}
+
+// BillPricing is the money context for a bill: the standing charge for the window
+// and the attribution method naming how each device's Cost was arrived at.
+//
+// Device costs arrive ALREADY COMPUTED in the DeviceCost values rather than being
+// derived here, because only the caller knows what it has to price from — a single
+// configured rate, or per-half-hour counter deltas against the archive. Assembling
+// a bill and pricing energy are different jobs, and a half-hourly tariff is what
+// made keeping them in one function untenable.
+type BillPricing struct {
+	StandingCharge float64
+	Attribution    string
 }
 
 // DeviceCostFor returns the VAT-inclusive £ cost of kwh at tariff t:
@@ -76,27 +132,60 @@ func StandingChargeFor(days float64, t config.Tariff) float64 {
 	return days * t.DailyStandingCharge * t.Multiplier()
 }
 
-// AssembleBill builds a Bill from the billable devices, the whole-house meter
-// total, and the tariff.
+// StandingChargeAcross sums the standing charge over tariff segments, each at its
+// own daily charge and its own VAT rate.
 //
-// devices are the BILLABLE devices (plug + UPS) with .KWh already filled in;
-// the meter is NOT one of them. meterKWh is the whole-house total (from the
-// electricity_meter counter / house_electricity), passed separately, and
-// meterPresent reports whether such a meter is configured at all. Each device's
-// .Cost is computed here from its .KWh.
+// A window spanning a tariff change is not a corner case — the first bill after a
+// switchover necessarily is one — and the two sides can differ in both numbers.
+// Because PeriodsBetween tiles the window exactly, the apportioned parts add up to
+// the window with no gap and no double charge.
+func StandingChargeAcross(segments []config.Segment) float64 {
+	var total float64
+	for _, seg := range segments {
+		total += StandingChargeFor(seg.Days(), seg.Tariff)
+	}
+	return total
+}
+
+// PriceFlat fills in each device's Cost at one flat rate.
+//
+// The flat path, unchanged in behaviour: kWh x unit_rate x (1 + vat_rate). A
+// half-hourly tariff must NOT come through here — its UnitRate is zero, so this
+// would return the confident £0.00 that the whole slot-costing path exists to
+// prevent. FlatPricerFor refuses such a tariff for the same reason.
+func PriceFlat(devices []DeviceCost, t config.Tariff) {
+	for i := range devices {
+		devices[i].Cost = DeviceCostFor(devices[i].KWh, t)
+	}
+}
+
+// AssembleBill builds a Bill from the billable devices, the whole-house meter
+// total, and the window's pricing context.
+//
+// devices are the BILLABLE devices (plug + UPS) with .KWh, .Cost and any
+// .UnpricedKWh already filled in; the meter is NOT one of them. meterKWh is the
+// whole-house total (from the electricity_meter counter / house_electricity),
+// passed separately, and meterPresent reports whether such a meter is configured
+// at all. Effective rates — per device and for the bill — are derived here, so
+// there is one definition of them however the costs were priced.
+//
+// The standing charge is reported ONCE, on the bill, and is never apportioned
+// across devices: no device causes it, so splitting it would invent a number that
+// looks like a measurement. That is decision D2 in docs/per-device-attribution.md.
 //
 // When meterPresent is false the meter-derived reconciliation fields are left
 // nil (omitted from the wire) instead of being computed from a phantom meterKWh
 // of 0 — see Reconciliation for why that distinction matters.
-func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, meterPresent bool, t config.Tariff) Bill {
-	var energyCost, monitoredKWh float64
+func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, meterPresent bool, pricing BillPricing) Bill {
+	var energyCost, monitoredKWh, unpriced float64
 	for i := range devices {
-		devices[i].Cost = DeviceCostFor(devices[i].KWh, t)
+		devices[i].EffectiveRate = EffectiveRate(devices[i].Cost, devices[i].KWh)
 		energyCost += devices[i].Cost
 		monitoredKWh += devices[i].KWh
+		unpriced += devices[i].UnpricedKWh
 	}
 
-	standing := StandingChargeFor(window.Days(), t)
+	standing := pricing.StandingCharge
 
 	rec := Reconciliation{MeterPresent: meterPresent, MonitoredKWh: monitoredKWh}
 	if meterPresent {
@@ -119,5 +208,10 @@ func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, meterPr
 		StandingCharge: standing,
 		Total:          energyCost + standing,
 		Reconciliation: rec,
+		Attribution:    pricing.Attribution,
+		// Priced energy only: dividing by kWh that carried no price would quietly
+		// understate the rate actually paid.
+		EffectiveRate: EffectiveRate(energyCost, monitoredKWh-unpriced),
+		UnpricedKWh:   unpriced,
 	}
 }

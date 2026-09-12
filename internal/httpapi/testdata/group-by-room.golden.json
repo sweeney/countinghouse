@@ -71,7 +71,7 @@
       ],
       "label": "basement.network-cabinet",
       "room": "basement.network-cabinet",
-      "total_cost": 0.3066,
+      "total_cost": 0.3071,
       "total_kwh": 1.4
     },
     {
@@ -126,7 +126,7 @@
       ],
       "label": "groundfloor.kitchen",
       "room": "groundfloor.kitchen",
-      "total_cost": 0.154,
+      "total_cost": 0.1535,
       "total_kwh": 0.7
     }
   ],
