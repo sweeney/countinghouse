@@ -703,6 +703,9 @@ func deriveUnmonitored(buckets []time.Time, bucketHours []float64, monitored *Se
 		AvgW:  make([]float64, n),
 	}
 
+	// Per-bucket energy at full precision, for the same reason buildSeries keeps it:
+	// the wire gets a rounded copy, the totals are computed from these.
+	raw := make([]float64, n)
 	for i := 0; i < n; i++ {
 		var monKWh float64
 		if monitored != nil {
@@ -712,27 +715,34 @@ func deriveUnmonitored(buckets []time.Time, bucketHours []float64, monitored *Se
 		if !unclamped && kwh < 0 {
 			kwh = 0
 		}
+		raw[i] = kwh
+
 		var w float64
 		if i < len(bucketHours) && bucketHours[i] > 0 {
 			w = kwh * 1000.0 / bucketHours[i]
 		}
 		s.KWh[i] = round.To(kwh, round.KWhDP)
-		// Priced at THIS bucket's rate, not at one rate for the window. Energy in a
-		// bucket with no known price is left out of Cost and accumulated into
-		// UnpricedKWh, because charging nothing for real consumption is the quiet
-		// way a bill comes out wrong.
+		// Priced at THIS bucket's rate, not at one rate for the window.
 		if rate, known := pricer.RateAt(buckets[i]); known {
 			s.Cost[i] = round.To(kwh*rate, round.MoneyDP)
-		} else if kwh != 0 {
-			s.UnpricedKWh = round.To(s.UnpricedKWh+kwh, round.KWhDP)
 		}
 		s.AvgW[i] = round.To(w, round.WDP)
+	}
 
-		s.TotalKWh += s.KWh[i]
-		s.TotalCost += s.Cost[i]
+	// Totals through the SAME function buildSeries uses, accumulating raw and
+	// rounding once. This is the second producer of a Series, and when only the
+	// first was fixed it kept both bugs: a month's rest-of-home cost understated by
+	// a third, and missing prices rounded away to an UnpricedKWh of exactly zero —
+	// which reads as "nothing was missing", the one answer worse than a wrong total.
+	// It reaches the wire on /series?group_by=house, include_unmonitored=true, and
+	// /devices/unmonitored/series.
+	cost, unpriced := CostBuckets(buckets, raw, pricer)
+	for _, kwh := range raw {
+		s.TotalKWh += kwh
 	}
 	s.TotalKWh = round.To(s.TotalKWh, round.KWhDP)
-	s.TotalCost = round.To(s.TotalCost, round.MoneyDP)
+	s.TotalCost = round.To(cost, round.MoneyDP)
+	s.UnpricedKWh = round.To(unpriced, round.KWhDP)
 	return s
 }
 

@@ -18,7 +18,51 @@ import (
 //
 // Pence on a bill is the kind of wrong that is technically small and completely
 // indefensible, so the totals are accumulated raw and rounded exactly once.
+//
+// These run against EVERY producer of a Series, not just `buildSeries`. The first
+// version of this file fixed one of the two and left `deriveUnmonitored` — the
+// rest-of-home decomposition — carrying both bugs untouched, with three
+// adversarially-designed cases that would each have caught it all pointed at the
+// other producer. Parameterising closes the class rather than the instance, and a
+// third producer added later fails here until it is added to the table.
 // ---------------------------------------------------------------------------
+
+// seriesProducer builds a Series from a bucket axis, per-bucket kWh and a pricer.
+// Every way this package turns energy into a priced Series must appear here.
+type seriesProducer struct {
+	name string
+	// build takes the axis and the per-bucket kWh at FULL precision, as the real
+	// query path supplies them.
+	build func(buckets []time.Time, kwh []float64, p Pricer) Series
+}
+
+// seriesProducers is the table. `deriveUnmonitored` is reached by making the meter
+// carry all the energy and the monitored set none, which is the shape it sees when
+// nothing in the house is individually metered.
+func seriesProducers() []seriesProducer {
+	return []seriesProducer{
+		{
+			name: "buildSeries",
+			build: func(buckets []time.Time, kwh []float64, p Pricer) Series {
+				return buildSeries("d", "D", "", "continuous_power_device", buckets,
+					[][]float64{kwh}, [][]float64{make([]float64, len(buckets))}, p)
+			},
+		},
+		{
+			name: "deriveUnmonitored",
+			build: func(buckets []time.Time, kwh []float64, p Pricer) Series {
+				// The meter saw everything; no monitored device accounts for any of it,
+				// so the unmonitored remainder IS the energy under test.
+				meter := Series{Key: "meter", KWh: kwh}
+				hrs := make([]float64, len(buckets))
+				for i := range hrs {
+					hrs[i] = 0.5
+				}
+				return deriveUnmonitored(buckets, hrs, nil, meter, p, false)
+			},
+		},
+	}
+}
 
 // A long run of buckets whose true cost rounds the SAME WAY every time — each
 // bucket's cost sits just above a rounding boundary, so summing the rounded values
@@ -37,32 +81,35 @@ func TestSeriesTotalCostDoesNotAccumulateRoundingError(t *testing.T) {
 		// money precision — losing 0.000049 every bucket, every time.
 		kwh[i] = 0.000149
 	}
-
 	flat := FlatPricer{RatePerKWh: 1.0, known: true}
-	s := buildSeries("d", "D", "", "continuous_power_device", buckets,
-		[][]float64{kwh}, [][]float64{make([]float64, n)}, flat)
 
-	want := 0.000149 * n // £0.2218 or so
-	if math.Abs(s.TotalCost-want) > 5e-5 {
-		t.Errorf("TotalCost = %v, want %v — off by %v. The total is summing "+
-			"per-bucket costs that were already rounded for the wire; over %d buckets "+
-			"that drifts the bill.", s.TotalCost, want, want-s.TotalCost, n)
-	}
+	for _, prod := range seriesProducers() {
+		t.Run(prod.name, func(t *testing.T) {
+			s := prod.build(buckets, kwh, flat)
 
-	// The per-bucket values on the wire are still rounded — that part was correct.
-	if s.Cost[0] != 0.0001 {
-		t.Errorf("Cost[0] = %v, want 0.0001 (per-bucket values stay rounded for the wire)", s.Cost[0])
-	}
+			want := 0.000149 * n // £0.2218 or so
+			if math.Abs(s.TotalCost-want) > 5e-5 {
+				t.Errorf("TotalCost = %v, want %v — off by %v. The total is summing "+
+					"per-bucket costs that were already rounded for the wire; over %d buckets "+
+					"that drifts the bill.", s.TotalCost, want, want-s.TotalCost, n)
+			}
 
-	// Same argument for energy: the window total must not be a sum of rounded parts.
-	wantKWh := 0.000149 * n
-	if math.Abs(s.TotalKWh-wantKWh) > 5e-4 {
-		t.Errorf("TotalKWh = %v, want %v", s.TotalKWh, wantKWh)
+			// The per-bucket values on the wire are still rounded — that part is correct.
+			if s.Cost[0] != 0.0001 {
+				t.Errorf("Cost[0] = %v, want 0.0001 (per-bucket values stay rounded for the wire)", s.Cost[0])
+			}
+
+			// Same argument for energy: the window total must not be a sum of rounded parts.
+			wantKWh := 0.000149 * n
+			if math.Abs(s.TotalKWh-wantKWh) > 5e-4 {
+				t.Errorf("TotalKWh = %v, want %v", s.TotalKWh, wantKWh)
+			}
+		})
 	}
 }
 
-// And the series must agree with CostBuckets, which is the other implementation of
-// "price these buckets". Two implementations of that sum is how /series and /bill
+// And every producer must agree with CostBuckets, which is the other implementation
+// of "price these buckets". Two implementations of that sum is how /series and /bill
 // come to disagree, and a consumer comparing a chart against a bill has no way to
 // tell which one lied.
 func TestSeriesTotalCostAgreesWithCostBuckets(t *testing.T) {
@@ -72,22 +119,26 @@ func TestSeriesTotalCostAgreesWithCostBuckets(t *testing.T) {
 	for i := range kwh {
 		kwh[i] = 0.0335 // a fridge's steady draw
 	}
-
-	s := buildSeries("d", "D", "", "continuous_power_device", starts,
-		[][]float64{kwh}, [][]float64{make([]float64, len(starts))}, pricer)
 	want, unpriced := CostBuckets(starts, kwh, pricer)
-
 	if unpriced != 0 {
 		t.Fatalf("the fixture is a complete day but CostBuckets reported %v unpriced", unpriced)
 	}
-	if math.Abs(s.TotalCost-want) > 5e-5 {
-		t.Errorf("series TotalCost = %v but CostBuckets says %v; the two must agree",
-			s.TotalCost, want)
+
+	for _, prod := range seriesProducers() {
+		t.Run(prod.name, func(t *testing.T) {
+			s := prod.build(starts, kwh, pricer)
+			if math.Abs(s.TotalCost-want) > 5e-5 {
+				t.Errorf("TotalCost = %v but CostBuckets says %v; the two must agree",
+					s.TotalCost, want)
+			}
+		})
 	}
 }
 
-// Unpriced energy must likewise total at full precision, and must come from the
-// same place the cost does.
+// Unpriced energy must likewise total at full precision, and must come from the same
+// place the cost does. Rounding each part away first produces a total of exactly
+// zero, which reads as "nothing was missing" — the worst available answer, because it
+// is indistinguishable from a complete bill.
 func TestSeriesUnpricedTotalsExactly(t *testing.T) {
 	const n = 100
 	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
@@ -98,16 +149,19 @@ func TestSeriesUnpricedTotalsExactly(t *testing.T) {
 		kwh[i] = 0.0004 // rounds to 0.000 at kWh precision
 	}
 
-	// A pricer that knows nothing: every bucket is unpriced.
-	s := buildSeries("d", "D", "", "continuous_power_device", buckets,
-		[][]float64{kwh}, [][]float64{make([]float64, n)}, FlatPricer{})
+	for _, prod := range seriesProducers() {
+		t.Run(prod.name, func(t *testing.T) {
+			// A pricer that knows nothing: every bucket is unpriced.
+			s := prod.build(buckets, kwh, FlatPricer{})
 
-	if s.TotalCost != 0 {
-		t.Errorf("TotalCost = %v; nothing could be priced, so nothing may be charged", s.TotalCost)
-	}
-	want := 0.0004 * n
-	if math.Abs(s.UnpricedKWh-want) > 5e-4 {
-		t.Errorf("UnpricedKWh = %v, want %v — a total of rounded-away parts is zero, "+
-			"which reads as 'nothing was missing'", s.UnpricedKWh, want)
+			if s.TotalCost != 0 {
+				t.Errorf("TotalCost = %v; nothing could be priced, so nothing may be charged", s.TotalCost)
+			}
+			want := 0.0004 * n
+			if math.Abs(s.UnpricedKWh-want) > 5e-4 {
+				t.Errorf("UnpricedKWh = %v, want %v — a total of rounded-away parts is zero, "+
+					"which reads as 'nothing was missing'", s.UnpricedKWh, want)
+			}
+		})
 	}
 }
