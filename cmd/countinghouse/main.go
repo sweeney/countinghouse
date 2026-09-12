@@ -318,13 +318,18 @@ func startCollectors(cfg config.Config, fetcher *config.Fetcher, loc *time.Locat
 	// of times — the reliable outcome of the latter being a log nobody reads.
 	notifier := notify.NewThrottle(notify.NewSlogNotifier(logger), time.Hour, testutil.RealClock{})
 
-	// VAT comes from the agreement in force, since it is a property of the tariff
-	// rather than of the collector. Gate A checks the supplier's inc/exc
-	// relationship against it.
-	var vatRate float64
-	if t, ok := agreements.TariffFor(time.Now()); ok {
-		vatRate = t.VATRate
-	}
+	// VAT comes from the agreement covering each SLOT, since it is a property of the
+	// tariff in force when that price applied rather than of the collector.
+	//
+	// Previously this took the rate from the agreement in force at boot and handed
+	// one number to every collector, which was wrong three ways: frozen for the
+	// process lifetime so a SIGHUP'd VAT change or a midnight agreement rollover was
+	// never picked up; sourced from `now` rather than from the agreement owning each
+	// tariff code, so backfilling a superseded tariff whose VAT differed used today's
+	// rate; and — with no else branch — silently 0 when no agreement covered `now`,
+	// which at the time meant Gate A rejecting 100% of slots for vat_mismatch while
+	// /healthz reported fetches succeeding.
+	vatAt := vatRateAt(fetcher)
 
 	out := make([]*collector.Collector, 0, len(codes))
 	for _, code := range codes {
@@ -335,7 +340,7 @@ func startCollectors(cfg config.Config, fetcher *config.Fetcher, loc *time.Locat
 			Clock:      testutil.RealClock{},
 			Location:   loc,
 			TariffCode: code,
-			VATRate:    vatRate,
+			VATRateAt:  vatAt,
 			Logger:     logger,
 		})
 		if err != nil {
@@ -396,4 +401,24 @@ func priceReader(store *prices.SQLiteStore) httpapi.PriceReader {
 		return nil
 	}
 	return store
+}
+
+// vatRateAt returns a resolver for the VAT rate in force at an instant, reading the
+// LIVE agreements each call.
+//
+// Live, not captured: the snapshot is re-read per slot, so a VAT change adopted by
+// SIGHUP and an agreement rolling over at midnight are both picked up without a
+// restart. Returning false when nothing covers the instant is the whole point — the
+// caller must express no opinion rather than check against a rate of zero, because
+// zero is a legal VAT rate and therefore cannot double as "I don't know".
+func vatRateAt(src interface {
+	Tariffs() config.TariffSource
+}) func(time.Time) (float64, bool) {
+	return func(at time.Time) (float64, bool) {
+		t, ok := src.Tariffs().TariffFor(at)
+		if !ok {
+			return 0, false
+		}
+		return t.VATRate, true
+	}
 }

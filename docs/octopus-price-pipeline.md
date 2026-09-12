@@ -104,8 +104,10 @@ whether the price was missing or the collector ate it.
 | `valid_from` lands on :00 or :30 | ✅ Agile slots always do; a drifted boundary means we misunderstood the feed |
 | `valid_to − valid_from == 30m`, or `valid_to` is null | guards a silently changed slot length |
 | both values finite (reject NaN, ±Inf) | a NaN price propagates into money and poisons a bill |
-| `\|inc − exc × (1 + vat)\| < 1e-6` | ✅ verified **exactly** 1.05 across 1,440 April slots, negatives included (`exc −3.680 → inc −3.8640`). Catches a VAT change and a unit error in one assertion |
 | `tariff_code` is the one we requested | guards a wrong-region fetch — the failure mode that would silently bill us on London prices |
+
+Gate A's rule is **"the value cannot be money."** The VAT-relationship check used to live
+here and was moved to Gate B — see below for why.
 
 ### Gate B — plausibility (per row; accept **and** flag)
 
@@ -117,6 +119,29 @@ would discard exactly the slots worth knowing about.
 | `inc ≤ 100 p/kWh` — the product's documented cap | ✅ max seen 76.67 exc (~80.5 inc) |
 | `inc ≥ −50 p/kWh` — sanity floor, no contractual floor exists | ✅ min seen −11.11 exc |
 | jump vs adjacent slots beyond a threshold | ✅ median intra-day spread 24.3 p/kWh, so the threshold must be generous |
+| `\|inc − exc × (1 + vat)\| < 1e-6` | ✅ verified **exactly** ×1.05 across 1,440 April slots, negatives included (`exc −3.680 → inc −3.8640` — VAT on a negative price makes it MORE negative). Catches a VAT change and a unit error in one assertion |
+
+**Why the VAT check is Gate B and not Gate A.** Both price columns come from the supplier
+and are self-consistent with each other; what disagrees is *our* agreement's `vat_rate`.
+And no unit price is ever derived from that config rate — `Curve.RateAt` returns
+`inc_vat` straight out of the archive — so rejecting the slot discarded correct supplier
+data to protect an assumption nothing downstream reads.
+
+The failure that mattered: on a real VAT change, Gate A refused **every** slot published
+after it until somebody edited config. The window where prices matter most would be the
+window with no prices, and `/healthz` would show fetches succeeding throughout. As a
+warning the check is just as loud and keeps the price.
+
+The warning detail carries the **implied** rate (`inc/exc − 1`), which is both what an
+operator needs in order to correct config and most of what a per-slot `vat_rate` column
+would have bought — so this largely answers deferred **D4**. The residual exposure is the
+standing charge, which really does use the config rate.
+
+The expected rate is resolved **per slot**, from the agreement covering that slot's
+`valid_from`, and an instant no agreement covers yields *no opinion* rather than a rate of
+zero. Zero is a legal VAT rate and so cannot double as "unknown": conflating them meant
+a boot during an agreement gap validated every slot against an implied 0% and, while this
+was Gate A, rejected 100% of them.
 
 ### Gate C — set-level (per day; gates the *signal*, not the rows)
 

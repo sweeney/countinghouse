@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sync"
 	"testing"
@@ -193,6 +194,15 @@ type harness struct {
 
 func newHarness(t *testing.T, now time.Time, f *fakeFetcher) *harness {
 	t.Helper()
+	return newHarnessWithVAT(t, now, f, nil)
+}
+
+// newHarnessWithVAT is newHarness with an explicit per-slot VAT resolver, for the
+// cases where what the collector can and cannot know about VAT is the thing under
+// test. A nil resolver falls back to the constant 5%, which is what every other test
+// wants.
+func newHarnessWithVAT(t *testing.T, now time.Time, f *fakeFetcher, vatAt func(time.Time) (float64, bool)) *harness {
+	t.Helper()
 	store, err := prices.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -209,6 +219,7 @@ func newHarness(t *testing.T, now time.Time, f *fakeFetcher) *harness {
 		Location:   london(t),
 		TariffCode: testTariffCode,
 		VATRate:    0.05,
+		VATRateAt:  vatAt,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -392,11 +403,16 @@ func TestSyncIsIdempotentAndRaisesNoFalseRestatement(t *testing.T) {
 // A slot the gates reject must not reach the archive, and must not be silent.
 func TestSyncQuarantinesRejectedSlotsAndAlerts(t *testing.T) {
 	f := newFakeFetcher(ts(t, "2026-09-10T00:00:00Z"), ts(t, "2026-09-10T02:00:00Z"))
-	// Break the VAT relationship on one slot: inc is not exc x 1.05.
+	// A NaN price on one slot. This used to break the VAT relationship instead, which
+	// was a Gate A rejection until that check moved to Gate B — a VAT mismatch is now
+	// stored and flagged, because both columns come from the supplier and only our
+	// config disagrees. The property under test is unchanged: a slot the gates REJECT
+	// must not reach the archive and must not be silent. It needs an example that is
+	// still rejected, and a price that is not a number is the clearest one there is.
 	bad := ts(t, "2026-09-10T01:00:00Z")
 	f.priceAt = func(at time.Time) (float64, float64) {
 		if at.Equal(bad) {
-			return 20, 99
+			return 20, math.NaN()
 		}
 		return 20, 21
 	}
@@ -923,7 +939,7 @@ func TestStatusCountersAccumulate(t *testing.T) {
 	bad := ts(t, "2026-09-10T01:00:00Z")
 	f.priceAt = func(at time.Time) (float64, float64) {
 		if at.Equal(bad) {
-			return 20, 99 // breaks the VAT relationship
+			return 20, math.NaN() // not money at all: a Gate A rejection
 		}
 		return 20, 21
 	}
@@ -1045,4 +1061,81 @@ func TestSyncHandlesAPlungePricingDay(t *testing.T) {
 		t.Error("no negative slots reached the archive; the fixture is not testing what it claims")
 	}
 	t.Logf("%d negative slots round-tripped through the collector", negatives)
+}
+
+// ---------------------------------------------------------------------------
+
+// An UNRESOLVABLE VAT rate must not cost the archive its data.
+//
+// This is the shape of booting during an agreement gap, or backfilling a stretch
+// before the first agreement's `from`. It used to mean a rate of 0, Gate A rejecting
+// 100% of slots for vat_mismatch, nothing stored — and because the collector is
+// fail-open, nothing downstream looking broken while /healthz showed fetches
+// succeeding. Two changes had to land for this to be safe: the check moved to Gate B,
+// and "no rate" became expressible separately from "a rate of 0".
+func TestSyncWithNoResolvableVATRateStillStores(t *testing.T) {
+	f := newFakeFetcher(ts(t, "2026-09-10T00:00:00Z"), ts(t, "2026-09-10T02:00:00Z"))
+	h := newHarnessWithVAT(t, ts(t, "2026-09-10T16:10:00Z"), f,
+		func(time.Time) (float64, bool) { return 0, false }) // nothing covers these slots
+
+	res, err := h.c.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(res.Rejected) != 0 {
+		t.Errorf("rejected %d slots with no resolvable VAT rate: %+v — an unknown rate "+
+			"must express no opinion, not an opinion of zero", len(res.Rejected), res.Rejected)
+	}
+	if res.Stored.Inserted != 4 {
+		t.Errorf("inserted %d, want all 4 slots", res.Stored.Inserted)
+	}
+	// And no VAT warnings either: we had no basis for one.
+	for _, w := range res.Warnings {
+		if w.Kind == prices.WarnVATMismatch {
+			t.Errorf("a VAT warning was raised with no expected rate: %s", w.Detail)
+		}
+	}
+}
+
+// The resolver is consulted with each slot's OWN valid_from, not with one instant for
+// the batch — which is what lets a backfill spanning a VAT change validate correctly.
+func TestSyncResolvesVATPerSlot(t *testing.T) {
+	f := newFakeFetcher(ts(t, "2026-09-10T00:00:00Z"), ts(t, "2026-09-10T02:00:00Z"))
+	boundary := ts(t, "2026-09-10T01:00:00Z")
+	// The supplier charges 5% before the boundary and 20% after.
+	f.priceAt = func(at time.Time) (float64, float64) {
+		if at.Before(boundary) {
+			return 20, 21
+		}
+		return 20, 24
+	}
+
+	var asked []time.Time
+	h := newHarnessWithVAT(t, ts(t, "2026-09-10T16:10:00Z"), f,
+		func(at time.Time) (float64, bool) {
+			asked = append(asked, at)
+			if at.Before(boundary) {
+				return 0.05, true
+			}
+			return 0.20, true
+		})
+
+	res, err := h.c.Sync(context.Background())
+	if err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if len(asked) < 4 {
+		t.Errorf("the resolver was consulted %d times for 4 slots; it must be asked per "+
+			"slot rather than once for the batch", len(asked))
+	}
+	// Every slot is correct under the rate in force at its own valid_from, so nothing
+	// is flagged. A single-rate check would have flagged half of them.
+	for _, w := range res.Warnings {
+		if w.Kind == prices.WarnVATMismatch {
+			t.Errorf("slot %s flagged: %s", w.Slot.ValidFrom, w.Detail)
+		}
+	}
+	if res.Stored.Inserted != 4 {
+		t.Errorf("inserted %d, want 4", res.Stored.Inserted)
+	}
 }

@@ -87,6 +87,17 @@ type Options struct {
 	// TariffCode is the tariff to collect. Validated at construction.
 	TariffCode string
 
+	// VATRateAt resolves the expected VAT rate for one slot from its valid_from,
+	// returning false when no agreement covers it. Takes precedence over VATRate.
+	//
+	// A function rather than a number because a scalar was wrong three ways: it was
+	// frozen at whatever was in force when the process started, it came from one
+	// instant rather than from the agreement owning each slot, and an unresolvable
+	// rate silently became 0 — which, while the check was a Gate A rejection, meant
+	// 100% of slots rejected for vat_mismatch and the archive quietly ceasing to fill
+	// while /healthz showed fetches succeeding.
+	VATRateAt func(time.Time) (float64, bool)
+
 	// VATRate is the rate the validation gate checks the inc/exc relationship
 	// against. Taken literally — 0 is a legal VAT rate.
 	VATRate float64
@@ -101,14 +112,15 @@ type Options struct {
 // complete — is derived from the archive on each call. So a restart costs at
 // most one extra sync, which is free because writes are idempotent.
 type Collector struct {
-	fetcher  RateFetcher
-	store    prices.Store
-	notifier notify.Notifier
-	clock    testutil.Clock
-	loc      *time.Location
-	tariff   octopus.TariffCode
-	vatRate  float64
-	log      *slog.Logger
+	fetcher   RateFetcher
+	store     prices.Store
+	notifier  notify.Notifier
+	clock     testutil.Clock
+	loc       *time.Location
+	tariff    octopus.TariffCode
+	vatRate   float64
+	vatRateAt func(time.Time) (float64, bool)
+	log       *slog.Logger
 
 	mu     sync.Mutex
 	status Status
@@ -184,15 +196,16 @@ func New(opts Options) (*Collector, error) {
 	}
 
 	c := &Collector{
-		fetcher:  opts.Fetcher,
-		store:    opts.Store,
-		notifier: opts.Notifier,
-		clock:    opts.Clock,
-		loc:      opts.Location,
-		tariff:   tariff,
-		vatRate:  opts.VATRate,
-		log:      opts.Logger,
-		status:   Status{TariffCode: opts.TariffCode},
+		fetcher:   opts.Fetcher,
+		store:     opts.Store,
+		notifier:  opts.Notifier,
+		clock:     opts.Clock,
+		loc:       opts.Location,
+		tariff:    tariff,
+		vatRate:   opts.VATRate,
+		vatRateAt: opts.VATRateAt,
+		log:       opts.Logger,
+		status:    Status{TariffCode: opts.TariffCode},
 	}
 	if c.notifier == nil {
 		c.notifier = notify.Nop{}
@@ -335,8 +348,9 @@ func (c *Collector) fetchRange(ctx context.Context, from, to time.Time) (SyncRes
 
 	slots := prices.FromRates(c.tariff.Code, rates, c.clock.Now())
 	v := prices.Validate(slots, prices.ValidateOptions{
-		TariffCode: c.tariff.Code,
-		VATRate:    c.vatRate,
+		TariffCode:      c.tariff.Code,
+		VATRate:         c.vatRate,
+		ExpectVATRateAt: c.vatRateAt,
 	})
 
 	var res SyncResult

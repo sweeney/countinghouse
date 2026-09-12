@@ -91,6 +91,10 @@ const (
 	WarnAboveCap   WarningKind = "above_cap"
 	WarnBelowFloor WarningKind = "below_floor"
 	WarnJump       WarningKind = "jump"
+	// WarnVATMismatch: the supplier's inc/exc relationship is not the one our
+	// agreement's vat_rate implies. A warning rather than a rejection — see
+	// checkVAT for why discarding the slot would be the worse failure.
+	WarnVATMismatch WarningKind = "vat_mismatch"
 )
 
 // Rejection is a slot that must not be stored, with the reason why.
@@ -142,7 +146,30 @@ type ValidateOptions struct {
 	// rate and defaulting would quietly assert today's 5% over a caller that
 	// meant something else. A rate change is a config change, and this check
 	// has to follow config rather than contradict it.
+	//
+	// Deprecated in favour of ExpectVATRate, which can express "I don't know".
+	// Still honoured when non-zero so existing callers are unaffected.
 	VATRate float64
+
+	// ExpectVATRateAt resolves the expected VAT rate for ONE slot, from its
+	// valid_from, returning false when no agreement covers it.
+	//
+	// Takes precedence over both constant forms. One rate for a whole batch is wrong
+	// in two ways the collector actually hits: a backfill spans agreements, and a
+	// superseded tariff's VAT may differ from today's. Resolving per slot also means
+	// the rate follows config rather than being frozen at whatever was in force when
+	// the process started.
+	ExpectVATRateAt func(time.Time) (float64, bool)
+
+	// ExpectVATRate is the VAT rate the supplier's inc/exc relationship should
+	// imply, or nil for NO OPINION.
+	//
+	// A pointer because 0% is a legal rate and therefore cannot double as "unset".
+	// That distinction is load-bearing: the collector cannot always name the rate —
+	// boot during an agreement gap, or a superseded tariff whose agreement is gone —
+	// and a plain float64 made that indistinguishable from a genuine 0%, which
+	// implied the wrong rate for every slot in the batch.
+	ExpectVATRate *float64
 
 	// SlotDuration is the exact length every bounded interval must have. Zero
 	// means DefaultSlotDuration; AnyDuration waives the check.
@@ -204,6 +231,9 @@ func Validate(slots []Slot, opts ValidateOptions) ValidationResult {
 	// about the same broken row and hide the real neighbour relationship.
 	for _, s := range res.Accepted {
 		res.Warnings = append(res.Warnings, checkLevel(s, opts)...)
+		if w, bad := checkVAT(s, opts); bad {
+			res.Warnings = append(res.Warnings, w)
+		}
 	}
 	res.Warnings = append(res.Warnings, checkJumps(res.Accepted, opts)...)
 	return res
@@ -262,17 +292,10 @@ func checkStructure(s Slot, opts ValidateOptions) (Rejection, bool) {
 		return reject(ReasonPriceNotFinite, "%s", err)
 	}
 
-	// One assertion that catches two different disasters: a VAT rate change we
-	// have not been told about, and a unit error (pence read as pounds) in
-	// either column. ✅ Verified exactly ×1.05 across 1,440 consecutive slots
-	// including negative ones — exc −3.680 → inc −3.8640, because VAT on a
-	// negative price makes it MORE negative, not less.
-	want := s.ExcVATPence * (1 + opts.VATRate)
-	if diff := math.Abs(s.IncVATPence - want); diff > opts.VATEpsilonPence {
-		return reject(ReasonVATMismatch,
-			"inc %.6fp but exc %.6fp at VAT %.4f implies %.6fp (off by %.6fp, tolerance %g)",
-			s.IncVATPence, s.ExcVATPence, opts.VATRate, want, diff, opts.VATEpsilonPence)
-	}
+	// The VAT relationship used to be checked HERE, as a rejection. It is now Gate B
+	// — see checkVAT. Gate A's rule is "the value cannot be money", and a price whose
+	// inc/exc ratio surprises us is money; discarding it would lose correct supplier
+	// data to protect a config value the cost path never reads.
 
 	// Parsed, not pattern-matched, and by the same function that builds request
 	// paths — so a code this archive accepts is a code we could have fetched.
@@ -286,6 +309,70 @@ func checkStructure(s Slot, opts ValidateOptions) (Rejection, bool) {
 	}
 
 	return Rejection{}, false
+}
+
+// checkVAT is the per-slot VAT relationship check: Gate B, never a rejection.
+//
+// One assertion that catches two different disasters: a VAT rate change we have not
+// been told about, and a unit error (pence read as pounds) in either column.
+// ✅ Verified exactly ×1.05 across 1,440 consecutive slots including negative ones —
+// exc −3.680 → inc −3.8640, because VAT on a negative price makes it MORE negative,
+// not less.
+//
+// It was Gate A and should not have been. Both columns come from the supplier and are
+// self-consistent; what disagrees is OUR agreement's vat_rate. And no unit price is
+// ever derived from that config rate — Curve.RateAt returns IncVATPence straight out
+// of the archive — so rejecting the slot discarded correct data to protect an
+// assumption nothing downstream uses. On a real VAT change that meant refusing every
+// slot published after it until somebody edited config: the window where prices matter
+// most would be the window with no prices, while /healthz reported fetches succeeding.
+//
+// A warning fails just as loudly and keeps the price. The detail carries the IMPLIED
+// rate, which is both what an operator needs in order to correct config and — since
+// inc/exc − 1 is recorded per slot by construction — most of what a per-slot vat_rate
+// column would have bought (deferred D4). The residual is the standing charge, which
+// really does use the config rate.
+//
+// A nil ExpectVATRate expresses no opinion and skips the check entirely. Flagging
+// every slot in a batch because we could not name the rate would make the signal
+// useless in exactly the situation where it is hardest to name.
+func checkVAT(s Slot, opts ValidateOptions) (Warning, bool) {
+	rate, ok := opts.expectedVATAt(s.ValidFrom)
+	if !ok {
+		return Warning{}, false
+	}
+	want := s.ExcVATPence * (1 + rate)
+	diff := math.Abs(s.IncVATPence - want)
+	if diff <= opts.VATEpsilonPence {
+		return Warning{}, false
+	}
+	detail := fmt.Sprintf(
+		"inc %.6fp but exc %.6fp at VAT %.4f implies %.6fp (off by %.6fp, tolerance %g)",
+		s.IncVATPence, s.ExcVATPence, rate, want, diff, opts.VATEpsilonPence)
+	// The implied rate is the actionable number: it says what the supplier is
+	// actually charging, and therefore what config should say.
+	if s.ExcVATPence != 0 {
+		detail += fmt.Sprintf("; the supplier's figures imply VAT of %.4f", s.IncVATPence/s.ExcVATPence-1)
+	}
+	return Warning{Slot: s, Kind: WarnVATMismatch, Detail: detail}, true
+}
+
+// expectedVAT resolves the rate to check against, and whether there is one at all.
+//
+// Precedence: the per-slot resolver, then ExpectVATRate, then a non-zero legacy
+// VATRate (honoured so existing callers keep working), then no opinion. A zero legacy
+// VATRate means "unset", which is the ambiguity the other two exist to remove.
+func (o ValidateOptions) expectedVATAt(at time.Time) (float64, bool) {
+	if o.ExpectVATRateAt != nil {
+		return o.ExpectVATRateAt(at)
+	}
+	if o.ExpectVATRate != nil {
+		return *o.ExpectVATRate, true
+	}
+	if o.VATRate != 0 {
+		return o.VATRate, true
+	}
+	return 0, false
 }
 
 // checkLevel is the per-slot half of Gate B: cap and floor, never a rejection.

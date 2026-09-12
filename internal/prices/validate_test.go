@@ -244,30 +244,11 @@ func TestValidate_GateA_Structural(t *testing.T) {
 			in:   mutate(func(s *Slot) { s.ExcVATPence = math.Inf(-1) }),
 			want: ReasonPriceNotFinite,
 		},
-		{
-			name: "inc equal to exc is rejected — VAT has gone missing",
-			in:   mutate(func(s *Slot) { s.IncVATPence = s.ExcVATPence }),
-			want: ReasonVATMismatch,
-		},
-		{
-			name: "VAT at 20% is rejected while we expect 5%",
-			in:   hhSlot(t, "2026-09-11T00:00:00Z", 20, 0.20),
-			want: ReasonVATMismatch,
-		},
-		{
-			name: "a pence/pounds unit error in inc is caught by the VAT check",
-			in:   mutate(func(s *Slot) { s.IncVATPence = s.ExcVATPence * 1.05 / 100 }),
-			want: ReasonVATMismatch,
-		},
-		{
-			name: "VAT applied the wrong way on a negative price is rejected",
-			in: func() Slot {
-				s := hhSlot(t, "2026-09-11T00:00:00Z", -3.680, 0.05)
-				s.IncVATPence = -3.680 / 1.05 // less negative, i.e. VAT divided out
-				return s
-			}(),
-			want: ReasonVATMismatch,
-		},
+		// The VAT-relationship cases used to live here, as rejections. They are now
+		// Gate B warnings — see TestVATMismatchIsWarnedNotRejected and the reasoning
+		// on checkVAT. The same four shapes are still checked there; what changed is
+		// that the slot is kept, because both price columns come from the supplier
+		// and only our config disagrees.
 		{
 			name: "an unparseable tariff code is rejected",
 			in:   mutate(func(s *Slot) { s.TariffCode = "AGILE" }),
@@ -336,14 +317,31 @@ func TestValidate_AccountsForEverySlot(t *testing.T) {
 		t.Fatalf("accepted %d + rejected %d = %d, want all %d slots accounted for",
 			len(got.Accepted), len(got.Rejected), n, len(in))
 	}
-	if len(got.Accepted) != 2 {
-		t.Errorf("accepted %d, want 2", len(got.Accepted))
+	// Three accepted now, not two: the VAT-wrong slot is archived and FLAGGED rather
+	// than discarded, so only the NaN is rejected. The invariant being tested is
+	// unchanged — every input appears exactly once — and it is the invariant, not the
+	// count, that matters.
+	if len(got.Accepted) != 3 {
+		t.Errorf("accepted %d, want 3 (only the NaN is a rejection)", len(got.Accepted))
+	}
+	// ...and the VAT slot is not silently fine either.
+	var sawVAT bool
+	for _, w := range got.Warnings {
+		if w.Kind == WarnVATMismatch {
+			sawVAT = true
+		}
+	}
+	if !sawVAT {
+		t.Error("the VAT-wrong slot was accepted with no warning; it must be loud")
 	}
 	// Accepted order is the input order, so the caller can hand the slice
 	// straight to Store.Put and match it against what it fetched.
-	if len(got.Accepted) == 2 {
-		if !got.Accepted[0].ValidFrom.Equal(in[0].ValidFrom) || !got.Accepted[1].ValidFrom.Equal(in[2].ValidFrom) {
-			t.Errorf("accepted order = %s, %s; want input order", got.Accepted[0].ValidFrom, got.Accepted[1].ValidFrom)
+	if len(got.Accepted) == 3 {
+		for i, want := range []int{0, 1, 2} {
+			if !got.Accepted[i].ValidFrom.Equal(in[want].ValidFrom) {
+				t.Errorf("accepted[%d] = %s, want input order (%s)",
+					i, got.Accepted[i].ValidFrom, in[want].ValidFrom)
+			}
 		}
 	}
 }
@@ -355,13 +353,14 @@ func TestValidate_VATRateIsAParameter(t *testing.T) {
 
 	opts := halfHourly()
 	opts.VATRate = 0.20
-	if got := Validate([]Slot{at20}, opts); len(got.Accepted) != 1 {
-		t.Errorf("with VATRate 0.20 a x1.20 slot was rejected %v; the rate must be a parameter", reasons(got))
+	if got := Validate([]Slot{at20}, opts); len(got.Warnings) != 0 {
+		t.Errorf("with VATRate 0.20 a x1.20 slot was flagged %+v; the rate must be a parameter",
+			got.Warnings)
 	}
 
 	at5 := hhSlot(t, "2026-09-11T00:00:00Z", 20, 0.05)
-	if got := Validate([]Slot{at5}, opts); len(got.Rejected) != 1 {
-		t.Errorf("with VATRate 0.20 a x1.05 slot was accepted; the parameter is being ignored")
+	if got := Validate([]Slot{at5}, opts); len(got.Warnings) != 1 {
+		t.Errorf("with VATRate 0.20 a x1.05 slot drew no warning; the parameter is being ignored")
 	}
 }
 
@@ -384,11 +383,18 @@ func TestValidate_VATEpsilon(t *testing.T) {
 			s.IncVATPence += tc.deviation
 
 			got := Validate([]Slot{s}, halfHourly())
-			if tc.wantReject && len(got.Rejected) != 1 {
-				t.Errorf("deviation %g was accepted, want rejected", tc.deviation)
+			// `wantReject` now means "flagged": the epsilon's job is unchanged —
+			// separating float64 noise from a real discrepancy — only the consequence
+			// moved from Gate A to Gate B.
+			if tc.wantReject && len(got.Warnings) != 1 {
+				t.Errorf("deviation %g drew no warning, want one", tc.deviation)
 			}
-			if !tc.wantReject && len(got.Rejected) != 0 {
-				t.Errorf("deviation %g was rejected %v, want accepted", tc.deviation, reasons(got))
+			if !tc.wantReject && len(got.Warnings) != 0 {
+				t.Errorf("deviation %g was flagged %+v, want silence", tc.deviation, got.Warnings)
+			}
+			// Either way the slot is kept: the epsilon decides loudness, not storage.
+			if len(got.Accepted) != 1 {
+				t.Errorf("accepted %d, want 1 — a VAT discrepancy never discards the price", len(got.Accepted))
 			}
 		})
 	}
@@ -503,12 +509,33 @@ func TestValidate_GateB_JumpWarning(t *testing.T) {
 			want: 1,
 		},
 		{
+			// The middle slot used to be a VAT mismatch, which was a Gate A rejection.
+			// Now that a VAT discrepancy is a Gate B warning, a VAT-wrong slot IS a
+			// neighbour — correctly, since its price came from the supplier. The
+			// property under test is unchanged; it needs an example that really is
+			// rejected, so: a NaN.
 			name: "a rejected slot is not a neighbour — its price was never trusted",
 			in: []Slot{
 				hhSlot(t, "2026-09-11T00:00:00Z", 10, 0.05),
-				hhSlot(t, "2026-09-11T00:30:00Z", 95, 0.20), // rejected by Gate A
+				func() Slot {
+					s := hhSlot(t, "2026-09-11T00:30:00Z", 95, 0.05)
+					s.IncVATPence = math.NaN() // rejected by Gate A: not money at all
+					return s
+				}(),
 				hhSlot(t, "2026-09-11T01:00:00Z", 11, 0.05),
 			},
+		},
+		{
+			// The mirror case, now that the two gates differ: a VAT-flagged slot is
+			// still a real price and so still anchors its neighbours' jump checks.
+			// Skipping it would hide a genuine price spike behind a VAT config error.
+			name: "a VAT-flagged slot IS a neighbour — the price is the supplier's",
+			in: []Slot{
+				hhSlot(t, "2026-09-11T00:00:00Z", 10, 0.05),
+				hhSlot(t, "2026-09-11T00:30:00Z", 95, 0.20), // flagged, not rejected
+				hhSlot(t, "2026-09-11T01:00:00Z", 11, 0.05),
+			},
+			want: 2,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
