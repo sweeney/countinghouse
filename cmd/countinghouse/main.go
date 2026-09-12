@@ -129,6 +129,14 @@ func main() {
 		defer store.Close() //nolint:errcheck
 	}
 
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	// Offsite backup of the archive, started before the server so /healthz reports a
+	// real state from the first request rather than a nil provider for a moment.
+	// Nil when unconfigured, which omits the block entirely.
+	backups := startBackups(ctx, cfg, logger)
+
 	server := &httpapi.Server{
 		Listen:       cfg.HTTP.Listen,
 		Influx:       influxClient,
@@ -154,15 +162,13 @@ func main() {
 		// by accident. Nil when no archive is configured, and the /prices routes
 		// then answer 503.
 		PriceReader: priceReader(store),
+		Backups:     backups,
 	}
 
 	logger.Info("starting", "config", *configPath, "http", cfg.HTTP.Listen,
 		"influx", cfg.Influx.URL, "timezone", cfg.House.Timezone, "version", version,
 		"site", cfg.Site.ID, "devices_namespace", fetcher.DevicesNamespace,
 		"floorplan_namespace", cfg.Site.FloorplanNamespace)
-
-	ctx, cancel := signalContext()
-	defer cancel()
 
 	go watchSIGHUP(fetcher, logger)
 

@@ -94,10 +94,49 @@ prices:
   # switchover.
   #
   # The parent directory must exist and be writable by the service user. The file is
-  # created mode 0600, as are the -wal and -shm files SQLite keeps beside it. Back
-  # it up: it is rebuildable from the supplier today, and the whole reason to keep
-  # it is the day that stops being true.
+  # created mode 0600, as are the -wal and -shm files SQLite keeps beside it.
   db_path: "/var/lib/countinghouse/prices.db"
+
+  # Offsite backup of the archive to Cloudflare R2.
+  #
+  # The archive is rebuildable from the supplier today, and the whole reason to keep
+  # it is the day that stops being true — so this is the clause that makes keeping it
+  # mean something. `VACUUM INTO` takes a consistent snapshot, so a backup can run
+  # while the collector is writing.
+  #
+  # Leave the WHOLE BLOCK OUT to disable backups, which is right for development and
+  # for any deployment with no archive. A PARTIAL block is refused at startup: a
+  # backup that is quietly not happening is worse than no backup, because you believe
+  # the archive is safe and find out otherwise at the only moment it matters.
+  #
+  # backup:
+  #   # The R2 key prefix: "production" or "development", and nothing else. The
+  #   # restore tooling matches those literals, so any other value files backups
+  #   # where no restore looks. REQUIRED and deliberately not defaulted — defaulting
+  #   # either way silently puts one environment's backups in the other's prefix.
+  #   env: "production"
+  #
+  #   # One bucket per service, so the R2 API token can be scoped to it: a leaked
+  #   # countinghouse credential then cannot read or overwrite identity's backups.
+  #   bucket: "countinghouse-sqlite"
+  #
+  #   account_id: "REPLACE_ME"
+  #   access_key_id: "REPLACE_ME"
+  #
+  #   # Supply the secret inline, or point secret_access_key_file at a file holding
+  #   # it (the file is read only when the inline value is empty) — the same pattern
+  #   # as influx.token/token_file. Prefer the file: it keeps the credential out of a
+  #   # config document that is otherwise harmless to copy around. A named file that
+  #   # is missing or empty is a startup refusal, not a warning.
+  #   secret_access_key: ""
+  #   secret_access_key_file: "/etc/countinghouse/r2-secret"
+  #
+  #   # daily (default) | weekly (Sundays) | monthly (1st) | off.
+  #   # "off" stops the timer only; on-demand backups still work.
+  #   schedule: "daily"
+  #
+  #   # UTC hour 0-23. 0 means MIDNIGHT, not "unset".
+  #   hour: 3
 
 house:
   timezone: "Europe/London"

@@ -149,6 +149,11 @@ type Server struct {
 	// than as no archive.
 	Prices PricesProvider
 
+	// Backups reports the price archive's offsite backup state. Nil when no backup
+	// is configured — development, or any deployment with no archive — and the
+	// /healthz block is then omitted rather than rendered empty.
+	Backups BackupProvider
+
 	// PriceReader serves the /prices endpoints from the archive. Nil when no
 	// archive is configured, and those routes then answer 503 — the route exists
 	// and would work elsewhere, so it is a deployment state rather than a bad
@@ -327,6 +332,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		Site            *siteHealth                       `json:"site,omitempty"`
 		RemoteConfig    map[string]config.NamespaceStatus `json:"remote_config,omitempty"`
 		Prices          []PriceHealth                     `json:"prices,omitempty"`
+		Backup          *BackupHealth                     `json:"backup,omitempty"`
 	}
 	h := health{
 		Version:    s.Version,
@@ -352,6 +358,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.Prices != nil {
 		h.Prices = s.Prices.PriceHealth()
 	}
+	if s.Backups != nil {
+		h.Backup = s.Backups.BackupHealth()
+	}
 
 	// Derive the aggregated verdict so a monitor watching the top-level status
 	// (the obvious thing to alert on) sees an outage. Influx is the hard
@@ -373,6 +382,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		// we are either not keeping up or cannot price TODAY — and the top-level
 		// status is what a monitor actually watches.
 		if degraded, _ := priceVerdict(h.Prices, s.clock().Now()); degraded {
+			h.Status = "degraded"
+		}
+		// And the same reasoning for the backup: nothing served depends on last
+		// night's upload, so this cannot be "unavailable" — but the archive is the
+		// one thing here that is not rebuildable from Influx, and an unprotected
+		// archive that reports "ok" is the failure worth catching.
+		if degraded, _ := backupVerdict(h.Backup, s.clock().Now()); degraded {
 			h.Status = "degraded"
 		}
 	}

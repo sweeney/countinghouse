@@ -797,6 +797,14 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	if s.Prices != nil {
 		out["prices"] = s.Prices.PriceHealth()
 	}
+	// Same rule for the backup: omitted when none is configured. The success and
+	// failure counters are what a monitor should alert on — not the timestamps,
+	// which need a notion of "too old" that /healthz already applies.
+	if s.Backups != nil {
+		if h := s.Backups.BackupHealth(); h != nil {
+			out["backup"] = h
+		}
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 

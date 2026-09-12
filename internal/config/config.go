@@ -169,6 +169,14 @@ type PricesConfig struct {
 	// test cannot quietly reach the live API. The default belongs at the edge,
 	// where it is visible in one place.
 	OctopusBaseURL string `yaml:"octopus_base_url"`
+
+	// Backup sends the archive to Cloudflare R2. Empty means backups are off,
+	// which is correct for development and for any deployment with no archive; a
+	// PARTIAL block is refused at startup rather than run as "off". The archive is
+	// rebuildable from the supplier today, and the whole reason to keep it is the
+	// day that stops being true — so this is the clause that makes keeping it mean
+	// something.
+	Backup BackupConfig `yaml:"backup"`
 }
 
 // DefaultOctopusBaseURL is the supplier's public API root. The price and standing
@@ -213,8 +221,16 @@ func Default() Config {
 			Org:    "swee.net",
 			Bucket: "statehouse",
 		},
-		House:  HouseConfig{Timezone: "Europe/London"},
-		Prices: PricesConfig{OctopusBaseURL: DefaultOctopusBaseURL},
+		House: HouseConfig{Timezone: "Europe/London"},
+		Prices: PricesConfig{
+			OctopusBaseURL: DefaultOctopusBaseURL,
+			// Only the hour is defaulted. Every other backup field left unset means
+			// "backups off", and filling any of them in would turn a deployment that
+			// never asked for backups into one that half-asks. The hour is different:
+			// 0 is a legitimate midnight, so it cannot be distinguished from unset
+			// later and has to be settled here.
+			Backup: BackupConfig{Hour: DefaultBackupHour},
+		},
 	}
 }
 
@@ -234,6 +250,21 @@ func Load(path string) (Config, error) {
 			return cfg, fmt.Errorf("read influx token: %w", err)
 		}
 		cfg.Influx.Token = string(trimTrailingNewline(tok))
+	}
+	if cfg.Prices.Backup.SecretAccessKey == "" && cfg.Prices.Backup.SecretAccessKeyFile != "" {
+		sec, err := os.ReadFile(cfg.Prices.Backup.SecretAccessKeyFile)
+		if err != nil {
+			// The path is named; the contents never are, here or anywhere else.
+			return cfg, fmt.Errorf("read r2 secret from %s: %w", cfg.Prices.Backup.SecretAccessKeyFile, err)
+		}
+		cfg.Prices.Backup.SecretAccessKey = string(trimTrailingNewline(sec))
+		if cfg.Prices.Backup.SecretAccessKey == "" {
+			return cfg, fmt.Errorf("r2 secret file %s is empty: an empty secret fails every "+
+				"upload with an auth error rather than at startup", cfg.Prices.Backup.SecretAccessKeyFile)
+		}
+	}
+	if err := cfg.Prices.Backup.Validate(cfg.Prices.DBPath); err != nil {
+		return cfg, err
 	}
 	if cfg.House.Timezone != "" {
 		if _, err := time.LoadLocation(cfg.House.Timezone); err != nil {

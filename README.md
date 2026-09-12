@@ -436,9 +436,9 @@ prices:
   than booting successfully and then being unable to price anything after the switchover.
 - The parent directory must exist and be writable by the service user. The file and SQLite's
   `-wal`/`-shm` companions are created mode 0600.
-- **Back it up.** It is rebuildable from the supplier today, and the entire reason to keep it
-  is the day that stops being true. Roughly 225 bytes a slot — measured at 7.8 MB for two
-  years of one tariff, so ~80 MB over twenty.
+- **Back it up** — `prices.backup`, below. It is rebuildable from the supplier today, and
+  the entire reason to keep it is the day that stops being true. Roughly 225 bytes a slot —
+  measured at 7.8 MB for two years of one tariff, so ~80 MB over twenty.
 
 No backfill step is needed: a first sync against an empty archive requests an unbounded range
 and so pulls the supplier's whole published history in one pass (measured: 34,894 slots in
@@ -457,6 +457,81 @@ Alert on `complete_to`. A publication routinely advances the horizon across a wh
 leaving that day two slots short, so `known_to` alone will tell you yes when the answer is no.
 `complete_to` at or behind now means today cannot be priced in full, and degrades the
 top-level `status`.
+
+### Backing up the archive
+
+The archive is the one thing countinghouse writes and the only state here that is not
+rebuildable from Influx, so it is the one thing that gets a backup rather than a
+retention policy. `prices.backup` sends it to Cloudflare R2 via `identity/common/backup`,
+on a schedule, using `VACUUM INTO` — a consistent snapshot, so a backup can run while the
+collector is writing.
+
+```yaml
+prices:
+  db_path: "/var/lib/countinghouse/prices.db"
+  backup:
+    env: "production"                 # the R2 key prefix: production | development
+    bucket: "countinghouse-sqlite"
+    account_id: "…"
+    access_key_id: "…"
+    secret_access_key_file: "/etc/countinghouse/r2-secret"
+    schedule: "daily"                 # daily | weekly (Sun) | monthly (1st) | off
+    hour: 3                           # UTC
+```
+
+Objects land at `{env}/backups/countinghouse/{YYYY}/{MM}/{DD}/countinghouse-{RFC3339}.sqlite3`,
+which is the layout `identity/common/backup` restores from.
+
+- **Omit the whole block to disable backups.** Correct for development and for any
+  deployment with no archive. **A partial block is refused at startup** — a backup that is
+  quietly not happening is worse than none, because you believe the archive is safe and
+  find out otherwise at the only moment it matters.
+- **`env` is required and is not defaulted.** It is the key prefix, and the restore tooling
+  matches the literals `production` and `development`. Defaulting it either way would file
+  one environment's backups under the other's prefix, where they exist and no restore looks
+  for them.
+- **The secret goes in a file.** `secret_access_key_file` is read only when the inline
+  `secret_access_key` is empty — the same pattern as `influx.token_file` — and a named file
+  that is missing or empty is a startup refusal rather than an auth error hours later. The
+  credential never appears in a log, an error or an HTTP response; errors bound for
+  `/healthz` are scrubbed of anything credential-shaped on the way out.
+- **One bucket per service**, so the R2 API token can be scoped to it: a leaked
+  countinghouse credential then cannot read or overwrite identity's backups.
+- **Bad credentials do not stop the service.** They cannot be detected until the first
+  upload, and an unreachable bucket should not take the cost API down with it. The failure
+  shows up on `/healthz` instead.
+- The snapshot is staged under `/tmp` and deleted after upload. The systemd unit sets
+  `PrivateTmp=true`, so that copy of the archive is the service's alone — worth preserving
+  if the hardening is ever revisited.
+- `deploy/bootstrap.sh` creates `/etc/countinghouse/r2-secret` (0640, `root:countinghouse`)
+  empty. The R2 token itself is minted in the Cloudflare dashboard; scope it to this bucket
+  alone.
+
+`/healthz` and `/metrics` gain a `backup` block — omitted entirely when none is configured,
+so a zeroed block never reads as a broken backup:
+
+```json
+"backup": {
+  "bucket": "countinghouse-sqlite", "env": "production",
+  "schedule": "daily", "hour": 3,
+  "last_attempt": "…", "last_success": "…",
+  "last_key": "production/backups/countinghouse/2026/09/12/countinghouse-….sqlite3",
+  "successes": 9, "failures": 0
+}
+```
+
+`last_attempt` moves on every run, `last_success` only on one that worked — so a lagging
+`last_success` means we are failing *now*, and `last_key` is how the newest backup is found
+without listing the bucket. Three states **degrade** the top-level status (never make it
+`unavailable`: nothing served depends on last night's upload):
+
+- a failure since the last success — what is in the bucket no longer covers what would be lost;
+- attempted and **never** succeeded, which is what a typo'd credential leaves behind. Not
+  reported before the first run, or every restart would look like a fault;
+- **stale** — no successful backup in 48 hours, with no error to show for it. A wedged
+  scheduler produces silence rather than a failure, so a verdict keyed only on the error
+  would call it healthy. Not applied when `schedule: off`, where an old backup is what was
+  asked for.
 
 ### The price endpoints
 

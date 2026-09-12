@@ -1362,6 +1362,67 @@ components:
         reconciliation:
           $ref: "#/components/schemas/Reconciliation"
 
+    BackupHealth:
+      type: object
+      description: >-
+        State of the price archive's offsite backup to Cloudflare R2. The archive is
+        the one thing countinghouse writes and the only state not rebuildable from
+        Influx, so whether it is actually backed up is reported rather than assumed.
+
+
+        Nothing here is a credential and nothing that is one may be added: /healthz is
+        built to be polled by anything. Bucket and env are locations; error text is
+        scrubbed of anything credential-shaped before it is served.
+      required: [bucket, env, successes, failures]
+      properties:
+        bucket:
+          type: string
+          description: R2 bucket the archive is uploaded to.
+          example: countinghouse-sqlite
+        env:
+          type: string
+          enum: [production, development]
+          description: >-
+            The R2 key prefix. Objects land at
+            `{env}/backups/countinghouse/{YYYY}/{MM}/{DD}/countinghouse-{RFC3339}.sqlite3`.
+        schedule:
+          type: string
+          enum: [daily, weekly, monthly, off]
+          description: >-
+            When scheduled backups run. `off` means on-demand only, and suppresses the
+            staleness verdict — an old backup is then what was asked for.
+        hour:
+          type: integer
+          description: UTC hour (0-23) scheduled backups run at. 0 is midnight, not unset.
+        last_attempt:
+          type: string
+          format: date-time
+          description: >-
+            Moves on every run, succeeded or not. Absent before the first run.
+        last_success:
+          type: string
+          format: date-time
+          description: >-
+            Moves only on a run that worked, so a last_success lagging behind
+            last_attempt means backups are failing NOW. Absent until one succeeds.
+        last_key:
+          type: string
+          description: >-
+            Object key of the most recent successful upload, so the newest backup can
+            be found without listing the bucket. Survives a later failure: the last
+            good backup is still the last good backup.
+          example: production/backups/countinghouse/2026/09/12/countinghouse-2026-09-12T03:00:00Z.sqlite3
+        last_error:
+          type: string
+          description: >-
+            Why the most recent run failed, scrubbed of anything credential-shaped.
+            Cleared by a success, so one bad night does not degrade the service
+            forever.
+        successes:
+          type: integer
+        failures:
+          type: integer
+
     MetricsResponse:
       type: object
       properties:
@@ -1384,6 +1445,21 @@ components:
           type: integer
         goroutines:
           type: integer
+        prices:
+          type: array
+          description: >-
+            Price-archive counters, one entry per half-hourly tariff being collected
+            (same shape as /healthz). Omitted when no collector runs, so a graph of
+            zeroes never implies an archive that exists and is doing nothing.
+          items:
+            $ref: "#/components/schemas/PriceHealth"
+        backup:
+          allOf:
+            - $ref: "#/components/schemas/BackupHealth"
+          description: >-
+            Offsite-backup state for the price archive; omitted when none is
+            configured. `successes`/`failures` are the counters to alert on — the
+            timestamps need a notion of "too old", which /healthz already applies.
 
     Series:
       type: object
@@ -1941,7 +2017,8 @@ components:
             Aggregated downstream verdict. ok = all downstreams healthy;
             degraded = serving last-known-good config because a remote-config
             fetch is failing (remote_config.*.ok = false), OR the price archive
-            cannot price today (see `prices`); unavailable = Influx is
+            cannot price today (see `prices`), OR the archive's offsite backup is
+            failing, has never succeeded, or is stale (see `backup`); unavailable = Influx is
             unreachable (data routes will 502). The HTTP status is 200 in all
             three cases — /healthz reports health, it does not itself fail.
             On a running instance, degraded always means STALE and never EMPTY: a
@@ -1993,6 +2070,14 @@ components:
             as no archive.
           items:
             $ref: "#/components/schemas/PriceHealth"
+        backup:
+          allOf:
+            - $ref: "#/components/schemas/BackupHealth"
+          description: >-
+            Offsite-backup state for the price archive. OMITTED ENTIRELY when no
+            backup is configured, which is the normal state in development and on
+            any deployment with no archive — a zeroed block would read as a broken
+            backup rather than as no backup.
         remote_config:
           type: object
           description: >-
