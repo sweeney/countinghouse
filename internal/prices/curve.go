@@ -365,6 +365,14 @@ func (c Curve) DailyStats(loc *time.Location) []DayStats {
 //
 // False means NO PRICE IS HELD for that half hour, which a caller must surface as
 // unpriced energy. Returning zero would charge nothing for real consumption.
+// RateInterval reports the half-hour slot grid, satisfying energy.Granularity.
+//
+// This is what tells the series layer that a bucket coarser than a half hour cannot
+// be priced at the rate holding at its start — which is the difference between a
+// monthly chart's cost agreeing with the monthly bill and being out by tens of
+// percent.
+func (c Curve) RateInterval() time.Duration { return SlotLength }
+
 func (c Curve) RateAt(t time.Time) (float64, bool) {
 	for _, s := range c.Slots {
 		if s.Covers(t) {

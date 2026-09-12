@@ -59,6 +59,42 @@ func (f FlatPricer) RateAt(time.Time) (float64, bool) {
 	return f.RatePerKWh, true
 }
 
+// Granularity is implemented by a Pricer whose rate can change WITHIN a window,
+// reporting the finest interval at which it changes.
+//
+// It exists so the series layer can tell when the bucket axis a caller asked for is
+// COARSER than the price grid. Pricing a bucket at the rate holding at its start
+// instant is exact when the two line up and silently wrong otherwise: a 1-day bucket
+// priced at its 00:00 slot charges the whole day at the overnight rate. Measured on
+// a real recorded day that is +43.6%; on a typical cheap-night/dear-evening day it is
+// a large understatement.
+//
+// Optional on purpose. A Pricer that does not implement it, or reports 0, is treated
+// as constant over any window — which is what keeps a flat deployment querying one
+// bucket a day instead of forty-eight.
+type Granularity interface {
+	RateInterval() time.Duration
+}
+
+// RateInterval implements Granularity: one rate for all time never varies within a
+// bucket, however coarse.
+func (FlatPricer) RateInterval() time.Duration { return 0 }
+
+// UnpricedSlots is a Pricer for a half-hourly stretch whose prices are NOT held.
+//
+// It reports unknown for every instant, like a nil pricer, but unlike nil it still
+// declares half-hourly granularity — so a window it covers is costed on the slot grid
+// and the energy inside it is attributed to unpriced_kwh at slot resolution. With a
+// nil pricer the whole coarse bucket would be judged by its first instant, making a
+// partly-held day look either wholly priced or wholly missing.
+type UnpricedSlots struct{}
+
+// RateAt implements Pricer: nothing is known, ever.
+func (UnpricedSlots) RateAt(time.Time) (float64, bool) { return 0, false }
+
+// RateInterval implements Granularity.
+func (UnpricedSlots) RateInterval() time.Duration { return 30 * time.Minute }
+
 // PricedSegment is one sub-range of a window with its own pricer.
 // Start is inclusive, Stop exclusive.
 type PricedSegment struct {
@@ -90,6 +126,23 @@ func (s SegmentedPricer) RateAt(t time.Time) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// RateInterval implements Granularity, reporting the FINEST interval any segment
+// varies at. A window with one flat stretch and one half-hourly stretch has to be
+// costed on the finer grid, or the half-hourly part is priced by its first instant.
+func (s SegmentedPricer) RateInterval() time.Duration {
+	var finest time.Duration
+	for _, seg := range s.Segments {
+		g, ok := seg.Pricer.(Granularity)
+		if !ok {
+			continue
+		}
+		if d := g.RateInterval(); d > 0 && (finest == 0 || d < finest) {
+			finest = d
+		}
+	}
+	return finest
 }
 
 func (s SegmentedPricer) sorted() []PricedSegment {

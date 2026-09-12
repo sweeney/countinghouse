@@ -82,6 +82,10 @@ type slotRates struct {
 	rates []*float64
 }
 
+// RateInterval declares the half-hour grid, satisfying Granularity — so a test
+// using this fixture exercises the same cost-axis choice production does.
+func (s slotRates) RateInterval() time.Duration { return 30 * time.Minute }
+
 func (s slotRates) RateAt(t time.Time) (float64, bool) {
 	if t.Before(s.start) {
 		return 0, false

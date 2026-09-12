@@ -717,6 +717,30 @@ bill cannot disagree about what a window cost. Totals accumulate at full precisi
 round once — summing per-bucket costs already rounded for the wire drifts a month's
 half-hourly bill by several pence.
 
+Sharing that function is necessary but not sufficient, because **`/series` buckets are
+usually coarser than the price grid**: the default interval is `1h` for `window=today`
+and `1d` for `week`/`month`, while there are 48 prices a day. So when the tariff is
+half-hourly, the money is computed on the **30-minute grid regardless of the requested
+interval** and the costs are then folded up into the display buckets:
+
+```
+  requested 1d  ─────────────────────────────────────────────▶  1 display bucket
+  costed on     ┌──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┐
+                │  │  │  │  │  │  │  │  │  │  │  │  │  │  │  │  48 × 30m, each at
+                └──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┘  its own rate
+                                   │
+                                   └─▶ summed into cost[0], exact
+```
+
+`kwh[]` keeps the resolution the caller asked for and `cost[]` is exact, so `/series`
+agrees with `/bill` **by construction** rather than at one particular interval. Pricing
+a coarse bucket at the rate holding at its start instant measured **+43.6%** on a real
+recorded day and understates badly on a typical cheap-night/dear-evening one.
+Approximating instead — spreading a bucket's energy evenly over its slots — is exact
+for a fridge and badly wrong for a dishwasher, which is the load the tariff exists to
+shift. A **flat** tariff skips all of this: the price cannot change inside a bucket, so
+a monthly chart stays one query per day.
+
 ## Run locally
 
 ```sh

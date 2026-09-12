@@ -102,6 +102,12 @@ type Series struct {
 	// at zero, because charging nothing for real consumption is the quiet way a
 	// bill comes out wrong. Omitted when zero, which is the normal case.
 	UnpricedKWh float64 `json:"unpriced_kwh,omitempty"`
+
+	// rawKWh and rawCost are the per-bucket values at FULL precision, kept only so a
+	// series computed on the half-hourly cost grid can be folded onto a coarser
+	// display axis without summing values already rounded for the wire. Unexported,
+	// so they never reach JSON; nil on a series that was never folded.
+	rawKWh, rawCost []float64
 }
 
 // SeriesResponse is the columnar ("wide") time-series payload (PLAN §A): a single
@@ -743,6 +749,7 @@ func deriveUnmonitored(buckets []time.Time, bucketHours []float64, monitored *Se
 	s.TotalKWh = round.To(s.TotalKWh, round.KWhDP)
 	s.TotalCost = round.To(cost, round.MoneyDP)
 	s.UnpricedKWh = round.To(unpriced, round.KWhDP)
+	s.rawKWh, s.rawCost = raw, rawCosts(buckets, raw, pricer)
 	return s
 }
 
@@ -952,7 +959,24 @@ func buildSeries(key, label, place, class string, buckets []time.Time, energy, p
 	s.TotalKWh = round.To(s.TotalKWh, round.KWhDP)
 	s.TotalCost = round.To(cost, round.MoneyDP)
 	s.UnpricedKWh = round.To(unpriced, round.KWhDP)
+	s.rawKWh, s.rawCost = raw, rawCosts(buckets, raw, pricer)
 	return s
+}
+
+// rawCosts is the per-bucket cost at full precision, for folding onto a coarser
+// display axis. Same rule as CostBuckets: a bucket with no known rate contributes no
+// cost, and its energy is the caller's unpriced total rather than a free ride.
+func rawCosts(buckets []time.Time, kwh []float64, pricer Pricer) []float64 {
+	out := make([]float64, len(buckets))
+	for i := range buckets {
+		if i >= len(kwh) || kwh[i] == 0 {
+			continue
+		}
+		if rate, known := pricer.RateAt(buckets[i]); known {
+			out[i] = kwh[i] * rate
+		}
+	}
+	return out
 }
 
 // isMetered reports whether a class participates in energy series at all (any
@@ -1066,6 +1090,16 @@ func BuildSeries(
 	if loc == nil {
 		loc = time.UTC
 	}
+
+	// The DISPLAY axis is what the caller asked for; the COST axis is what the money
+	// has to be computed on. They differ only when the price varies faster than the
+	// requested bucket — see costAxisFor. Everything below runs on the cost axis, and
+	// the series are folded back onto the display axis at the end, so a slot-priced
+	// monthly chart costs the same as the monthly bill.
+	display := iv
+	iv = costAxisFor(display, pricer)
+	displayBuckets := BucketStarts(win, display, loc)
+
 	buckets := BucketStarts(win, iv, loc)
 	idx := bucketIndex(buckets)
 	hrs := bucketHours(buckets, win.Start, win.Stop)
@@ -1158,14 +1192,23 @@ func BuildSeries(
 		series = []Series{}
 	}
 
+	// Fold back onto the axis the caller asked for. The window totals were computed
+	// on the fine axis and are carried across exactly; only the per-bucket arrays are
+	// aggregated.
+	outBuckets := buckets
+	if iv.Token != display.Token {
+		series = foldAll(series, buckets, displayBuckets, hrs)
+		outBuckets = displayBuckets
+	}
+
 	resp := SeriesResponse{
 		Window:   win.Label,
 		From:     win.Start.In(loc).Format(time.RFC3339),
 		To:       win.Stop.In(loc).Format(time.RFC3339),
-		Interval: iv.Token,
+		Interval: display.Token,
 		GroupBy:  resolveGroupBy(groupBy),
 		Shape:    ShapeColumns,
-		Buckets:  buckets,
+		Buckets:  outBuckets,
 		Series:   series,
 	}
 	// Coverage + staleness are house-only confidence signals (C12/C13).
@@ -1379,4 +1422,122 @@ func resolveBucket(t time.Time, idx map[int64]int, starts []int64) int {
 		return -1
 	}
 	return idx[starts[lo-1]]
+}
+
+// ---------------------------------------------------------------------------
+// Folding a fine cost axis onto a coarse display axis.
+//
+// A half-hourly tariff has 48 prices a day; /series asks for 1h buckets on
+// window=today and 1d on week/month. Pricing a bucket at the rate holding at its
+// START instant is exact when the axes line up and silently wrong otherwise — a 1d
+// bucket charges the whole day at its 00:00 rate, which measured +43.6% on a real
+// recorded day and understates badly on a typical cheap-night/dear-evening one.
+//
+// Approximating instead — spreading a coarse bucket's energy evenly across its slots
+// — would be exact for a fridge and badly wrong for a dishwasher, which is precisely
+// the load this tariff exists to shift. So the energy is QUERIED at slot resolution,
+// costed there, and only then folded up for display: kwh[] keeps the resolution the
+// caller asked for, cost[] is exact, and /series agrees with /bill by construction
+// rather than at one particular interval.
+// ---------------------------------------------------------------------------
+
+// costAxisFor returns the interval a window's MONEY must be computed on, given the
+// display interval the caller asked for and the pricer in force.
+//
+// Equal to the display interval unless the pricer varies faster than it — so a flat
+// tariff keeps querying one bucket a day for a monthly chart, and only a slot-priced
+// window pays for the finer query.
+func costAxisFor(display Interval, pricer Pricer) Interval {
+	g, ok := pricer.(Granularity)
+	if !ok {
+		return display
+	}
+	ri := g.RateInterval()
+	if ri <= 0 || display.Duration <= ri {
+		return display
+	}
+	return CostingInterval()
+}
+
+// foldIndex maps each fine bucket to the display bucket containing it.
+//
+// Containment by timestamp rather than a fixed ratio, because a local calendar day is
+// 46, 48 or 50 half hours across a DST changeover — a ratio would misalign every
+// bucket after the transition, which is the one day of the year nobody checks.
+func foldIndex(fine, display []time.Time) []int {
+	out := make([]int, len(fine))
+	j := 0
+	for i, f := range fine {
+		// Advance while the NEXT display bucket still starts at or before this fine
+		// bucket. Fine buckets before the first display bucket fold into it.
+		for j+1 < len(display) && !display[j+1].After(f) {
+			j++
+		}
+		out[i] = j
+	}
+	return out
+}
+
+// foldSeries aggregates one series from the fine cost axis onto the display axis.
+//
+// Energy and money sum from the FULL-PRECISION carriers and are rounded once per
+// display bucket; summing the already-rounded wire values would reintroduce, per
+// bucket, the drift this file fixes at the window level. Average watts is an
+// hours-weighted mean, because summing watts over a day is not a wattage.
+//
+// The window totals are carried across untouched: they were computed on the fine axis
+// and are already exact, so folding must not recompute and cannot improve them.
+func foldSeries(s Series, fine, display []time.Time, fineHours []float64, at []int) Series {
+	n := len(display)
+	out := s
+	out.KWh = make([]float64, n)
+	out.Cost = make([]float64, n)
+	out.AvgW = make([]float64, n)
+
+	kwh := make([]float64, n)
+	cost := make([]float64, n)
+	wh := make([]float64, n) // watt-hours, for the weighted mean
+	hours := make([]float64, n)
+
+	for i := range fine {
+		j := at[i]
+		if j >= n {
+			continue
+		}
+		if s.rawKWh != nil && i < len(s.rawKWh) {
+			kwh[j] += s.rawKWh[i]
+		} else if i < len(s.KWh) {
+			kwh[j] += s.KWh[i]
+		}
+		if s.rawCost != nil && i < len(s.rawCost) {
+			cost[j] += s.rawCost[i]
+		} else if i < len(s.Cost) {
+			cost[j] += s.Cost[i]
+		}
+		if i < len(s.AvgW) && i < len(fineHours) {
+			wh[j] += s.AvgW[i] * fineHours[i]
+			hours[j] += fineHours[i]
+		}
+	}
+
+	for j := 0; j < n; j++ {
+		out.KWh[j] = round.To(kwh[j], round.KWhDP)
+		out.Cost[j] = round.To(cost[j], round.MoneyDP)
+		if hours[j] > 0 {
+			out.AvgW[j] = round.To(wh[j]/hours[j], round.WDP)
+		}
+	}
+	// The carriers describe the fine axis and are meaningless once folded.
+	out.rawKWh, out.rawCost = nil, nil
+	return out
+}
+
+// foldAll folds every series in a response onto the display axis.
+func foldAll(series []Series, fine, display []time.Time, fineHours []float64) []Series {
+	at := foldIndex(fine, display)
+	out := make([]Series, len(series))
+	for i, s := range series {
+		out[i] = foldSeries(s, fine, display, fineHours, at)
+	}
+	return out
 }

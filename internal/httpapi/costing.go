@@ -100,6 +100,13 @@ func (s *Server) planFor(ctx context.Context, from, to time.Time) (tariffPlan, e
 			// No archive on this instance: leave the segment unpriced rather than
 			// refusing the whole window. A flat segment either side still bills, and
 			// the gap is reported rather than charged at nothing.
+			//
+			// UnpricedSlots rather than a nil pricer, because it still DECLARES the
+			// half-hour grid. With nil, a coarse display bucket would be judged by its
+			// first instant and a partly-held day would read as wholly priced or
+			// wholly missing; with this, the energy lands in unpriced_kwh at slot
+			// resolution.
+			ps.Pricer = energy.UnpricedSlots{}
 			priced = append(priced, ps)
 			continue
 		}
