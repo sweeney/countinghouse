@@ -462,9 +462,8 @@ top-level `status`.
 
 The archive is the one thing countinghouse writes and the only state here that is not
 rebuildable from Influx, so it is the one thing that gets a backup rather than a
-retention policy. `prices.backup` sends it to Cloudflare R2 via `identity/common/backup`,
-on a schedule, using `VACUUM INTO` — a consistent snapshot, so a backup can run while the
-collector is writing.
+retention policy. `prices.backup` sends it to Cloudflare R2 on a schedule, snapshotting with
+`VACUUM INTO` so a backup can run while the collector is writing.
 
 ```yaml
 prices:
@@ -500,9 +499,19 @@ which is the layout `identity/common/backup` restores from.
 - **Bad credentials do not stop the service.** They cannot be detected until the first
   upload, and an unreachable bucket should not take the cost API down with it. The failure
   shows up on `/healthz` instead.
-- The snapshot is staged under `/tmp` and deleted after upload. The systemd unit sets
-  `PrivateTmp=true`, so that copy of the archive is the service's alone — worth preserving
-  if the hardening is ever revisited.
+- The snapshot is staged under `/tmp` (mode 0600) and deleted after upload. The systemd
+  unit sets `PrivateTmp=true`, so that copy of the archive is the service's alone — worth
+  preserving if the hardening is ever revisited.
+- **Why this does not use `common/backup`'s scheduler.** It uses that package's R2 client
+  but takes its own snapshot, because `Manager` in `common@v0.3.0` copies the database
+  with `os.ReadFile` + `os.WriteFile`. The archive is WAL-mode, so that copies the main
+  file with `-wal` ignored — and on a fresh archive the *schema* is still in the WAL, so
+  the result is a database with no tables in it at all. Measured: a plain file copy of a
+  200-slot archive is unreadable. `VACUUM INTO` is one statement, is pure SQL (the
+  CGO-free build survives), and produces a complete self-contained database. The fix
+  belongs upstream, where it would also cover identity and config; until it ships, the
+  guarantee is kept here. Object keys are byte-identical to `common/backup`'s layout, so
+  its restore tooling still finds them.
 - `deploy/bootstrap.sh` creates `/etc/countinghouse/r2-secret` (0640, `root:countinghouse`)
   empty. The R2 token itself is minted in the Cloudflare dashboard; scope it to this bucket
   alone.

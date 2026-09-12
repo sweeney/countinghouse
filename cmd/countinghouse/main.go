@@ -135,7 +135,7 @@ func main() {
 	// Offsite backup of the archive, started before the server so /healthz reports a
 	// real state from the first request rather than a nil provider for a moment.
 	// Nil when unconfigured, which omits the block entirely.
-	backups := startBackups(ctx, cfg, logger)
+	backups := startBackups(ctx, cfg, testutil.RealClock{}, logger)
 
 	server := &httpapi.Server{
 		Listen:       cfg.HTTP.Listen,

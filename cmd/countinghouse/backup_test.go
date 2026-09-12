@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
+	"github.com/sweeney/countinghouse/internal/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -163,7 +164,7 @@ func TestStartBackupsUnconfiguredReturnsNil(t *testing.T) {
 	cfg.Prices.DBPath = "/tmp/prices.db"
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	if p := startBackups(t.Context(), cfg, logger); p != nil {
+	if p := startBackups(t.Context(), cfg, testutil.NewFakeClock(time.Now()), logger); p != nil {
 		t.Errorf("an unconfigured deployment got a provider: %+v", p)
 	}
 }
@@ -182,7 +183,7 @@ func TestStartBackupsConfiguredReportsItsDestination(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	p := startBackups(t.Context(), cfg, logger)
+	p := startBackups(t.Context(), cfg, testutil.NewFakeClock(time.Now()), logger)
 	if p == nil {
 		t.Fatal("a configured deployment got no provider")
 	}
