@@ -33,19 +33,32 @@ import (
 //
 // WHY THIS DOES NOT USE backup.Manager
 //
-// It uses `backup.R2Uploader` (the S3-compatible client) but owns the snapshot and the
-// schedule, because `Manager` in common@v0.3.0 copies the database with `os.ReadFile` +
-// `os.WriteFile`. The archive is WAL-mode, so that uploads the main file with `-wal`
-// ignored: the database as of the last checkpoint, staleness unbounded on a quiet
-// archive that never reaches the 1000-page auto-checkpoint, and a torn image if a
-// checkpoint runs during the read.
+// Originally: because `Manager` in common@v0.3.0 copied the database with `os.ReadFile`
+// + `os.WriteFile`, and the archive is WAL-mode, so that uploaded the main file with
+// `-wal` ignored — at best the database as of the last checkpoint, and on a fresh
+// archive a file with no schema in it at all.
 //
-// `VACUUM INTO` fixes it in one statement and belongs upstream, where it would also fix
-// identity and config. Until that is released this file keeps the guarantee locally
-// rather than shipping a README sentence the code does not honour. When `common` gains
-// `VACUUM INTO` plus a status snapshot and an injected clock, most of this collapses
-// back onto `Manager` — and the key layout below is deliberately identical so those
-// objects stay restorable by its tooling either way.
+// **That is fixed upstream.** common/v0.4.0 replaced copyDB with `VACUUM INTO`, and this
+// repo is now on v0.5.0, so `Manager` would take a consistent snapshot today. The
+// snapshot is no longer the reason.
+//
+// What remains the reason is smaller and still real:
+//
+//   - `Manager` reports outcomes through a fire-and-forget callback and keeps `lastRun`
+//     private, so a consumer cannot ask it what happened. /healthz needs exactly that.
+//   - `Manager` calls time.Now directly, so its schedule cannot be tested from a
+//     consumer — which is why daily/weekly/monthly and the next-run arithmetic are
+//     verified here against an injected clock instead of by waiting a day.
+//   - `NewManager` treats `ScheduleHour == 0` as unset and silently runs at 03:00, so an
+//     operator who writes `hour: 0` meaning midnight gets neither that nor a complaint.
+//     This is the absent-vs-zero discipline the rest of the branch applies.
+//
+// snapshotDB below is therefore now belt-and-braces rather than load-bearing: it does
+// the same `VACUUM INTO` the library does, and keeping it means the guarantee does not
+// silently depend on which version of common is pinned. The key layout is deliberately
+// identical to `common/backup`'s so these objects stay restorable by its tooling.
+//
+// Tracked upstream for the three points above: sweeney/identity#45.
 // ---------------------------------------------------------------------------
 
 // uploader is the one thing this needs from the R2 client, narrowed so the schedule and

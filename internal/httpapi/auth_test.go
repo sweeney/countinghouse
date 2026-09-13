@@ -41,6 +41,11 @@ func fakeJWKSServer(t *testing.T, pub *ecdsa.PublicKey, kid string) *httptest.Se
 			http.NotFound(w, r)
 			return
 		}
+		// The real identity server sends application/json, and common/auth checks it
+		// (WP7) rather than parsing whatever arrives. A fake that omits the header
+		// makes an upgrade look like a breaking auth change when it is the fake that
+		// was lying — which is exactly what happened on the v0.3.0 → v0.5.0 bump.
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"keys": []map[string]any{{
 				"kty": "EC", "use": "sig", "alg": "ES256",

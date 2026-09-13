@@ -5,8 +5,9 @@ go 1.25.0
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
-	github.com/sweeney/identity/common v0.3.0
+	github.com/sweeney/identity/common v0.5.0
 	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.46.2
 )
 
 require (
@@ -43,5 +44,4 @@ require (
 	modernc.org/libc v1.70.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.46.2 // indirect
 )

@@ -539,16 +539,16 @@ which is the layout `identity/common/backup` restores from.
 - The snapshot is staged under `/tmp` (mode 0600) and deleted after upload. The systemd
   unit sets `PrivateTmp=true`, so that copy of the archive is the service's alone — worth
   preserving if the hardening is ever revisited.
-- **Why this does not use `common/backup`'s scheduler.** It uses that package's R2 client
-  but takes its own snapshot, because `Manager` in `common@v0.3.0` copies the database
-  with `os.ReadFile` + `os.WriteFile`. The archive is WAL-mode, so that copies the main
-  file with `-wal` ignored — and on a fresh archive the *schema* is still in the WAL, so
-  the result is a database with no tables in it at all. Measured: a plain file copy of a
-  200-slot archive is unreadable. `VACUUM INTO` is one statement, is pure SQL (the
-  CGO-free build survives), and produces a complete self-contained database. The fix
-  belongs upstream, where it would also cover identity and config; until it ships, the
-  guarantee is kept here. Object keys are byte-identical to `common/backup`'s layout, so
-  its restore tooling still finds them.
+- **Why this does not use `common/backup`'s scheduler.** The original reason — that
+  `Manager` copied a WAL-mode database with `os.ReadFile`, yielding on a fresh archive a
+  file with no schema in it at all — **is fixed upstream**: `common/v0.4.0` switched to
+  `VACUUM INTO`, and this repo is on v0.5.0. What remains is smaller: `Manager` reports
+  through a fire-and-forget callback so a consumer cannot ask it what happened (which
+  `/healthz` needs), it calls `time.Now` directly so its schedule cannot be tested from a
+  consumer, and it reads `ScheduleHour == 0` as unset and silently runs at 03:00. Tracked
+  as sweeney/identity#45. The local `VACUUM INTO` stays as belt-and-braces so the
+  guarantee does not depend on which version of `common` is pinned, and object keys are
+  byte-identical to `common/backup`'s layout so its restore tooling still finds them.
 - `deploy/bootstrap.sh` creates `/etc/countinghouse/r2-secret` (0640, `root:countinghouse`)
   empty. The R2 token itself is minted in the Cloudflare dashboard; scope it to this bucket
   alone.
