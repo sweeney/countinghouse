@@ -758,6 +758,24 @@ Two fields exist because a cost on its own is not interpretable:
   incomplete. Charging nothing for real energy is the silent failure this path exists to
   prevent: a visible gap beats a plausible total.
 
+All four price routes carry an `ETag` and honour `If-None-Match`, answering `304` when
+nothing that determines the answer has moved — the tariff, the window truncated to the
+slot grid, and the prices themselves. Not `generated_at`, which changes every request:
+hashing the rendered body meant the 304 could never fire and a dashboard re-downloaded
+every slot on every poll.
+
+`/prices` and `/prices/stats` **refuse a window spanning a tariff change** (400, naming
+the boundary). A curve belongs to one tariff, and answering about only the first half is
+what `/bill` — which does segment, because a cost can be summed across tariffs where a
+curve cannot — would then contradict. They also cap the window: 31 days for `/prices`
+(a row per half hour) and 366 for `/prices/stats` (a row per day).
+
+`/prices/stats` emits **both VAT bases**: the unsuffixed keys stay ex-VAT and
+`*_inc_vat` siblings match the other price routes.
+
+`/healthz` carries a `reasons` array naming every failing condition, sorted and omitted
+when healthy.
+
 `/series` and `/bill` price buckets through **one** shared function, so a chart and a
 bill cannot disagree about what a window cost. Totals accumulate at full precision and
 round once — summing per-bucket costs already rounded for the wire drifts a month's

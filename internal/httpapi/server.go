@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -235,34 +236,66 @@ func New(listen string, querier influx.Querier, logger *slog.Logger) *Server {
 // Centralising route registration here means tests always exercise the same
 // routes as the running server. Only the public routes exist now; data routes
 // are registered (wrapped by the auth middleware) in a later milestone.
+// route is one HTTP route: the pattern it registers under and the handler it reaches.
+//
+// A DECLARED TABLE rather than a list of mux calls, because the spec-parity test needs
+// the same information and every other way of giving it two sources has failed. The
+// original version compared a hand-maintained slice against openapi.yaml and never
+// against the mux, which is how four /prices routes reached a green build undocumented.
+// The replacement regex-parsed server.go, which could not see a route registered in any
+// other file — the same blind spot one step along.
+//
+// newMux ranges over these to register, and spec_test ranges over them to compare. A
+// route absent from the table does not exist at runtime either, so there is nothing left
+// that can silently diverge. It also disposes of the "net/http offers no way to enumerate
+// a ServeMux's patterns" constraint rather than working around it.
+type route struct {
+	pattern string
+	handler func(*Server) http.HandlerFunc
+}
+
+// publicRoutes need no token: liveness and the spec itself.
+var publicRoutes = []route{
+	{"/healthz", func(s *Server) http.HandlerFunc { return s.handleHealth }},
+	{"/openapi.json", func(s *Server) http.HandlerFunc { return s.handleOpenAPIJSON }},
+}
+
+// dataRoutes are wrapped by the auth middleware.
+var dataRoutes = []route{
+	{"GET /devices", func(s *Server) http.HandlerFunc { return s.handleDevices }},
+	{"GET /floors", func(s *Server) http.HandlerFunc { return s.handleFloors }},
+	{"GET /rooms", func(s *Server) http.HandlerFunc { return s.handleRooms }},
+	{"GET /devices/{id}/energy", func(s *Server) http.HandlerFunc { return s.handleDeviceEnergy }},
+	{"GET /devices/{id}/cost", func(s *Server) http.HandlerFunc { return s.handleDeviceCost }},
+	{"GET /devices/{id}/series", func(s *Server) http.HandlerFunc { return s.handleDeviceSeries }},
+	{"GET /devices/{id}/events", func(s *Server) http.HandlerFunc { return s.handleDeviceEvents }},
+	{"GET /devices/{id}/intervals", func(s *Server) http.HandlerFunc { return s.handleDeviceIntervals }},
+	{"GET /events", func(s *Server) http.HandlerFunc { return s.handleEvents }},
+	{"GET /series", func(s *Server) http.HandlerFunc { return s.handleSeries }},
+	{"GET /bill", func(s *Server) http.HandlerFunc { return s.handleBill }},
+	{"GET /tariffs", func(s *Server) http.HandlerFunc { return s.handleTariffs }},
+	{"GET /prices", func(s *Server) http.HandlerFunc { return s.handlePrices }},
+	{"GET /prices/upcoming", func(s *Server) http.HandlerFunc { return s.handleUpcomingPrices }},
+	{"GET /prices/cheapest", func(s *Server) http.HandlerFunc { return s.handleCheapestPrice }},
+	{"GET /prices/stats", func(s *Server) http.HandlerFunc { return s.handlePriceStats }},
+	{"GET /metrics", func(s *Server) http.HandlerFunc { return s.handleMetrics }},
+}
+
 func newMux(s *Server) *http.ServeMux {
 	s.specConverter = buildSpecConverter(s.PublicURL)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/openapi.json", s.handleOpenAPIJSON)
+	for _, rt := range publicRoutes {
+		mux.HandleFunc(rt.pattern, rt.handler(s))
+	}
 
-	// auth wraps every data route: a valid Bearer JWT (user OR service token)
-	// is required when IdentityURL is set, and it is a no-op otherwise (dev/
-	// tests). Building it here also wires s.verifier.
+	// auth wraps every data route: a valid Bearer JWT (user OR service token) is required
+	// when IdentityURL is set, and it is a no-op otherwise (dev/tests). Building it here
+	// also wires s.verifier.
 	auth := s.authMiddleware()
-	mux.Handle("GET /devices", auth(http.HandlerFunc(s.handleDevices)))
-	mux.Handle("GET /floors", auth(http.HandlerFunc(s.handleFloors)))
-	mux.Handle("GET /rooms", auth(http.HandlerFunc(s.handleRooms)))
-	mux.Handle("GET /devices/{id}/energy", auth(http.HandlerFunc(s.handleDeviceEnergy)))
-	mux.Handle("GET /devices/{id}/cost", auth(http.HandlerFunc(s.handleDeviceCost)))
-	mux.Handle("GET /devices/{id}/series", auth(http.HandlerFunc(s.handleDeviceSeries)))
-	mux.Handle("GET /devices/{id}/events", auth(http.HandlerFunc(s.handleDeviceEvents)))
-	mux.Handle("GET /devices/{id}/intervals", auth(http.HandlerFunc(s.handleDeviceIntervals)))
-	mux.Handle("GET /events", auth(http.HandlerFunc(s.handleEvents)))
-	mux.Handle("GET /series", auth(http.HandlerFunc(s.handleSeries)))
-	mux.Handle("GET /bill", auth(http.HandlerFunc(s.handleBill)))
-	mux.Handle("GET /tariffs", auth(http.HandlerFunc(s.handleTariffs)))
-	mux.Handle("GET /prices", auth(http.HandlerFunc(s.handlePrices)))
-	mux.Handle("GET /prices/upcoming", auth(http.HandlerFunc(s.handleUpcomingPrices)))
-	mux.Handle("GET /prices/cheapest", auth(http.HandlerFunc(s.handleCheapestPrice)))
-	mux.Handle("GET /prices/stats", auth(http.HandlerFunc(s.handlePriceStats)))
-	mux.Handle("GET /metrics", auth(http.HandlerFunc(s.handleMetrics)))
+	for _, rt := range dataRoutes {
+		mux.Handle(rt.pattern, auth(http.HandlerFunc(rt.handler(s))))
+	}
 	return mux
 }
 
@@ -333,6 +366,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		RemoteConfig    map[string]config.NamespaceStatus `json:"remote_config,omitempty"`
 		Prices          []PriceHealth                     `json:"prices,omitempty"`
 		Backup          *BackupHealth                     `json:"backup,omitempty"`
+
+		// Reasons says WHY the status is not ok, in the words the verdict functions
+		// already produce. Both verdicts computed a reason and both callers threw it
+		// away, so an operator saw "degraded" and had to go and work out which of four
+		// conditions caused it — with the answer sitting in a discarded return value.
+		// Omitted when everything is fine.
+		Reasons []string `json:"reasons,omitempty"`
 	}
 	h := health{
 		Version:    s.Version,
@@ -371,25 +411,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if s.Influx != nil && !h.InfluxReachable {
 		h.Status = "unavailable"
 	} else {
-		for _, ns := range h.RemoteConfig {
+		for name, ns := range h.RemoteConfig {
 			if !ns.OK {
 				h.Status = "degraded"
-				break
+				h.Reasons = append(h.Reasons, "remote config namespace "+name+" is stale")
 			}
 		}
+		// Sorted, because ranging a map put the reasons in a different order on every
+		// request — the same diff-hostility rejectionReasons had.
+		sort.Strings(h.Reasons)
 		// A price problem degrades on the same reasoning as a config namespace: the
 		// archive still holds what it held, so historical windows still price, but
 		// we are either not keeping up or cannot price TODAY — and the top-level
 		// status is what a monitor actually watches.
-		if degraded, _ := priceVerdict(h.Prices, s.clock().Now()); degraded {
+		if degraded, reason := priceVerdict(h.Prices, s.clock().Now()); degraded {
 			h.Status = "degraded"
+			h.Reasons = append(h.Reasons, reason)
 		}
 		// And the same reasoning for the backup: nothing served depends on last
 		// night's upload, so this cannot be "unavailable" — but the archive is the
 		// one thing here that is not rebuildable from Influx, and an unprotected
 		// archive that reports "ok" is the failure worth catching.
-		if degraded, _ := backupVerdict(h.Backup, s.clock().Now()); degraded {
+		if degraded, reason := backupVerdict(h.Backup, s.clock().Now()); degraded {
 			h.Status = "degraded"
+			h.Reasons = append(h.Reasons, reason)
 		}
 	}
 

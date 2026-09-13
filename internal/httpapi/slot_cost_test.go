@@ -58,7 +58,9 @@ func scRates(t *testing.T) []float64 {
 	t.Helper()
 	raw, err := os.ReadFile("../octopus/testdata/unit_rates_mixed_sign_day.json")
 	if err != nil {
-		t.Skipf("price fixture unavailable: %v", err)
+		// Fatalf, not Skipf: a committed fixture that cannot be read is a bug, and a
+		// skip would delete this whole suite from CI without anything going red.
+		t.Fatalf("committed price fixture is unreadable: %v", err)
 	}
 	var doc struct {
 		Results []struct {
@@ -707,5 +709,77 @@ func TestNoAgreementsAtAllStillRefuses(t *testing.T) {
 	}
 	if w := doGET(t, s, "/bill?window=today"); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("/bill want 503, got %d", w.Code)
+	}
+}
+
+// /prices and /prices/stats must not describe a switchover-spanning window by its first
+// instant. They resolved the tariff at win.Start only, so such a window answered
+// `half_hourly: false` with a flat price and no slots — while /bill over the identical
+// window priced the later part per slot. Two endpoints calling the same window two
+// different kinds of tariff.
+func TestPriceCurveRefusesAWindowSpanningASwitchover(t *testing.T) {
+	buckets := scBuckets(t)
+	const switchAt = 14
+	fixedFrom := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	boundary := buckets[switchAt].UTC()
+
+	s := scServer(t, buckets)
+	s.Config = scConfig{
+		devices: testDevices(),
+		agreements: config.EnergyAgreements{Agreements: map[string][]config.Agreement{
+			"electricity": {
+				{From: &fixedFrom, To: &boundary, Name: "Fixed", Type: config.TariffTypeFixed,
+					Unit: "kWh", VATRate: 0.05, UnitRate: 0.2089, DailyStandingCharge: 0.5294},
+				{From: &boundary, Name: "Agile", Type: config.TariffTypeVariable,
+					ID: pxTariff, Unit: "kWh", VATRate: 0.05, DailyStandingCharge: 0.591606},
+			},
+		}},
+	}
+
+	for _, path := range []string{"/prices?window=today", "/prices/stats?window=today"} {
+		w := doGET(t, s, path)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400 — a curve belongs to one tariff, and answering "+
+				"about the first half silently is what /bill contradicts: %s",
+				path, w.Code, w.Body.String())
+			continue
+		}
+		// The message must name the boundary, or the caller cannot act on it.
+		if !strings.Contains(w.Body.String(), "tariff change") {
+			t.Errorf("%s: the refusal does not explain itself: %s", path, w.Body.String())
+		}
+	}
+
+	// /bill over the SAME window still works, because a cost can be summed across
+	// tariffs where a curve cannot — which is the asymmetry worth preserving rather
+	// than papering over.
+	if w := doGET(t, s, "/bill?window=today"); w.Code != http.StatusOK {
+		t.Errorf("/bill must still handle a switchover window: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A window inside ONE agreement is unaffected.
+func TestPriceCurveAcceptsASingleTariffWindow(t *testing.T) {
+	s, _, _ := scSetup(t, 28)
+	for _, path := range []string{"/prices?window=today", "/prices/stats?window=today"} {
+		if w := doGET(t, s, path); w.Code != http.StatusOK {
+			t.Errorf("%s: got %d, want 200: %s", path, w.Code, w.Body.String())
+		}
+	}
+}
+
+// And the window cap is stated rather than emergent: /series has always guarded itself
+// with MaxBuckets while these routes accepted any custom span.
+func TestPriceCurveRefusesAnUnboundedWindow(t *testing.T) {
+	s, _, _ := scSetup(t, 28)
+	from := "2026-01-01T00:00:00Z"
+	to := "2027-01-01T00:00:00Z" // a year
+	w := doGET(t, s, "/prices?window=custom&from="+from+"&to="+to)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("a year-long curve window got %d, want 400: %s", w.Code, w.Body.String())
+	}
+	// /prices/stats returns a row per DAY, so a year is 365 rows and allowed.
+	if w := doGET(t, s, "/prices/stats?window=custom&from="+from+"&to="+to); w.Code == http.StatusBadRequest {
+		t.Errorf("a year of DAILY stats was refused; 365 rows is a reasonable answer: %s", w.Body.String())
 	}
 }

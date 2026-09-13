@@ -28,7 +28,12 @@ func realDay(t *testing.T) (Pricer, []time.Time, []float64) {
 	t.Helper()
 	raw, err := os.ReadFile(realDayFixture)
 	if err != nil {
-		t.Skipf("fixture unavailable: %v", err)
+		// Fatalf, not Skipf: this fixture is COMMITTED. If the path breaks — the file
+		// moves, the name changes, someone reorganises internal/octopus/testdata — a skip
+		// makes the entire mixed-sign-day suite silently disappear while CI stays green.
+		// And reading it from one place, so there is no second copy to drift, is exactly
+		// what makes the path breakable from a distance.
+		t.Fatalf("committed fixture %s is unreadable: %v", realDayFixture, err)
 	}
 	var doc struct {
 		Results []struct {

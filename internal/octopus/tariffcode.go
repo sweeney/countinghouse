@@ -112,6 +112,11 @@ func ParseTariffCode(code string) (TariffCode, error) {
 // NormaliseGroupID converts a grid-supply-point group id into the form tariff
 // codes use.
 //
+// NOT YET CALLED, deliberately: the region arrives already bare, inside the tariff code
+// in config, so nothing resolves a postcode at runtime. It exists for the day something
+// does — and because the leading-underscore mismatch it reconciles is the kind of API
+// gotcha that costs an hour to rediscover.
+//
 // `GET /industry/grid-supply-points/?postcode=…` answers with `{"group_id":"_A"}`
 // — note the leading underscore — while tariff codes spell the same region as a
 // bare `A`. Feeding `_A` into a tariff code builds a path for a tariff that does

@@ -64,6 +64,47 @@ var runDurations = []struct {
 // Returns the resolved tariff so a FLAT tariff can still be reported usefully: a
 // flat-rate deployment asking for prices should learn its rate, not receive an
 // empty curve that looks like a broken archive.
+// spansAgreementBoundary reports whether more than one agreement covers [from, to).
+//
+// /prices and /prices/stats resolve the tariff at the window's START only, so a window
+// spanning a switchover was described entirely by its first instant: it answered
+// `half_hourly: false` with a `flat_price` and an empty slot list, while /bill over the
+// identical window priced the later part per slot and reported attribution
+// counter_slot. Two endpoints describing the same window as two different kinds of
+// tariff, and the asymmetry grew rather than shrank once /bill learned to segment.
+//
+// One-tariff-per-request is the intended contract for these two routes: a curve is a
+// property of a tariff, and a response mixing two would need a shape that says which
+// slots belong to which. So the honest answer is to REFUSE a window that spans a
+// boundary and say why, rather than silently answer about the first half.
+func (s *Server) spansAgreementBoundary(from, to time.Time) bool {
+	segs, err := s.Config.Tariffs().PeriodsBetween(from, to)
+	if err != nil {
+		// Uncovered or misconfigured: not this function's business, and the caller's
+		// existing refusal path is the right one.
+		return false
+	}
+	return len(segs) > 1
+}
+
+// refuseIfSpansBoundary writes a 400 when the window straddles an agreement change,
+// naming the boundary so the caller can split the request.
+func (s *Server) refuseIfSpansBoundary(w http.ResponseWriter, win energy.Window) bool {
+	if !s.spansAgreementBoundary(win.Start, win.Stop) {
+		return true
+	}
+	segs, err := s.Config.Tariffs().PeriodsBetween(win.Start, win.Stop)
+	if err != nil || len(segs) < 2 {
+		return true
+	}
+	writeError(w, http.StatusBadRequest, fmt.Sprintf(
+		"this window spans a tariff change at %s, and a price curve belongs to one tariff: "+
+			"request either side separately. /bill and /series do handle a window spanning a "+
+			"switchover, because a cost can be summed across tariffs where a curve cannot.",
+		segs[1].Start.In(s.loc()).Format(time.RFC3339)))
+	return false
+}
+
 func (s *Server) halfHourlyTariff(t time.Time) (code string, flat float64, ok bool, halfHourly bool) {
 	tariff, found := s.Config.Tariffs().TariffFor(t)
 	if !found {
@@ -224,7 +265,17 @@ func (s *Server) handleUpcomingPrices(w http.ResponseWriter, r *http.Request) {
 		missingOut = append(missingOut, t.In(loc))
 	}
 
-	knownTo, _ := s.PriceReader.KnownTo(r.Context(), code)
+	// The error is NOT discarded, and the zero time is NOT formatted.
+	//
+	// KnownTo goes to some trouble to make "we hold nothing yet" distinguishable from a
+	// failure: it returns the zero time AND no error for the first, an error for the
+	// second. This collapsed both into `0001-01-01T00:00:00Z` on the wire, which reads as
+	// neither.
+	knownTo, err := s.PriceReader.KnownTo(r.Context(), code)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "could not read the price archive: "+err.Error())
+		return
+	}
 
 	// Tagged on what the answer MEANS — the tariff, the window rounded to the slot
 	// grid, and how far the archive reaches — rather than on the rendered body, which
@@ -237,12 +288,14 @@ func (s *Server) handleUpcomingPrices(w http.ResponseWriter, r *http.Request) {
 		"generated_at": now.In(loc),
 		"from":         from.In(loc),
 		"to":           to.In(loc),
-		"known_to":     knownTo.In(loc),
-		"summary":      summary,
-		"slots":        slots,
-		"cheapest":     cheapest,
-		"missing":      missingOut,
-		"complete":     curve.Complete(),
+		// Omitted rather than rendered as year 1 when the archive holds nothing for this
+		// tariff — absence is not a date. See knownToJSON.
+		"known_to": knownToJSON(knownTo, loc),
+		"summary":  summary,
+		"slots":    slots,
+		"cheapest": cheapest,
+		"missing":  missingOut,
+		"complete": curve.Complete(),
 	},
 		// Semantic key: the tariff, the window truncated to the slot grid (so a request
 		// a minute later hits the same tag), and the archive's horizon — which is what
@@ -341,6 +394,9 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 	if !capWindow(w, win, maxCurveDays, "slots") {
 		return
 	}
+	if !s.refuseIfSpansBoundary(w, win) {
+		return
+	}
 	loc := s.loc()
 
 	code, flat, found, halfHourly := s.halfHourlyTariff(win.Start)
@@ -402,6 +458,9 @@ func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !capWindow(w, win, maxStatsDays, "daily rows") {
+		return
+	}
+	if !s.refuseIfSpansBoundary(w, win) {
 		return
 	}
 	loc := s.loc()
@@ -530,6 +589,19 @@ func capWindow(w http.ResponseWriter, win energy.Window, maxDays int, unit strin
 			"%s per half hour or per day, and an unbounded window is an unbounded response); "+
 			"request a shorter range", days, maxDays, unit))
 	return false
+}
+
+// knownToJSON renders the archive's horizon, or nil when there is none.
+//
+// The zero time formats as `0001-01-01T00:00:00Z`, which a consumer cannot read as "we
+// hold nothing yet" — it looks like corruption or a parsing bug. null says it plainly,
+// and matches how Reconciliation already omits its meter-derived fields when there is no
+// meter: absence is not a value.
+func knownToJSON(t time.Time, loc *time.Location) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.In(loc)
 }
 
 // writeJSONCachedWindow is writeJSONCached keyed on a window rather than on the body.

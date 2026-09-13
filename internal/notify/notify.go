@@ -50,6 +50,9 @@ const (
 	// says the account is actually on. Every bill priced under the wrong
 	// agreement is wrong, and nothing else in the system looks unhealthy.
 	KindAgreementDrift = "agreement_drift"
+	// ...which nothing raises yet: the cross-check that would detect drift is deferred
+	// D3. The kind is declared because the constant is the stable metric label and
+	// naming it here is where the vocabulary lives, but no code path reaches it today.
 
 	// KindPricesMissing: prices for a period we are about to need are not held.
 	// Energy in an unpriced slot cannot be billed, and the gap is invisible

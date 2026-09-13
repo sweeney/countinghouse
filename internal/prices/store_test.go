@@ -766,3 +766,59 @@ func TestPutFullDay(t *testing.T) {
 		t.Errorf("Range returned %d, want 48", len(got))
 	}
 }
+
+// A slot whose ValidFrom is in another zone must round-trip, and putting it twice must
+// stay idempotent.
+//
+// timeLayout ends in a LITERAL Z, so a non-UTC ValidFrom formatted its local wall clock
+// with a Z glued on — an hour off the key insert wrote. putOne's SELECT and UPDATE used
+// the un-normalised value while insert used .UTC(), so the second Put looked the key up,
+// missed, inserted, and hit a PRIMARY KEY violation out of what is supposed to be an
+// idempotent upsert. Latent rather than live — FromRate normalises and Gate A refuses a
+// non-UTC valid_from — but a latent trap with a confusing symptom is worth removing.
+func TestPutNormalisesANonUTCValidFrom(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	st := openMemory(t)
+	ctx := context.Background()
+
+	// 01:30 BST is 00:30Z — an hour apart, which is what makes the bug visible.
+	local := time.Date(2026, 7, 1, 1, 30, 0, 0, loc)
+	to := local.Add(SlotLength)
+	slot := Slot{
+		TariffCode: testTariff, ValidFrom: local, ValidTo: &to,
+		ExcVATPence: 20, IncVATPence: 21, RetrievedAt: local,
+	}
+
+	first, err := st.Put(ctx, []Slot{slot})
+	if err != nil {
+		t.Fatalf("first Put: %v", err)
+	}
+	if first.Inserted != 1 {
+		t.Fatalf("inserted %d, want 1", first.Inserted)
+	}
+
+	// Again, with the same wall-clock instant expressed locally.
+	second, err := st.Put(ctx, []Slot{slot})
+	if err != nil {
+		t.Fatalf("second Put must be idempotent, not a constraint violation: %v", err)
+	}
+	if second.Unchanged != 1 {
+		t.Errorf("unchanged = %d, want 1 (inserted %d, restated %d)",
+			second.Unchanged, second.Inserted, second.Restated)
+	}
+
+	// And it is stored under the UTC key, so a UTC range query finds it.
+	got, err := st.Range(ctx, testTariff, local.UTC().Add(-time.Minute), local.UTC().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("range found %d slots, want 1 — the row is keyed on a local wall clock", len(got))
+	}
+	if !got[0].ValidFrom.Equal(local.UTC()) {
+		t.Errorf("ValidFrom = %s, want %s", got[0].ValidFrom, local.UTC())
+	}
+}

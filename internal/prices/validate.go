@@ -35,6 +35,13 @@ const (
 	// are open-ended. Alignment is still checked; only the length is waived.
 	AnyDuration = time.Duration(-1)
 
+	// NOT YET PASSED BY ANY PRODUCTION CALLER, deliberately. AnyDuration exists for the
+	// STANDING_CHARGE relation in docs/octopus-price-data-model.md §3, whose intervals
+	// run for months rather than half hours — and that relation is specified and not yet
+	// built. Kept rather than deleted because the waiver is the whole reason the length
+	// check is a parameter, and rediscovering that is worse than reading this sentence.
+	// It becomes live the moment standing charges are archived.
+
 	// DefaultVATEpsilonPence is the tolerance on |inc − exc × (1 + vat)|.
 	//
 	// It has to straddle a very wide gap. Below it: float64 noise on
@@ -585,6 +592,14 @@ func LocalDayWindow(t time.Time, loc *time.Location) (start, end time.Time) {
 // twice a year, on the two days of the year hardest to debug.
 func ExpectedSlots(t time.Time, loc *time.Location) int {
 	start, end := LocalDayWindow(t, loc)
+	return expectedSlotsIn(start, end)
+}
+
+// expectedSlotsIn is the one definition: how many half hours fit in [start, end).
+//
+// 46, 48 or 50 across a DST changeover, which is the entire reason this is a function
+// rather than a constant.
+func expectedSlotsIn(start, end time.Time) int {
 	return int(end.Sub(start) / DefaultSlotDuration)
 }
 
@@ -606,10 +621,14 @@ func CheckDay(slots []Slot, day time.Time, loc *time.Location) DayCompleteness {
 	}
 
 	d := DayCompleteness{
-		Day:      start.In(loc),
-		Start:    start,
-		End:      end,
-		Expected: int(end.Sub(start) / DefaultSlotDuration),
+		Day:   start.In(loc),
+		Start: start,
+		End:   end,
+		// ExpectedSlots rather than the same division written again: two copies of a
+		// DST-critical calculation is the duplication localDayWindow had, and the one
+		// that made the function look unused when it was simply not being called by the
+		// code that needed it.
+		Expected: expectedSlotsIn(start, end),
 	}
 
 	inDay := make([]Slot, 0, len(slots))

@@ -321,3 +321,52 @@ func TestBackupVerdict(t *testing.T) {
 		})
 	}
 }
+
+// /healthz must say WHY it is degraded. Both verdict functions computed a reason and both
+// callers discarded it, so an operator saw "degraded" and had to work out which of four
+// conditions caused it — with the answer sitting in a thrown-away return value.
+func TestHealthReportsWhyItIsDegraded(t *testing.T) {
+	now := bhNow
+	s := bhSetup(t, &BackupHealth{
+		Bucket: "countinghouse-sqlite", Env: "production",
+		LastError: "AccessDenied", Failures: 2,
+	})
+	s.Prices = fakePrices{health: []PriceHealth{{
+		TariffCode: "E-1R-AGILE-24-10-01-A",
+		KnownTo:    now.Add(12 * time.Hour),
+		LastError:  "429 from the supplier",
+	}}}
+
+	m := decode(t, mustGET(t, s, "/healthz"))
+	if m["status"] != "degraded" {
+		t.Fatalf("status = %v, want degraded", m["status"])
+	}
+	reasons, ok := m["reasons"].([]any)
+	if !ok || len(reasons) == 0 {
+		t.Fatalf("no reasons reported: %v", m)
+	}
+	// Both conditions, not just the last one to win the assignment.
+	joined := ""
+	for _, r := range reasons {
+		joined += r.(string) + " | "
+	}
+	if !containsFold(joined, "price fetch failing") {
+		t.Errorf("the price condition is missing: %q", joined)
+	}
+	if !containsFold(joined, "backup") {
+		t.Errorf("the backup condition is missing: %q", joined)
+	}
+}
+
+// A healthy service reports no reasons at all, rather than an empty array.
+func TestHealthOmitsReasonsWhenOK(t *testing.T) {
+	s, fake := dataSetup(t)
+	fake.PingOK = true
+	m := decode(t, mustGET(t, s, "/healthz"))
+	if m["status"] != "ok" {
+		t.Fatalf("status = %v, want ok", m["status"])
+	}
+	if _, present := m["reasons"]; present {
+		t.Errorf("a healthy service reported reasons: %v", m["reasons"])
+	}
+}

@@ -78,6 +78,22 @@ func (s *SQLiteStore) Put(ctx context.Context, slots []Slot) (PutResult, error) 
 	// Caught before opening a transaction so the message is about the bug rather
 	// than about a constraint: processed in order, the second row would look
 	// like a restatement of the first and fire a false alarm.
+	// Normalised to UTC ONCE, up front, so every later statement agrees by
+	// construction. timeLayout ends in a LITERAL Z, so a ValidFrom in another zone
+	// formats its local wall clock with a Z glued on — and putOne's SELECT and UPDATE
+	// used the un-normalised value while insert used .UTC(). Harmless today only because
+	// FromRate normalises and Gate A refuses a non-UTC valid_from; a caller building
+	// slots by hand got a lookup miss, an insert, a second lookup miss, and then a
+	// PRIMARY KEY violation out of the idempotent upsert. That is exactly the confusing
+	// symptom the checkFinite comment below sets out to avoid.
+	for i := range slots {
+		slots[i].ValidFrom = slots[i].ValidFrom.UTC()
+		if slots[i].ValidTo != nil {
+			t := slots[i].ValidTo.UTC()
+			slots[i].ValidTo = &t
+		}
+	}
+
 	seen := make(map[Key]struct{}, len(slots))
 	for _, sl := range slots {
 		if _, dup := seen[sl.Key()]; dup {
@@ -395,18 +411,4 @@ func nullableTime(t *time.Time) any {
 		return nil
 	}
 	return t.UTC().Format(timeLayout)
-}
-
-// mustCount is a test helper: the number of rows in unit_price. It lives here
-// rather than in the test file so it can use the unexported handle.
-func (s *SQLiteStore) mustCount(t interface {
-	Fatalf(string, ...any)
-	Helper()
-}, ctx context.Context) int {
-	t.Helper()
-	var n int
-	if err := s.db.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM unit_price`).Scan(&n); err != nil {
-		t.Fatalf("count unit_price: %v", err)
-	}
-	return n
 }

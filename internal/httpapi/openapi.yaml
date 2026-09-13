@@ -339,10 +339,13 @@ paths:
         tariff covering the window is flat-rate rather than half-hourly.
       operationId: getPrices
       parameters:
+        - { $ref: "#/components/parameters/IfNoneMatch" }
         - { $ref: "#/components/parameters/Window" }
         - { $ref: "#/components/parameters/From" }
         - { $ref: "#/components/parameters/To" }
       responses:
+        "304":
+          $ref: "#/components/responses/NotModified"
         "200":
           description: The curve, with per-slot band and rank
           content:
@@ -368,6 +371,7 @@ paths:
         rather than shortened.
       operationId: getUpcomingPrices
       parameters:
+        - { $ref: "#/components/parameters/IfNoneMatch" }
         - name: hours
           in: query
           required: false
@@ -376,6 +380,8 @@ paths:
             How far ahead to report. Capped at 48 because the supplier publishes
             at most about a day and a half ahead.
       responses:
+        "304":
+          $ref: "#/components/responses/NotModified"
         "200":
           description: The forward curve with bands, ranks and cheapest runs
           content:
@@ -401,6 +407,7 @@ paths:
         rounds UP.
       operationId: getCheapestPrice
       parameters:
+        - { $ref: "#/components/parameters/IfNoneMatch" }
         - name: duration
           in: query
           required: true
@@ -412,6 +419,8 @@ paths:
           schema: { type: string, format: date-time }
           description: The run must FINISH at or before this instant.
       responses:
+        "304":
+          $ref: "#/components/responses/NotModified"
         "200":
           description: The cheapest window found
           content:
@@ -444,10 +453,13 @@ paths:
         on a screen; `vat_included` states it either way.
       operationId: getPriceStats
       parameters:
+        - { $ref: "#/components/parameters/IfNoneMatch" }
         - { $ref: "#/components/parameters/Window" }
         - { $ref: "#/components/parameters/From" }
         - { $ref: "#/components/parameters/To" }
       responses:
+        "304":
+          $ref: "#/components/responses/NotModified"
         "200":
           description: Per-day aggregates
           content:
@@ -664,6 +676,15 @@ paths:
 
 components:
   parameters:
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: >-
+        An ETag from a previous response. When it still matches, the server answers 304
+        with no body instead of re-sending the curve.
+      schema:
+        type: string
     DeviceID:
       name: id
       in: path
@@ -828,6 +849,16 @@ components:
       bearerFormat: JWT
 
   responses:
+    NotModified:
+      description: >-
+        The representation has not changed since the ETag the client sent. No body.
+
+
+        Fires on a repeat request when nothing that determines the answer has moved: the
+        tariff, the window truncated to the half-hour grid, and the prices themselves.
+        Deliberately NOT keyed on `generated_at`, which moves every request — hashing the
+        rendered body meant this response could never occur on three of the four price
+        routes, and a dashboard re-downloaded every slot on every poll.
     Unauthorized:
       description: Missing or invalid Bearer JWT
       headers:
@@ -1030,9 +1061,13 @@ components:
         known_to:
           type: string
           format: date-time
+          nullable: true
           description: >
-            End of the newest slot held for this tariff — how far prices run at all,
-            which may be beyond the requested window.
+            End of the newest slot held for this tariff — how far prices run at all, which
+            may be beyond the requested window. NULL when the archive holds nothing yet for
+            it: `0001-01-01T00:00:00Z` reads as corruption rather than as "nothing held",
+            and the store deliberately distinguishes "we hold nothing" from "the read
+            failed".
         summary: { $ref: "#/components/schemas/PriceCurveSummary" }
         slots:
           type: array
@@ -1076,6 +1111,20 @@ components:
         max:    { type: number }
         mean:   { type: number }
         spread:
+          type: number
+        min_inc_vat:
+          type: number
+          description: >-
+            The same four figures INC VAT. Both bases are emitted because the unsuffixed
+            keys are ex-VAT while the sibling price routes are inc-VAT throughout — a
+            difference that was documented in three places rather than removed. The
+            inc-VAT extremes are computed independently, not grossed up, because VAT on a
+            negative price makes it more negative.
+        max_inc_vat:
+          type: number
+        mean_inc_vat:
+          type: number
+        spread_inc_vat:
           type: number
           description: max − min. Whether shifting load that day was worth the bother.
         plunge_slots:
@@ -2010,6 +2059,15 @@ components:
     HealthResponse:
       type: object
       properties:
+        reasons:
+          type: array
+          items:
+            type: string
+          description: >-
+            Why the status is not ok, one entry per failing condition, sorted. Omitted when
+            everything is fine. Both verdict functions computed a reason and both callers
+            discarded it, so an operator saw "degraded" with no indication which of four
+            conditions caused it.
         status:
           type: string
           enum: [ok, degraded, unavailable]
