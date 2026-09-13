@@ -171,6 +171,74 @@ which is smaller than the uncertainty in the counter reading itself.
 
 ---
 
+## 4a. The continuous devices' positive offset is real consumption, not lag
+
+*Measured 2026-09-13, four weeks of real half-hourly energy (2026-08-16 → 09-13) against
+two years of archived prices. This settles a question §2 and §4 could only speculate about.*
+
+A reviewer proposed a second explanation for the continuous devices' systematic ~+1.6%: not
+a warm house, but **phase bias**. A 0.1 kWh step on a 67 W load takes ~90 minutes to
+accumulate and is only reported once the energy has been consumed, so each tick lands
+systematically late — roughly half a tick interval. Prices are autocorrelated over that
+scale (the evening ramp is near-monotonic), so a one-sided lag would attribute consumption
+to later, dearer slots. Unlike quantisation noise, that does **not** cancel with more
+months. It was a good hypothesis and it is wrong.
+
+**Test 1 — shift the prices.** If ticks are reported late by L, pricing each bucket's
+energy at the slot L earlier should pull the deviation toward zero, and the minimising L
+should scale with each device's tick interval.
+
+| device | half tick interval | L minimising \|dev\| | dev @ L=0 | dev @ best |
+|---|---|---|---|---|
+| network-ups *(control, no counter)* | 15 min | — | −0.05% | −0.05% |
+| bigfridge | 39 min | 150 min | +1.33% | +0.08% |
+| winefridge | 47 min | 180 min | +1.02% | +0.73% |
+| bigfreezer | 51 min | 180 min | +1.20% | −0.08% |
+| dehumidifier | 66 min | 30 min | −0.07% | +0.06% |
+| basement-fridge | 133 min | 0 min | −0.42% | −0.42% |
+| chestfreezer | 183 min | 90 min | +2.17% | +0.33% |
+
+The control behaves exactly as it must — flat across every shift, because it has no counter
+to lag. But the minimising lag shows **no relationship** to tick interval, and if anything
+runs backwards: the shortest tick intervals want the longest shifts. The curves also wander
+non-monotonically (basement-fridge −0.42 → +2.66 → +1.63) rather than showing the smooth
+minimum a genuine systematic lag would leave.
+
+**Test 2 — remove quantisation entirely.** `avg_w` is an unquantised 30-minute mean, so
+C2's estimate (shape from power, magnitude from the counter) can be computed directly and
+compared with C1's:
+
+| device | C1 eff | C2 eff | C1 − C2 | window mean |
+|---|---|---|---|---|
+| basement-fridge | 27.65p | 28.54p | −0.90p | 27.76p |
+| bigfreezer | 28.11p | 28.27p | −0.16p | 27.78p |
+| bigfridge | 28.15p | 28.53p | −0.38p | 27.78p |
+| chestfreezer | 28.36p | 27.79p | **+0.57p** | 27.76p |
+| dehumidifier | 27.22p | 27.98p | −0.76p | 27.24p |
+| winefridge | 28.06p | 27.74p | **+0.32p** | 27.78p |
+
+This is decisive. **C2 sits above the window mean too** — 28.54, 28.27, 28.53, 27.98 against
+means of ~27.76. The positive offset survives when quantisation is removed altogether, so it
+cannot be a quantisation artefact of any kind, lag included. These devices really do consume
+more in dearer half hours, which is what the original "partly real" reading said: compressor
+duty tracks ambient temperature, and ambient temperature and the evening price peak share a
+daily shape.
+
+Two consequences, and both cut against the reviewer's conclusion that this strengthens C2:
+
+- **C1 and C2 disagree by 0.16–0.90p/kWh on a ~28p rate — under 1%, with mixed signs**
+  (four negative, two positive, mean −0.22p). C2 would not remove the offset, because the
+  offset is not an error. It would cost a second query path to move the number by less than
+  the noise.
+- **The §4 decision stands, and on firmer ground.** Previously C1 rested on quantisation
+  error being unbiased; it now rests on a measurement showing the residual is not
+  quantisation at all.
+
+Caveats: four weeks and six devices; energy from the deployed service's `/series`, prices
+from the local archive; per-device means computed over each device's own observed span. A
+longer run would tighten it, and the collector keeps accumulating. But the *sign* result —
+that C2 shows the same offset — does not depend on precision.
+
 ## 5. When to revisit
 
 Triggers for reconsidering, in rough order of likelihood:
