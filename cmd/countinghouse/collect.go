@@ -106,9 +106,15 @@ func runCollect(ctx context.Context, c *collectFlags, logger *slog.Logger) error
 	}
 
 	col, err := collector.New(collector.Options{
-		Fetcher:    client,
-		Store:      store,
-		Notifier:   notify.NewSlogNotifier(logger),
+		Fetcher: client,
+		Store:   store,
+		// Throttled exactly as the service does it. Without this, a condition that
+		// stays true across many five-minute watch ticks is reported on every one —
+		// and the reliable outcome of that is a log nobody reads. It matters more
+		// here than in the service, because the condition it fires on is STANDING
+		// rather than transient: today reproducibly holds 46 of 48 slots, so the
+		// alert is true all day, every day.
+		Notifier:   notify.NewThrottle(notify.NewSlogNotifier(logger), time.Hour, testutil.RealClock{}),
 		Clock:      testutil.RealClock{},
 		Location:   loc,
 		TariffCode: c.tariff,
