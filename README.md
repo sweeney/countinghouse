@@ -474,6 +474,13 @@ No backfill step is needed: a first sync against an empty archive requests an un
 and so pulls the supplier's whole published history in one pass (measured: 34,894 slots in
 6.5 s). Afterwards each sync fetches only what is new, detected by a single ~350-byte probe.
 
+**The supplier's horizon stops two half hours short of the furthest day's end**, and for
+about sixteen hours of every day that furthest day is *today*. Measured over 729 archived
+days: every historical day is complete, and the only short one is always the newest.
+A tail gap that size is therefore healthy — it does not alert and does not void
+`complete_to`. An *interior* hole does, at any size. See
+`docs/octopus-price-pipeline.md`.
+
 `GET /healthz` and `GET /metrics` gain a `prices` block, one entry per collected tariff —
 omitted entirely when no collector runs. Two fields answer different questions, and the
 difference matters:

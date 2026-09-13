@@ -143,6 +143,53 @@ zero. Zero is a legal VAT rate and so cannot double as "unknown": conflating the
 a boot during an agreement gap validated every slot against an implied 0% and, while this
 was Gate A, rejected 100% of them.
 
+### The published horizon stops short — measured, not assumed
+
+**The furthest published day is always short by exactly its last two half hours.** This
+is the single most load-bearing observation about the feed, and it took a live archive to
+establish.
+
+Measured 2026-09-13, from 729 local days of archived prices plus direct API probes:
+
+```
+  724 of 729 days      exactly complete (48 slots, or 46/50 across a DST changeover)
+  the only short day   always the furthest published one, missing its final 2 slots
+  horizon ends         23:00 local on day+1
+  publication          one per day, after 16:00 (no intermediate movement observed
+                       across syncs from 09:54 to 15:54)
+```
+
+The consequence is easy to get wrong, and I did, twice:
+
+```
+  00:00 ─────────────────────── ~16:00 ─────────────── 23:59
+  │  the furthest day is TODAY  │  it becomes TOMORROW      │
+  │  → TODAY is 2 slots short   │  → today complete,        │
+  │                             │    tomorrow 2 short       │
+```
+
+So for roughly **sixteen hours of every day, TODAY is the incomplete one.** Probing after
+16:00 shows today complete and hides this entirely — which is exactly how a first look
+concluded the gap was a standing condition, a second look concluded it was transient, and
+only pinning the horizon against the clock settled it.
+
+Publication time is corroborated externally (energy-stats.uk, octopus.energy's own
+pricing blog). **The 23:00 end-of-horizon is not publicly documented anywhere we could
+find** and rests on the measurement above.
+
+What follows from it:
+
+- A **tail-only** gap within two slots, on today or tomorrow, is what a healthy feed looks
+  like. It must not alert, and it must not void `complete_to` — both did, so a correct
+  archive paged every morning and reported `degraded` for most of every day with the
+  reason "no complete day of prices held" while holding two years of prices.
+- An **interior** hole is a real fault at any size: the supplier published a slot that
+  never reached us.
+- A tail gap much **larger** than two means the publication barely landed, and past the
+  deadline that is worth saying.
+- Polling stops once the gap is down to the routine tail. The remaining slots arrive with
+  tomorrow's publication, not in the next five minutes.
+
 ### Gate C — set-level (per day; gates the *signal*, not the rows)
 
 Store every row that passes A. Gate C decides only whether the day counts as complete:

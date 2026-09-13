@@ -65,6 +65,10 @@ type fakeFetcher struct {
 	earliest time.Time
 	// priceAt lets a test control the price of a slot; nil means a fixed 20p.
 	priceAt func(time.Time) (exc, inc float64)
+	// omit drops individual slots from the answer, so a test can model an INTERIOR
+	// hole — a slot the supplier published that never reached us — as distinct from
+	// the tail shortfall that is the feed's normal published horizon.
+	omit map[time.Time]bool
 
 	// failures, when non-empty, is popped on each UnitRates call.
 	failures []error
@@ -138,6 +142,9 @@ func (f *fakeFetcher) UnitRates(_ context.Context, _ octopus.TariffCode, from, t
 
 	var out []octopus.Rate
 	for cur := start; cur.Before(end); cur = cur.Add(30 * time.Minute) {
+		if f.omit[cur] {
+			continue
+		}
 		validTo := cur.Add(30 * time.Minute)
 		exc, inc := 20.0, 21.0
 		if f.priceAt != nil {
@@ -613,8 +620,14 @@ func TestSyncDistinguishesKnownToFromCompleteTo(t *testing.T) {
 	if h.noti.has(notify.KindDayIncomplete) {
 		t.Error("a tail gap inside the publication window should not alert yet")
 	}
-	if !res.KeepPolling {
-		t.Error("KeepPolling should be true while the tail is still filling")
+	// KeepPolling is now FALSE here, and that is the fix rather than a regression: a
+	// two-slot tail gap is the supplier's published horizon, not a publication still
+	// landing, so there is nothing to come back for. Polling every five minutes for
+	// slots that will not exist until tomorrow's publication is work with no possible
+	// outcome. An entirely absent tomorrow still polls — see the publication-day test.
+	if res.KeepPolling {
+		t.Error("KeepPolling should be false once tomorrow has landed as fully as the " +
+			"supplier's horizon allows")
 	}
 }
 
@@ -686,6 +699,12 @@ func TestSyncHandlesDSTDayLengths(t *testing.T) {
 // "tell somebody": tomorrow's costing will have holes in it.
 func TestSyncAlertsOnDayStillIncompleteAtDeadline(t *testing.T) {
 	f := newFakeFetcher(ts(t, "2026-09-09T23:00:00Z"), ts(t, "2026-09-11T22:00:00Z"))
+	// An INTERIOR hole, not the routine tail shortfall. This test used to rely on the
+	// two-slot tail gap, which measurement showed is what a healthy feed looks like
+	// every single day — so as written it asserted a nightly false alarm. The property
+	// is unchanged and still worth pinning: a day with a hole the supplier DID publish
+	// must be escalated once waiting stops being reasonable.
+	f.omit = map[time.Time]bool{ts(t, "2026-09-11T09:00:00Z"): true}
 	h := newHarness(t, ts(t, "2026-09-10T16:08:00Z"), f)
 	ctx := context.Background()
 
@@ -868,8 +887,11 @@ func TestFakeClockDrivesAWholePublicationDay(t *testing.T) {
 	if res.TomorrowComplete {
 		t.Error("46 of 48 is not complete")
 	}
-	if !res.KeepPolling {
-		t.Error("should still be polling for the tail")
+	// And polling stops: 46 of 48 with the two missing at the END is the supplier's
+	// horizon, not a publication mid-flight. The next two slots arrive with TOMORROW's
+	// publication, not in the next five minutes.
+	if res.KeepPolling {
+		t.Error("should not still be polling: the gap is the published horizon")
 	}
 
 	// The tail arrives.

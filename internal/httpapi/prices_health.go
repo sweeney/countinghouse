@@ -70,7 +70,16 @@ func priceVerdict(health []PriceHealth, now time.Time) (degraded bool, reason st
 			return true, "price fetch failing for " + h.TariffCode
 		}
 		if h.CompleteTo.IsZero() {
-			return true, "no complete day of prices held for " + h.TariffCode
+			// Two different states used to share this message. An archive that has
+			// never been filled genuinely holds nothing; one whose current day has an
+			// interior hole holds years of prices and cannot name a contiguous end.
+			// Saying "no complete day of prices held" about the second is false, and it
+			// is what an operator reads when deciding whether the archive is empty.
+			if h.KnownTo.IsZero() {
+				return true, "no prices held at all for " + h.TariffCode
+			}
+			return true, "prices held for " + h.TariffCode +
+				" but the current day has a gap that is not just the unpublished tail"
 		}
 		if !h.CompleteTo.After(now) {
 			return true, "prices for today are incomplete for " + h.TariffCode

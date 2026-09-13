@@ -221,3 +221,35 @@ func TestMetricsOmitsPricesWhenNoCollectorRuns(t *testing.T) {
 type fixedClock struct{ t time.Time }
 
 func (f fixedClock) Now() time.Time { return f.t }
+
+// The two states a zero complete_to used to conflate. Both degrade, and they must not
+// say the same thing: "no complete day of prices held" is false of an archive holding
+// years of prices whose current day has one hole, and that sentence is what an operator
+// reads when deciding whether the archive is empty.
+func TestPriceVerdictDistinguishesAnEmptyArchiveFromAGap(t *testing.T) {
+	now := time.Date(2026, 9, 13, 9, 0, 0, 0, time.UTC)
+
+	empty := []PriceHealth{{TariffCode: "E-1R-AGILE-24-10-01-A"}}
+	degraded, reason := priceVerdict(empty, now)
+	if !degraded {
+		t.Error("an empty archive must degrade")
+	}
+	if !containsFold(reason, "no prices held at all") {
+		t.Errorf("empty archive reason = %q", reason)
+	}
+
+	gapped := []PriceHealth{{
+		TariffCode: "E-1R-AGILE-24-10-01-A",
+		KnownTo:    now.Add(24 * time.Hour), // years of prices, horizon well ahead
+	}}
+	degraded, reason = priceVerdict(gapped, now)
+	if !degraded {
+		t.Error("a gapped current day must still degrade")
+	}
+	if containsFold(reason, "no prices held at all") || containsFold(reason, "no complete day") {
+		t.Errorf("a held-but-gapped archive is described as empty: %q", reason)
+	}
+	if !containsFold(reason, "gap") {
+		t.Errorf("the reason should name the gap: %q", reason)
+	}
+}

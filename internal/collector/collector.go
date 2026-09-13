@@ -54,6 +54,24 @@ const (
 	// a single enormous response and a failure costs only one chunk.
 	backfillChunk = 30 * 24 * time.Hour
 
+	// publishedTailSlack is how many trailing half hours the FURTHEST published day
+	// may be short by before it counts as a gap rather than as the supplier's horizon.
+	//
+	// MEASURED, from 729 local days of archived prices plus a direct probe of the live
+	// API on 2026-09-13: 724 of 729 days hold a full local day (48 slots, or 46/50
+	// across a DST changeover), and the only incomplete day is always the furthest
+	// published one, short by exactly its last two half hours. The horizon ends at
+	// 23:00 local, so a 48-slot BST day loses two; the same holds in GMT, where the day
+	// ends at 00:00Z against a 23:00Z horizon.
+	//
+	// Publication time — after 16:00 daily — is documented by the supplier and by third
+	// parties. The 23:00 end-of-horizon is NOT publicly documented and rests on the
+	// measurement above, which is one of the reasons to keep the archive.
+	//
+	// Two, not "any tail": a day short by thirty half hours is also tail-only, and that
+	// one means the publication barely landed and IS worth saying past the deadline.
+	publishedTailSlack = 2
+
 	// fetchOverlap is how far back before the known horizon a routine sync
 	// re-reads. Cheap insurance: writes are idempotent, and it means a slot that
 	// was somehow missed at a boundary gets picked up rather than being skipped
@@ -431,7 +449,19 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 		})
 		return
 	}
-	if !today.Complete {
+	// A routine tail gap on today is the normal state for most of the day: the
+	// supplier's horizon ends at 23:00 local, so until the ~16:00 publication moves it,
+	// today is short by exactly its final two half hours. Alerting fires an ERROR every
+	// morning on a healthy feed. See publishedTailSlack for the measurement.
+	//
+	// It still costs something real — the last hour of today cannot be priced yet — but
+	// that is visible as the difference between known_to and complete_to, which is what
+	// those two fields are for. It is not a page.
+	routineTail := today.MissingTailOnly() && len(today.Missing) <= publishedTailSlack
+	if routineTail {
+		c.resolve(notify.KindPricesMissing, todayStart.Format(time.RFC3339))
+	}
+	if !today.Complete && !routineTail {
 		c.alert(ctx, notify.Event{
 			Kind: notify.KindPricesMissing, Severity: notify.SeverityError,
 			Summary:  "today's prices are incomplete",
@@ -445,6 +475,11 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 		})
 		return
 	}
+	// Note what changed here: with a routine tail gap we now fall THROUGH to the
+	// tomorrow branch instead of returning. Previously an incomplete today short-
+	// circuited assess, so for the ~16 hours a day that today was tail-short, the
+	// tomorrow branch never ran — meaning the publication watch was never confirmed by
+	// the path written to confirm it.
 
 	// Tomorrow. Before the publication window it does not exist yet, which is the
 	// normal state for most of the day and must never alert. Inside the window an
@@ -452,6 +487,17 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 	// the deadline it has stopped being a wait and become a gap.
 	switch {
 	case tmrw.Complete:
+		c.resolve(notify.KindPricesMissing, tomorrowStart.Format(time.RFC3339))
+		c.resolve(notify.KindDayIncomplete, tomorrowStart.Format(time.RFC3339))
+	case tmrw.MissingTailOnly() && len(tmrw.Missing) <= publishedTailSlack:
+		// The supplier's published horizon stops short of the furthest day's end, so a
+		// small TAIL gap on tomorrow is what a healthy feed looks like — not a fault,
+		// and not something to escalate at the deadline. See publishedTailSlack for
+		// the measurement.
+		//
+		// It is resolved rather than merely skipped: if an earlier, larger gap alerted
+		// while the publication was still landing, this is the point at which it has
+		// landed as fully as it ever will.
 		c.resolve(notify.KindPricesMissing, tomorrowStart.Format(time.RFC3339))
 		c.resolve(notify.KindDayIncomplete, tomorrowStart.Format(time.RFC3339))
 	case pastDeadline:
@@ -494,12 +540,26 @@ func (c *Collector) dayCompleteness(ctx context.Context, day, start, end time.Ti
 // today priceable.
 func (c *Collector) recordCompleteTo(today, tomorrow prices.DayCompleteness, todayEnd, tomorrowEnd time.Time) {
 	var completeTo time.Time
-	if today.Complete {
+	switch {
+	case today.Complete:
 		completeTo = todayEnd
 		if tomorrow.Complete {
 			completeTo = tomorrowEnd
 		}
+	case today.MissingTailOnly() && len(today.Missing) <= publishedTailSlack:
+		// Today short only by the supplier's routine tail. Everything before that gap
+		// is priceable, so report it — leaving the ZERO time here was read downstream
+		// as "no complete day of prices held" and degraded /healthz for the ~16 hours
+		// a day before the publication, on an archive holding years of prices.
+		completeTo = today.TailGapStart()
 	}
+	// Deliberately NOT advanced into a tail-shortened tomorrow, even though everything
+	// before the gap is priceable. Doing so makes complete_to equal known_to in the
+	// routine case, collapsing a distinction the health block exists to draw — a
+	// publication can advance the horizon across a whole day while leaving that day
+	// short, and known_to alone would answer "do we have tomorrow?" with yes when it is
+	// no. Whether complete_to should instead mean "priceable to here" is a separate
+	// decision about a documented field, not a side effect of quieting an alert.
 	c.mu.Lock()
 	c.status.CompleteTo = completeTo
 	c.mu.Unlock()

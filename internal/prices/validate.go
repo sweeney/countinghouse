@@ -537,6 +537,22 @@ func (d DayCompleteness) MissingTailOnly() bool {
 	return true
 }
 
+// TailGapStart returns the instant the day's trailing gap begins — i.e. how far into
+// the day the archive can price without holes.
+//
+// Only meaningful when MissingTailOnly is true; returns End for a complete day and the
+// zero time when the gap is not confined to the tail, because with an interior hole
+// there is no single "priceable up to here".
+func (d DayCompleteness) TailGapStart() time.Time {
+	if len(d.Missing) == 0 {
+		return d.End
+	}
+	if !d.MissingTailOnly() {
+		return time.Time{}
+	}
+	return d.End.Add(-DefaultSlotDuration * time.Duration(len(d.Missing)))
+}
+
 // LocalDayWindow returns the UTC instants bounding the local day containing t.
 //
 // The boundary is NOT midnight UTC, and that is the whole point: local
