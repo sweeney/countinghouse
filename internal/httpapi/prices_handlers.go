@@ -223,6 +223,9 @@ func (s *Server) handleUpcomingPrices(w http.ResponseWriter, r *http.Request) {
 
 	knownTo, _ := s.PriceReader.KnownTo(r.Context(), code)
 
+	// Tagged on what the answer MEANS — the tariff, the window rounded to the slot
+	// grid, and how far the archive reaches — rather than on the rendered body, which
+	// carries generated_at and so changed on every request.
 	writeJSONCached(w, r, http.StatusOK, map[string]any{
 		"tariff_code":  code,
 		"half_hourly":  true,
@@ -237,7 +240,19 @@ func (s *Server) handleUpcomingPrices(w http.ResponseWriter, r *http.Request) {
 		"cheapest":     cheapest,
 		"missing":      missingOut,
 		"complete":     curve.Complete(),
-	})
+	},
+		// Semantic key: the tariff, the window truncated to the slot grid (so a request
+		// a minute later hits the same tag), and the archive's horizon — which is what
+		// actually changes the answer.
+		code,
+		from.Truncate(prices.SlotLength).Format(time.RFC3339),
+		to.Truncate(prices.SlotLength).Format(time.RFC3339),
+		knownTo.Format(time.RFC3339),
+		// The prices themselves, so a RESTATEMENT moves the tag. Without this the tag
+		// keys only on metadata and a client serves a stale price indefinitely — which
+		// an existing test caught when I first made this change.
+		curve.Fingerprint(),
+	)
 }
 
 // handleCheapestPrice serves GET /prices/cheapest?duration=3h&before=…: the
@@ -329,7 +344,7 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !halfHourly {
-		writeJSONCached(w, r, http.StatusOK, map[string]any{
+		writeJSONCachedWindow(w, r, code, win, fmt.Sprintf("flat:%.6f", flat), map[string]any{
 			"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
 			"half_hourly": false, "flat_price": round.To(flat, priceDP),
 			"unit": "p/kWh", "vat_included": true, "slots": []any{},
@@ -355,7 +370,7 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 	}
 	sum := curve.Summary()
 
-	writeJSONCached(w, r, http.StatusOK, map[string]any{
+	writeJSONCachedWindow(w, r, code, win, curve.Fingerprint(), map[string]any{
 		"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
 		"tariff_code": code, "half_hourly": true,
 		"unit": "p/kWh", "vat_included": true,
@@ -412,7 +427,7 @@ func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSONCached(w, r, http.StatusOK, map[string]any{
+	writeJSONCachedWindow(w, r, code, win, curve.Fingerprint(), map[string]any{
 		"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
 		"tariff_code": code,
 		// Ex-VAT here, unlike the curve endpoints: these are analytical figures
@@ -471,13 +486,44 @@ func (s *Server) resolveWindow(w http.ResponseWriter, r *http.Request) (energy.W
 // The ETag is a hash of the rendered body rather than of `known_to` or a
 // timestamp, so it cannot claim "unchanged" when anything in the response has in
 // fact moved — including a band that shifted because the window slid forward.
-func writeJSONCached(w http.ResponseWriter, r *http.Request, status int, body any) {
+// writeJSONCachedWindow is writeJSONCached keyed on a window rather than on the body.
+//
+// `to` is "now" for the default window=today, so hashing the rendered body meant the tag
+// moved every request and the 304 never fired. Truncating to the slot grid makes two
+// requests within the same half hour agree, which is the granularity at which the answer
+// can actually change.
+func writeJSONCachedWindow(w http.ResponseWriter, r *http.Request, code string, win energy.Window, fingerprint string, body any) {
+	writeJSONCached(w, r, http.StatusOK, body,
+		code,
+		win.Label,
+		win.Start.Truncate(prices.SlotLength).Format(time.RFC3339),
+		win.Stop.Truncate(prices.SlotLength).Format(time.RFC3339),
+		fingerprint,
+	)
+}
+
+func writeJSONCached(w http.ResponseWriter, r *http.Request, status int, body any, tag ...string) {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not encode response")
 		return
 	}
-	sum := sha256.Sum256(encoded)
+	// The tag is computed from the SEMANTIC payload when the caller supplies one, not
+	// from the rendered body.
+	//
+	// Hashing the body looked obviously right and was the bug: three of the four price
+	// responses carry a timestamp that moves on every request — `generated_at`, and
+	// `to` when the window ends at "now" — so the tag changed every time and the 304
+	// could never fire. On the endpoint the caching was built for, a dashboard
+	// re-downloaded all 48 slots on every poll.
+	//
+	// `generated_at` is genuinely useful to a human reading the response, so dropping it
+	// to make caching work would be fixing the wrong end.
+	material := encoded
+	if len(tag) > 0 {
+		material = []byte(strings.Join(tag, "\x00"))
+	}
+	sum := sha256.Sum256(material)
 	etag := `"` + hex.EncodeToString(sum[:16]) + `"`
 
 	w.Header().Set("ETag", etag)

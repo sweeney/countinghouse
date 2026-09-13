@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -480,4 +481,85 @@ func doGETWithHeader(t *testing.T, s *Server, path, key, value string) *httptest
 	w := httptest.NewRecorder()
 	s.handler().ServeHTTP(w, req)
 	return w
+}
+
+// ---------------------------------------------------------------------------
+// The 304 must fire when the CLOCK MOVES but the prices do not.
+//
+// TestPriceEndpointsAreETagCacheable passes with a frozen clock, which is the one place
+// in this branch where a fake hid the behaviour instead of exposing it: `generated_at`
+// and a window ending at "now" are identical across two requests at the same instant, so
+// hashing the rendered body appeared to work. In production the tag moved on every
+// request and the 304 could never fire — on the endpoint the caching was built for.
+// ---------------------------------------------------------------------------
+
+// tickingClock returns a different instant on each read, like a real one.
+type tickingClock struct {
+	at   time.Time
+	step time.Duration
+	n    int
+}
+
+func (c *tickingClock) Now() time.Time {
+	c.n++
+	return c.at.Add(time.Duration(c.n) * c.step)
+}
+
+func TestPriceETagSurvivesTheClockMoving(t *testing.T) {
+	for _, path := range []string{
+		"/prices/upcoming?hours=6",
+		"/prices?window=today",
+		"/prices/stats?window=today",
+		"/prices/cheapest?duration=1h",
+	} {
+		t.Run(path, func(t *testing.T) {
+			s := pxSetup(t, pxSlots(pxNow(t), 24, 20))
+			// Seconds apart, as two dashboard polls would be.
+			s.Clock = &tickingClock{at: pxNow(t), step: 7 * time.Second}
+
+			first := doGET(t, s, path)
+			if first.Code != http.StatusOK {
+				t.Fatalf("first request: %d %s", first.Code, first.Body.String())
+			}
+			etag := first.Header().Get("ETag")
+			if etag == "" {
+				t.Fatal("no ETag")
+			}
+
+			second := doGETWithHeader(t, s, path, "If-None-Match", etag)
+			if second.Code != http.StatusNotModified {
+				t.Errorf("got %d, want 304 — the clock moved but no price did, so the tag "+
+					"must not change. Hashing the rendered body makes generated_at (or a "+
+					"window ending at now) move the tag on every request, and the "+
+					"dashboard re-downloads every slot on every poll.", second.Code)
+			}
+		})
+	}
+}
+
+// And the tag must still move when a price actually changes, even with the clock moving —
+// the failure mode of over-correcting from "hash everything" to "hash only metadata",
+// where a restated price would be served stale indefinitely.
+func TestPriceETagStillTracksRestatements(t *testing.T) {
+	a := pxSetup(t, pxSlots(pxNow(t), 24, 20))
+	b := pxSetup(t, pxSlots(pxNow(t), 24, 33))
+	a.Clock = &tickingClock{at: pxNow(t), step: 7 * time.Second}
+	b.Clock = &tickingClock{at: pxNow(t), step: 11 * time.Second}
+
+	// A FORWARD window, because the fixture places its slots ahead of the clock and
+	// window=today looks backward — so `today` holds zero slots and both fingerprints
+	// are empty, which made this test pass vacuously on two of three paths.
+	fwd := "window=custom&from=" + url.QueryEscape(pxNow(t).Format(time.RFC3339)) +
+		"&to=" + url.QueryEscape(pxNow(t).Add(6*time.Hour).Format(time.RFC3339))
+	for _, path := range []string{"/prices/upcoming?hours=6", "/prices?" + fwd, "/prices/stats?" + fwd} {
+		ea := doGET(t, a, path).Header().Get("ETag")
+		eb := doGET(t, b, path).Header().Get("ETag")
+		if ea == "" || eb == "" {
+			t.Fatalf("%s: missing ETag", path)
+		}
+		if ea == eb {
+			t.Errorf("%s: a changed price produced the same ETag — the tag keys on metadata "+
+				"only, so a restatement would be served stale indefinitely", path)
+		}
+	}
 }

@@ -163,8 +163,11 @@ func (s *Server) handleDeviceCost(w http.ResponseWriter, r *http.Request) {
 		// counter_slot the effective rate is the number that makes the cost
 		// readable — whether this device ran cheap or dear against the day —
 		// because there is no single unit_rate to report instead.
-		"attribution":    plan.attribution(),
-		"effective_rate": round.To(energy.EffectiveRate(dc.Cost, dc.KWh-dc.UnpricedKWh), round.RateDP),
+		"attribution": plan.attribution(),
+		// Read from the costed device rather than recomputed here: one definition of
+		// the effective rate, so this endpoint and the matching /bill row cannot
+		// disagree about the same device in the same window.
+		"effective_rate": round.To(dc.EffectiveRate, round.RateDP),
 	}
 	// Energy no rate was held for is reported, never charged at nothing. Absent
 	// when zero, so its presence always means something.

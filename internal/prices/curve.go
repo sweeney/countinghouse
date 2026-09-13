@@ -1,7 +1,9 @@
 package prices
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -352,6 +354,26 @@ func (c Curve) DailyStats(loc *time.Location) []DayStats {
 		out = append(out, st)
 	}
 	return out
+}
+
+// Fingerprint is a compact digest of what the curve CONTAINS: every slot's start and
+// its inc-VAT price, in order.
+//
+// For HTTP caching. Hashing a rendered response body is the obvious approach and is
+// wrong here, because three of the four price responses carry a timestamp that moves on
+// every request — so the tag changed every time and the 304 could never fire. Hashing
+// only the window and tariff is the opposite error: the tag then does not move when a
+// price is RESTATED, and a client serves a stale price indefinitely.
+//
+// This is the middle: stable across requests, and different the moment any price in the
+// window changes. Prices are formatted rather than raw so the digest does not depend on
+// float formatting incidentals.
+func (c Curve) Fingerprint() string {
+	var b strings.Builder
+	for _, s := range c.Slots {
+		fmt.Fprintf(&b, "%s=%.6f;", s.ValidFrom.UTC().Format(time.RFC3339), s.IncVATPence)
+	}
+	return b.String()
 }
 
 // RateInterval reports the half-hour slot grid, satisfying energy.Granularity.

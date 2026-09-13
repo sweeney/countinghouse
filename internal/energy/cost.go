@@ -147,6 +147,18 @@ func StandingChargeAcross(segments []config.Segment) float64 {
 	return total
 }
 
+// effectiveRate is the VAT-inclusive £/kWh this device actually paid.
+//
+// The denominator is PRICED energy — kWh less whatever had no rate — for the reason
+// the bill-level figure already gives: dividing by energy that carried no price
+// quietly understates the rate actually paid. This existed in two places with two
+// different denominators, so /devices/{id}/cost and the matching row of /bill reported
+// different rates for identical inputs whenever anything was unpriced. The whole
+// attraction of naming EffectiveRate was having one definition of it.
+func (d DeviceCost) EffectiveRateOf() float64 {
+	return EffectiveRate(d.Cost, d.KWh-d.UnpricedKWh)
+}
+
 // PriceFlat fills in each device's Cost at one flat rate.
 //
 // The flat path, unchanged in behaviour: kWh x unit_rate x (1 + vat_rate). A
@@ -179,7 +191,7 @@ func PriceFlat(devices []DeviceCost, t config.Tariff) {
 func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, meterPresent bool, pricing BillPricing) Bill {
 	var energyCost, monitoredKWh, unpriced float64
 	for i := range devices {
-		devices[i].EffectiveRate = EffectiveRate(devices[i].Cost, devices[i].KWh)
+		devices[i].EffectiveRate = devices[i].EffectiveRateOf()
 		energyCost += devices[i].Cost
 		monitoredKWh += devices[i].KWh
 		unpriced += devices[i].UnpricedKWh

@@ -97,7 +97,10 @@ func (e EnergyTariffs) PeriodsBetween(from, to time.Time) ([]Segment, error) {
 	}
 	t, ok := e.Electricity()
 	if !ok {
-		return nil, fmt.Errorf("config: no electricity tariff configured")
+		// Same sentinel as the dated document's empty case: nothing configured is a
+		// misconfiguration the caller should refuse over, as distinct from a window the
+		// configuration does not reach.
+		return nil, fmt.Errorf("config: %w", ErrNoAgreements)
 	}
 	return []Segment{{Start: from, Stop: to, Tariff: t}}, nil
 }

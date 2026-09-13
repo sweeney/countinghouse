@@ -144,9 +144,12 @@ func TestAssembleBillDerivesEffectiveRateAndUnpriced(t *testing.T) {
 	if bill.UnpricedKWh != 4 {
 		t.Errorf("UnpricedKWh = %v, want 4", bill.UnpricedKWh)
 	}
-	// Per device: cost ÷ that device's energy.
-	if got, want := bill.Devices[0].EffectiveRate, 2.0/14; math.Abs(got-want) > 1e-12 {
-		t.Errorf("device a EffectiveRate = %v, want %v", got, want)
+	// Per device: cost ÷ PRICED energy (14 − 4 = 10), the same rule the bill-level
+	// figure below uses. This used to assert 2.0/14 — dividing by energy that carried
+	// no price — which made /devices/{id}/cost and the matching /bill row report two
+	// different rates for one device. One definition, and this is it.
+	if got, want := bill.Devices[0].EffectiveRate, 2.0/10; math.Abs(got-want) > 1e-12 {
+		t.Errorf("device a EffectiveRate = %v, want %v (priced energy only)", got, want)
 	}
 	// For the bill: cost ÷ PRICED energy (19 − 4 = 15). Dividing by all 19 would
 	// quietly understate the rate actually paid, which is the number a consumer

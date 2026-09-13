@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -52,6 +53,11 @@ type tariffPlan struct {
 	// scalar is true.
 	flat config.Tariff
 
+	// uncovered is set when no agreement covers part of the window, carrying the
+	// reason. The plan still prices what it can (nothing, in that stretch) rather than
+	// failing, and the caller surfaces this so the gap is visible rather than silent.
+	uncovered string
+
 	// scalar reports that ONE flat tariff covers the whole window, which is the
 	// only case where a single whole-window energy figure times a single rate is
 	// exact. Two flat tariffs either side of a switchover do not qualify: the
@@ -80,8 +86,28 @@ func (p tariffPlan) attribution() string {
 // rather than either a 500 or a silent £0.00.
 func (s *Server) planFor(ctx context.Context, from, to time.Time) (tariffPlan, error) {
 	segments, err := s.Config.Tariffs().PeriodsBetween(from, to)
-	if err != nil {
+	if errors.Is(err, config.ErrNoAgreements) {
+		// Nothing configured at all: the service can never price anything, and a
+		// deployment in that state wants telling rather than a chart of free
+		// electricity. Distinct from a window the agreements simply do not reach.
 		return tariffPlan{}, err
+	}
+	if err != nil {
+		// An uncovered stretch is a real state — the agreements document is allowed to
+		// describe a period when this house was not a customer — and PeriodsBetween is
+		// right to refuse to price it. But refusing to price it is not the same as
+		// refusing to ANSWER: the kWh is known and only the money is not.
+		//
+		// So the window is tiled with a pricer that reports unknown, which is the same
+		// treatment a half hour with no archived price already gets. /series renders the
+		// energy it has, /bill still reports unpriced_kwh, and neither invents a number.
+		// Previously this became a 503 on three series routes, so a chart of data
+		// predating the first agreement returned nothing at all — the opposite
+		// philosophy to the one this service applies everywhere else.
+		return tariffPlan{
+			pricer:    energy.SegmentedPricer{Segments: []energy.PricedSegment{{Start: from, Stop: to, Pricer: energy.UnpricedSlots{}}}},
+			uncovered: err.Error(),
+		}, nil
 	}
 
 	plan := tariffPlan{standing: energy.StandingChargeAcross(segments)}
@@ -183,6 +209,9 @@ func (s *Server) costDevices(r *http.Request, win energy.Window, plan tariffPlan
 			dc.KWh = kwh
 		}
 		energy.PriceFlat(billable, plan.flat)
+		for i := range billable {
+			billable[i].EffectiveRate = billable[i].EffectiveRateOf()
+		}
 		return nil
 	}
 
@@ -197,6 +226,7 @@ func (s *Server) costDevices(r *http.Request, win energy.Window, plan tariffPlan
 		// that the other devices can answer.
 		t := totals[dc.DeviceID]
 		dc.KWh, dc.Cost, dc.UnpricedKWh = t.kwh, t.cost, t.unpriced
+		dc.EffectiveRate = dc.EffectiveRateOf()
 	}
 	return nil
 }

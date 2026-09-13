@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -167,6 +168,16 @@ func (e EnergyAgreements) TariffFor(t time.Time) (Tariff, bool) {
 	return Tariff{}, false
 }
 
+// ErrNoAgreements means the document names no electricity agreement at all, as
+// distinct from naming some that do not cover a particular window.
+//
+// The two are different failures and deserve different answers. Nothing configured is a
+// misconfiguration: the service can never price anything, and saying so loudly is
+// right. A window no agreement covers is a legitimate state — the document may honestly
+// describe a period when this house was not a customer — and the energy for it is still
+// known even though the money is not.
+var ErrNoAgreements = errors.New("no electricity agreements configured")
+
 // PeriodsBetween implements TariffSource.
 //
 // Segments tile [from, to) exactly, so an apportioned standing charge adds up to
@@ -181,7 +192,7 @@ func (e EnergyAgreements) PeriodsBetween(from, to time.Time) ([]Segment, error) 
 	}
 	agreements := e.electricity()
 	if len(agreements) == 0 {
-		return nil, fmt.Errorf("config: no electricity agreements configured")
+		return nil, fmt.Errorf("config: %w", ErrNoAgreements)
 	}
 
 	var segs []Segment

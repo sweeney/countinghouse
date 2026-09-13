@@ -613,3 +613,99 @@ func TestBillSpanningTwoFlatTariffs(t *testing.T) {
 		t.Error("the whole window was billed at the tariff in force at its START")
 	}
 }
+
+// /devices/{id}/cost and the matching /bill row must report the SAME effective rate for
+// the same device and window. They did not when anything was unpriced: the handler
+// divided by priced energy and AssembleBill divided by all of it, so two endpoints gave
+// two rates for identical inputs.
+func TestEffectiveRateAgreesBetweenDeviceCostAndBill(t *testing.T) {
+	// Only four slots priced, so there IS unpriced energy — without it the two
+	// denominators coincide and the bug is invisible.
+	s, _, _ := scSetup(t, 4)
+
+	dev := decode(t, mustGET(t, s, "/devices/winefridge/cost?window=today"))
+	bill := decode(t, mustGET(t, s, "/bill?window=today"))
+
+	devRate, ok := dev["effective_rate"].(float64)
+	if !ok {
+		t.Fatalf("no effective_rate on /devices/{id}/cost: %v", dev)
+	}
+	var billRate float64
+	var found bool
+	for _, d := range bill["devices"].([]any) {
+		dm := d.(map[string]any)
+		if dm["device_id"] == "winefridge" {
+			billRate, _ = dm["effective_rate"].(float64)
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("winefridge missing from the bill")
+	}
+	if u, present := dev["unpriced_kwh"]; !present || u == 0.0 {
+		t.Fatalf("the fixture has no unpriced energy, so this cannot detect the bug: %v", dev)
+	}
+	if math.Abs(devRate-billRate) > 1e-9 {
+		t.Errorf("effective_rate = %v on /devices/winefridge/cost but %v on /bill — one "+
+			"definition, read in both places", devRate, billRate)
+	}
+}
+
+// A window no agreement reaches must DEGRADE, not 503. The energy is known and only the
+// money is not — which is exactly how a half hour with no archived price is already
+// treated. Before this, a chart of data predating the first agreement returned nothing
+// at all, the opposite philosophy to the one the rest of the service applies.
+func TestUncoveredWindowStillServesEnergy(t *testing.T) {
+	buckets := scBuckets(t)
+	s := scServer(t, buckets)
+	// An agreement that starts AFTER the window, so nothing covers it.
+	future := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.Config = scConfig{
+		devices: testDevices(),
+		agreements: config.EnergyAgreements{Agreements: map[string][]config.Agreement{
+			"electricity": {{
+				From: &future, Name: "Later", Type: config.TariffTypeFixed,
+				Unit: "kWh", VATRate: 0.05, UnitRate: 0.2, DailyStandingCharge: 0.5,
+			}},
+		}},
+	}
+
+	m := decode(t, mustGET(t, s, "/series?window=today&group_by=device"))
+	series, _ := m["series"].([]any)
+	if len(series) == 0 {
+		t.Fatal("no series returned for an uncovered window")
+	}
+	var anyKWh bool
+	for _, x := range series {
+		sm := x.(map[string]any)
+		if k, _ := sm["total_kwh"].(float64); k > 0 {
+			anyKWh = true
+			// The money must be absent, not invented.
+			if c, _ := sm["total_cost"].(float64); c != 0 {
+				t.Errorf("%v: total_cost = %v for an uncovered window; the price is unknown, "+
+					"so charging anything is a guess", sm["key"], c)
+			}
+			if u, _ := sm["unpriced_kwh"].(float64); u == 0 {
+				t.Errorf("%v: energy is priced at nothing without reporting unpriced_kwh", sm["key"])
+			}
+		}
+	}
+	if !anyKWh {
+		t.Error("the response carried no energy at all; the kWh is known even when the price is not")
+	}
+}
+
+// But NOTHING configured is still a refusal. That is a misconfiguration — the service can
+// never price anything — and a deployment in that state wants telling rather than a chart
+// of free electricity.
+func TestNoAgreementsAtAllStillRefuses(t *testing.T) {
+	s := scServer(t, scBuckets(t))
+	s.Config = scConfig{devices: testDevices(), agreements: config.EnergyAgreements{}}
+
+	if w := doGET(t, s, "/series?window=today&group_by=device"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("want 503 with nothing configured, got %d: %s", w.Code, w.Body.String())
+	}
+	if w := doGET(t, s, "/bill?window=today"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("/bill want 503, got %d", w.Code)
+	}
+}
