@@ -27,6 +27,18 @@ type Curve struct {
 
 	// Slots are the prices held, oldest first. Sparse: a window may have holes.
 	Slots []Slot
+
+	// Derived once by NewCurve, because computing them per slot made rendering
+	// quadratic — 2.98s of CPU for a year-long window. All three are read-only after
+	// construction, so copying a Curve by value (which the Pricer interface requires)
+	// shares them rather than duplicating the work.
+	//
+	// Absent on a Curve built as a literal, and every accessor falls back to the linear
+	// path in that case — so this is an optimisation, not a precondition.
+	sortedInc []float64     // every slot's inc-VAT pence, ascending
+	byStart   map[int64]int // slot start (unix seconds) → index into Slots
+	med       float64
+	hasMed    bool
 }
 
 // SlotLength is the half-hour the archive is keyed on.
@@ -132,6 +144,13 @@ func (c Curve) BandOf(s Slot) Band {
 // The centre for banding. Robust to the plunge clusters that make a mean
 // unrepresentative — see bandThreshold.
 func (c Curve) median() float64 {
+	if c.hasMed {
+		return c.med
+	}
+	return c.medianSlow()
+}
+
+func (c Curve) medianSlow() float64 {
 	if len(c.Slots) == 0 {
 		return 0
 	}
@@ -152,6 +171,16 @@ func (c Curve) median() float64 {
 // Cheapest-first because the question being asked is "when should I run this",
 // so rank 1 should be the answer rather than the thing to avoid.
 func (c Curve) RankOf(s Slot) int {
+	if c.sortedInc != nil {
+		// Binary search on the ascending prices: the rank is how many are strictly
+		// cheaper, plus one. Was a full scan per slot, which is what made rendering
+		// quadratic when called for every slot in the window.
+		return sort.SearchFloat64s(c.sortedInc, s.IncVATPence) + 1
+	}
+	return c.rankOfSlow(s)
+}
+
+func (c Curve) rankOfSlow(s Slot) int {
 	rank := 1
 	for _, other := range c.Slots {
 		if other.IncVATPence < s.IncVATPence {
@@ -309,6 +338,19 @@ type DayStats struct {
 	// load that day was worth the bother.
 	SpreadExcVATPence float64
 
+	// The same four figures INC VAT.
+	//
+	// Both bases are carried because this struct mixed them and the mix was a trap:
+	// min/max/mean/spread were ex-VAT while PlungeSlots counted on the inc-VAT value,
+	// and the sibling curve endpoints are inc-VAT throughout. That difference was
+	// documented in three places, which is three places saying a thing that would still
+	// surprise whoever compared a spread here against a price on /prices. Emitting both
+	// costs nothing and removes the trap instead of describing it.
+	MinIncVATPence    float64
+	MaxIncVATPence    float64
+	MeanIncVATPence   float64
+	SpreadIncVATPence float64
+
 	// PlungeSlots counts half hours priced at or below zero.
 	PlungeSlots int
 }
@@ -335,8 +377,9 @@ func (c Curve) DailyStats(loc *time.Location) []DayStats {
 		st := DayStats{
 			Day: d, Slots: len(slots),
 			MinExcVATPence: slots[0].ExcVATPence, MaxExcVATPence: slots[0].ExcVATPence,
+			MinIncVATPence: slots[0].IncVATPence, MaxIncVATPence: slots[0].IncVATPence,
 		}
-		var total float64
+		var totalExc, totalInc float64
 		for _, s := range slots {
 			if s.ExcVATPence < st.MinExcVATPence {
 				st.MinExcVATPence = s.ExcVATPence
@@ -344,16 +387,67 @@ func (c Curve) DailyStats(loc *time.Location) []DayStats {
 			if s.ExcVATPence > st.MaxExcVATPence {
 				st.MaxExcVATPence = s.ExcVATPence
 			}
+			// Tracked independently rather than grossed up from the ex-VAT extremes: VAT
+			// on a NEGATIVE price makes it more negative, so the cheapest slot ex-VAT is
+			// the cheapest inc-VAT — but assuming a fixed multiplier would bake in a VAT
+			// rate this package deliberately does not hold.
+			if s.IncVATPence < st.MinIncVATPence {
+				st.MinIncVATPence = s.IncVATPence
+			}
+			if s.IncVATPence > st.MaxIncVATPence {
+				st.MaxIncVATPence = s.IncVATPence
+			}
 			if s.IncVATPence <= 0 {
 				st.PlungeSlots++
 			}
-			total += s.ExcVATPence
+			totalExc += s.ExcVATPence
+			totalInc += s.IncVATPence
 		}
-		st.MeanExcVATPence = total / float64(len(slots))
+		st.MeanExcVATPence = totalExc / float64(len(slots))
 		st.SpreadExcVATPence = st.MaxExcVATPence - st.MinExcVATPence
+		st.MeanIncVATPence = totalInc / float64(len(slots))
+		st.SpreadIncVATPence = st.MaxIncVATPence - st.MinIncVATPence
 		out = append(out, st)
 	}
 	return out
+}
+
+// NewCurve builds a curve over [from, to) from slots, precomputing the derivations that
+// would otherwise be recomputed per slot.
+//
+// Rendering used to be QUADRATIC. RankOf is O(n) in the window, PercentileOf calls it,
+// and BandOf re-sorted every price to find the median — once per slot. Measured on this
+// code before the change: 48 slots 0.1ms, a month 44ms, a YEAR 2.98s of CPU for one
+// request, with ~2 MB of response behind it. RateAt was separately a linear scan per
+// lookup, which cost 883ms to price a year for ONE device, times the fleet.
+//
+// The fix needs no API change: sort the prices once, index the slots by start once, take
+// the median once. docs/octopus-price-data-model.md §5 specified the slot index in the
+// first place and the implementation kept a slice.
+//
+// A Curve built as a literal still works — every accessor falls back to the linear path
+// when the derived fields are absent — so this is an optimisation rather than a
+// precondition. Serving paths go through here.
+func NewCurve(from, to time.Time, slots []Slot) Curve {
+	c := Curve{From: from, To: to, Slots: slots}
+
+	c.byStart = make(map[int64]int, len(slots))
+	inc := make([]float64, 0, len(slots))
+	for i, sl := range slots {
+		c.byStart[sl.ValidFrom.UTC().Unix()] = i
+		inc = append(inc, sl.IncVATPence)
+	}
+	sort.Float64s(inc)
+	c.sortedInc = inc
+	if n := len(inc); n > 0 {
+		if n%2 == 1 {
+			c.med = inc[n/2]
+		} else {
+			c.med = (inc[n/2-1] + inc[n/2]) / 2
+		}
+		c.hasMed = true
+	}
+	return c
 }
 
 // Fingerprint is a compact digest of what the curve CONTAINS: every slot's start and
@@ -401,6 +495,20 @@ func (c Curve) RateInterval() time.Duration { return SlotLength }
 // False means NO PRICE IS HELD for that half hour, which a caller must surface as
 // unpriced energy. Returning zero would charge nothing for real consumption.
 func (c Curve) RateAt(t time.Time) (float64, bool) {
+	if c.byStart != nil {
+		// One map lookup on the slot the instant falls in, rather than scanning the
+		// window. A year-long bill was 883ms per device on the linear path.
+		if i, ok := c.byStart[t.UTC().Truncate(SlotLength).Unix()]; ok {
+			if sl := c.Slots[i]; sl.Covers(t) {
+				return sl.IncVATPence / 100, true
+			}
+		}
+		return 0, false
+	}
+	return c.rateAtSlow(t)
+}
+
+func (c Curve) rateAtSlow(t time.Time) (float64, bool) {
 	for _, s := range c.Slots {
 		if s.Covers(t) {
 			return s.IncVATPence / 100, true

@@ -376,3 +376,129 @@ func TestCurveDailyStats(t *testing.T) {
 }
 
 func approxEq(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+
+// ---------------------------------------------------------------------------
+
+// The precomputed fast paths must agree EXACTLY with the linear ones they replace.
+// Rendering was quadratic (2.98s of CPU for a year-long window) and RateAt was a linear
+// scan per lookup (883ms to price a year for one device); the fix is precomputation, and
+// the only thing that matters is that it did not change any answer.
+func TestNewCurveFastPathsMatchTheLinearOnes(t *testing.T) {
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	var slots []Slot
+	for i := 0; i < 96; i++ { // two days, with negatives and a duplicate price
+		f := start.Add(time.Duration(i) * SlotLength)
+		to := f.Add(SlotLength)
+		p := []float64{-3.2, 0, 4.5, 4.5, 18, 27.5, 44.1, 61}[i%8]
+		slots = append(slots, Slot{
+			TariffCode: testTariff, ValidFrom: f, ValidTo: &to,
+			ExcVATPence: p, IncVATPence: p * 1.05, RetrievedAt: start,
+		})
+	}
+
+	fast := NewCurve(start, start.Add(48*time.Hour), slots)
+	// A literal carries no derived data, so it takes the linear path — which is what
+	// makes this a comparison rather than two calls to the same code.
+	slow := Curve{From: fast.From, To: fast.To, Slots: slots}
+	if slow.sortedInc != nil || slow.byStart != nil || slow.hasMed {
+		t.Fatal("the literal curve has derived data; this test compares nothing")
+	}
+
+	if f, s := fast.median(), slow.median(); f != s {
+		t.Errorf("median: fast %v, slow %v", f, s)
+	}
+	for _, sl := range slots {
+		if f, s := fast.RankOf(sl), slow.RankOf(sl); f != s {
+			t.Errorf("RankOf(%v): fast %d, slow %d", sl.IncVATPence, f, s)
+		}
+		if f, s := fast.BandOf(sl), slow.BandOf(sl); f != s {
+			t.Errorf("BandOf(%v): fast %v, slow %v", sl.IncVATPence, f, s)
+		}
+		// Midpoint, start and last instant of each slot.
+		for _, at := range []time.Time{
+			sl.ValidFrom, sl.ValidFrom.Add(15 * time.Minute), sl.ValidFrom.Add(SlotLength - time.Nanosecond),
+		} {
+			fr, fok := fast.RateAt(at)
+			sr, sok := slow.RateAt(at)
+			if fr != sr || fok != sok {
+				t.Errorf("RateAt(%s): fast (%v,%v), slow (%v,%v)", at, fr, fok, sr, sok)
+			}
+		}
+	}
+	// And outside the window both must decline.
+	for _, at := range []time.Time{start.Add(-time.Hour), start.Add(72 * time.Hour)} {
+		if _, fok := fast.RateAt(at); fok {
+			t.Errorf("RateAt(%s) answered outside the window", at)
+		}
+	}
+}
+
+// A gap must stay a gap on the fast path: an indexed lookup that returned a neighbouring
+// slot would charge real energy at the wrong price, which is worse than reporting it
+// unpriced.
+func TestNewCurveFastPathHonoursGaps(t *testing.T) {
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	var slots []Slot
+	for i := 0; i < 6; i++ {
+		if i == 2 || i == 3 {
+			continue // a hole
+		}
+		f := start.Add(time.Duration(i) * SlotLength)
+		to := f.Add(SlotLength)
+		slots = append(slots, Slot{
+			TariffCode: testTariff, ValidFrom: f, ValidTo: &to,
+			ExcVATPence: 20, IncVATPence: 21, RetrievedAt: start,
+		})
+	}
+	c := NewCurve(start, start.Add(3*time.Hour), slots)
+
+	for _, i := range []int{2, 3} {
+		at := start.Add(time.Duration(i)*SlotLength + 15*time.Minute)
+		if _, ok := c.RateAt(at); ok {
+			t.Errorf("RateAt(%s) answered inside the gap", at)
+		}
+	}
+	if _, ok := c.RateAt(start.Add(15 * time.Minute)); !ok {
+		t.Error("a held slot was not found")
+	}
+}
+
+// DailyStats carries BOTH VAT bases. The struct used to mix them — min/max/mean/spread
+// ex-VAT while PlungeSlots counted on the inc-VAT value — and the four sibling price
+// routes are inc-VAT throughout, so a consumer comparing a spread here against a price
+// there was comparing different things.
+func TestDailyStatsCarriesBothVATBases(t *testing.T) {
+	loc := time.UTC
+	start := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	var slots []Slot
+	// Deliberately spanning zero, because VAT on a negative price makes it MORE
+	// negative — so the inc-VAT minimum is not the ex-VAT minimum grossed up by a
+	// positive factor in the way a careless implementation would assume.
+	for i, p := range []float64{-4.0, 10.0, 30.0} {
+		f := start.Add(time.Duration(i) * SlotLength)
+		to := f.Add(SlotLength)
+		slots = append(slots, Slot{
+			TariffCode: testTariff, ValidFrom: f, ValidTo: &to,
+			ExcVATPence: p, IncVATPence: p * 1.05, RetrievedAt: start,
+		})
+	}
+	st := NewCurve(start, start.Add(90*time.Minute), slots).DailyStats(loc)
+	if len(st) != 1 {
+		t.Fatalf("days = %d, want 1", len(st))
+	}
+	d := st[0]
+
+	if d.MinExcVATPence != -4.0 || d.MaxExcVATPence != 30.0 {
+		t.Errorf("ex-VAT range = %v..%v, want -4..30", d.MinExcVATPence, d.MaxExcVATPence)
+	}
+	if math.Abs(d.MinIncVATPence-(-4.2)) > 1e-9 || math.Abs(d.MaxIncVATPence-31.5) > 1e-9 {
+		t.Errorf("inc-VAT range = %v..%v, want -4.2..31.5", d.MinIncVATPence, d.MaxIncVATPence)
+	}
+	if math.Abs(d.SpreadIncVATPence-35.7) > 1e-9 {
+		t.Errorf("inc-VAT spread = %v, want 35.7", d.SpreadIncVATPence)
+	}
+	// The two bases must differ, or this test would pass on a copy-paste.
+	if d.SpreadExcVATPence == d.SpreadIncVATPence {
+		t.Error("both spreads are identical; one basis is not being computed")
+	}
+}
