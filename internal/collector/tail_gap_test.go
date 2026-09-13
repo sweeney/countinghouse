@@ -2,10 +2,13 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/notify"
+
+	"github.com/sweeney/countinghouse/internal/prices"
 )
 
 // ---------------------------------------------------------------------------
@@ -242,4 +245,131 @@ func TestSmallInteriorHoleInTomorrowStillAlerts(t *testing.T) {
 		t.Errorf("a single interior hole in tomorrow did not alert past the deadline: %v",
 			h.noti.kinds())
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The daily sweep, and the archive-unreadable condition.
+// ---------------------------------------------------------------------------
+
+// A restatement on a day already held must be FOUND without a restart. Sync
+// short-circuits on UpToDate once the horizon stops moving, so nothing re-read a held
+// day except within the 2h overlap — which made restatement detection, the reason the
+// archive is append-only with a retrieved_at and a log table, effectively restart-only.
+func TestDailySweepFindsARestatement(t *testing.T) {
+	f := newFakeFetcher(ts(t, "2026-09-05T23:00:00Z"), ts(t, "2026-09-10T22:00:00Z"))
+	h := newHarness(t, ts(t, "2026-09-10T08:00:00Z"), f)
+	ctx := context.Background()
+
+	// Fill the archive, then confirm a plain sync no longer fetches anything.
+	if _, err := h.c.Backfill(ctx, ts(t, "2026-09-05T23:00:00Z"), ts(t, "2026-09-10T22:00:00Z")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.c.Sync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.UpToDate {
+		t.Fatalf("expected the horizon to be unmoved, so a sweep is the only thing that " +
+			"would re-read; otherwise this test proves nothing")
+	}
+
+	// The supplier revises a price on a day we already hold, four days back.
+	revised := ts(t, "2026-09-07T10:00:00Z")
+	f.priceAt = func(at time.Time) (float64, float64) {
+		if at.Equal(revised) {
+			return 40, 42
+		}
+		return 20, 21
+	}
+
+	// A sync still finds nothing: the horizon has not moved.
+	if _, err := h.c.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if h.c.Status().Restated != 0 {
+		t.Fatal("a plain sync somehow saw the revision; the premise of the sweep is wrong")
+	}
+
+	// 02:00 local arrives.
+	h.clock.Set(ts(t, "2026-09-11T01:00:00Z"))
+	h.c.sweepIfDue(ctx)
+
+	if got := h.c.Status().Restated; got == 0 {
+		t.Error("the daily sweep did not find the restatement; without it a revised price " +
+			"we may already have billed is never noticed")
+	}
+}
+
+// The sweep runs once per local day, not on every tick inside the hour.
+func TestDailySweepRunsOncePerDay(t *testing.T) {
+	f := newFakeFetcher(ts(t, "2026-09-09T23:00:00Z"), ts(t, "2026-09-10T22:00:00Z"))
+	h := newHarness(t, ts(t, "2026-09-10T01:00:00Z"), f)
+	ctx := context.Background()
+
+	h.c.sweepIfDue(ctx)
+	first := len(f.rateCalls)
+	if first == 0 {
+		t.Fatal("the first sweep fetched nothing")
+	}
+	// Four more ticks inside the same hour.
+	for i := 0; i < 4; i++ {
+		h.clock.Set(ts(t, "2026-09-10T01:00:00Z").Add(time.Duration(i+1) * 5 * time.Minute))
+		h.c.sweepIfDue(ctx)
+	}
+	if len(f.rateCalls) != first {
+		t.Errorf("the sweep ran again within the same day: %d calls, want %d", len(f.rateCalls), first)
+	}
+	// The next day it runs again.
+	h.clock.Set(ts(t, "2026-09-11T01:00:00Z"))
+	h.c.sweepIfDue(ctx)
+	if len(f.rateCalls) == first {
+		t.Error("the sweep did not run on the following day")
+	}
+}
+
+// Outside the sweep hour it does nothing, so it never competes with the publication
+// watch for the day's new prices.
+func TestDailySweepOnlyRunsInItsHour(t *testing.T) {
+	f := newFakeFetcher(ts(t, "2026-09-09T23:00:00Z"), ts(t, "2026-09-10T22:00:00Z"))
+	h := newHarness(t, ts(t, "2026-09-10T15:10:00Z"), f) // inside the publication watch
+	h.c.sweepIfDue(context.Background())
+	if len(f.rateCalls) != 0 {
+		t.Errorf("the sweep ran during the publication window: %d calls", len(f.rateCalls))
+	}
+}
+
+// An UNREADABLE archive must be reported as itself, not as "no prices held". The
+// archive may be perfectly full; it is the read that failed, and a zero completeness
+// made that indistinguishable from missing data.
+func TestUnreadableArchiveIsItsOwnCondition(t *testing.T) {
+	f := newFakeFetcher(ts(t, "2026-09-09T23:00:00Z"), ts(t, "2026-09-10T22:00:00Z"))
+	h := newHarness(t, ts(t, "2026-09-10T08:00:00Z"), f)
+	ctx := context.Background()
+
+	if _, err := h.c.Sync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Fail only READS, so the sync itself still works and assess is actually reached.
+	// Closing the store would fail the writes first and Sync would return before
+	// completeness was ever evaluated — testing a different thing.
+	h.c.store = readFailingStore{Store: h.store}
+	h.clock.Set(ts(t, "2026-09-10T08:05:00Z"))
+	_, _ = h.c.Sync(ctx)
+
+	if !h.noti.has(notify.KindArchiveUnreadable) {
+		t.Errorf("an unreadable archive did not raise its own condition: %v", h.noti.kinds())
+	}
+	if h.noti.has(notify.KindPricesMissing) {
+		t.Errorf("an unreadable archive was reported as missing prices: %v — the archive may "+
+			"be perfectly full, and saying it is empty is a false statement about the data "+
+			"rather than a true one about the failure", h.noti.kinds())
+	}
+}
+
+// readFailingStore delegates everything but Range, which is how a corrupt file or a
+// permissions change presents: writes may still work while reads do not.
+type readFailingStore struct{ prices.Store }
+
+func (readFailingStore) Range(context.Context, string, time.Time, time.Time) ([]prices.Slot, error) {
+	return nil, errors.New("disk I/O error")
 }

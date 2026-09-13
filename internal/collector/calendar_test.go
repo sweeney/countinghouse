@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/sweeney/countinghouse/internal/prices"
 )
 
 // ---------------------------------------------------------------------------
@@ -20,89 +22,16 @@ import (
 // "Tomorrow" is what the collector assesses for completeness after a
 // publication, so getting it wrong on 28 February would mean checking the wrong
 // day — and, in a leap year, never checking 29 February at all.
-func TestTomorrowRollsOverCorrectly(t *testing.T) {
-	loc := london(t)
+// The two pure-function tests that used to live here — day rollover across leap years
+// and year boundaries, and local-day length across every DST changeover to 2028 — moved
+// out with the function. `localDayWindow` was a verbatim duplicate of the exported,
+// already-tested `prices.LocalDayWindow`, doc comment and all, and two copies of a
+// DST-critical function is one more than wanted. The coverage now lives beside the one
+// implementation, in internal/prices/calendar_test.go.
+//
+// What remains here is what belongs here: the COLLECTOR's behaviour across those same
+// calendar edges, which is a different question from whether the helper is right.
 
-	for _, tc := range []struct {
-		name     string
-		now      time.Time
-		wantDate string
-	}{
-		{
-			name: "28 February in a LEAP year: tomorrow is the 29th",
-			now:  time.Date(2028, 2, 28, 16, 10, 0, 0, loc), wantDate: "2028-02-29",
-		},
-		{
-			name: "28 February in a NON-leap year: tomorrow is 1 March",
-			now:  time.Date(2027, 2, 28, 16, 10, 0, 0, loc), wantDate: "2027-03-01",
-		},
-		{
-			name: "29 February: tomorrow is 1 March",
-			now:  time.Date(2028, 2, 29, 16, 10, 0, 0, loc), wantDate: "2028-03-01",
-		},
-		{
-			name: "31 December: tomorrow is in the next year",
-			now:  time.Date(2026, 12, 31, 16, 10, 0, 0, loc), wantDate: "2027-01-01",
-		},
-		{
-			name: "30 April: tomorrow is 1 May",
-			now:  time.Date(2026, 4, 30, 16, 10, 0, 0, loc), wantDate: "2026-05-01",
-		},
-		{
-			// The day before the clocks go back. Tomorrow is the 25-hour day, and
-			// the window for it must be 25 hours wide.
-			name: "the day before autumn back",
-			now:  time.Date(2026, 10, 24, 16, 10, 0, 0, loc), wantDate: "2026-10-25",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			tomorrow := tc.now.AddDate(0, 0, 1)
-			start, end := localDayWindow(tomorrow, loc)
-			if got := start.In(loc).Format("2006-01-02"); got != tc.wantDate {
-				t.Errorf("tomorrow = %s, want %s", got, tc.wantDate)
-			}
-			if got := start.In(loc).Format("15:04"); got != "00:00" {
-				t.Errorf("window starts at %s local, want midnight", got)
-			}
-			// The window length is the zone's business, not 24h.
-			hours := end.Sub(start).Hours()
-			if hours != 23 && hours != 24 && hours != 25 {
-				t.Errorf("window is %v hours, want 23, 24 or 25", hours)
-			}
-		})
-	}
-}
-
-// A 25-hour day must produce a 25-hour window, and a 23-hour day a 23-hour one.
-// This is the assertion that fails the moment somebody writes Add(24*time.Hour).
-func TestLocalDayWindowLengthFollowsTheZone(t *testing.T) {
-	loc := london(t)
-
-	for _, tc := range []struct {
-		name  string
-		day   time.Time
-		hours float64
-	}{
-		{name: "2026 spring forward", day: time.Date(2026, 3, 29, 12, 0, 0, 0, loc), hours: 23},
-		{name: "2026 autumn back", day: time.Date(2026, 10, 25, 12, 0, 0, 0, loc), hours: 25},
-		{name: "2027 spring forward", day: time.Date(2027, 3, 28, 12, 0, 0, 0, loc), hours: 23},
-		{name: "2027 autumn back", day: time.Date(2027, 10, 31, 12, 0, 0, 0, loc), hours: 25},
-		{name: "2028 spring forward, leap year", day: time.Date(2028, 3, 26, 12, 0, 0, 0, loc), hours: 23},
-		{name: "2028 autumn back, leap year", day: time.Date(2028, 10, 29, 12, 0, 0, 0, loc), hours: 25},
-		{name: "leap day is ordinary", day: time.Date(2028, 2, 29, 12, 0, 0, 0, loc), hours: 24},
-		{name: "an ordinary summer day", day: time.Date(2026, 6, 15, 12, 0, 0, 0, loc), hours: 24},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			start, end := localDayWindow(tc.day, loc)
-			if got := end.Sub(start).Hours(); got != tc.hours {
-				t.Errorf("window = %v hours, want %v", got, tc.hours)
-			}
-		})
-	}
-}
-
-// A sweep of N days across 29 February must reach back N CALENDAR days, not
-// N*24h — otherwise in a leap year it quietly covers one day less than asked.
 func TestCatchUpSpansALeapDay(t *testing.T) {
 	loc := london(t)
 	// Sweeping 7 days back from 3 March 2028 must reach 25 February, crossing the
@@ -121,7 +50,7 @@ func TestCatchUpSpansALeapDay(t *testing.T) {
 	}
 
 	// The leap day itself must be in the archive, all 48 slots of it.
-	start, end := localDayWindow(time.Date(2028, 2, 29, 12, 0, 0, 0, loc), loc)
+	start, end := prices.LocalDayWindow(time.Date(2028, 2, 29, 12, 0, 0, 0, loc), loc)
 	held, err := h.store.Range(context.Background(), testTariffCode, start, end)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +60,7 @@ func TestCatchUpSpansALeapDay(t *testing.T) {
 	}
 
 	// And the sweep reached the full seven calendar days back.
-	earliest, _ := localDayWindow(now.AddDate(0, 0, -7), loc)
+	earliest, _ := prices.LocalDayWindow(now.AddDate(0, 0, -7), loc)
 	if got := earliest.In(loc).Format("2006-01-02"); got != "2028-02-25" {
 		t.Errorf("seven days before 2028-03-03 is %s, want 2028-02-25", got)
 	}
@@ -150,7 +79,7 @@ func TestSyncOnALeapDay(t *testing.T) {
 	now := time.Date(2028, 2, 29, 16, 10, 0, 0, loc)
 	// Published to the end of local 1 March, so both the leap day and tomorrow
 	// are complete.
-	_, tomorrowEnd := localDayWindow(now.AddDate(0, 0, 1), loc)
+	_, tomorrowEnd := prices.LocalDayWindow(now.AddDate(0, 0, 1), loc)
 
 	f := newFakeFetcher(ts(t, "2028-02-27T00:00:00Z"), tomorrowEnd)
 	h := newHarness(t, now.UTC(), f)
@@ -174,7 +103,7 @@ func TestSyncOnALeapDay(t *testing.T) {
 func TestSyncAcrossTheYearBoundary(t *testing.T) {
 	loc := london(t)
 	now := time.Date(2026, 12, 31, 16, 10, 0, 0, loc)
-	_, tomorrowEnd := localDayWindow(now.AddDate(0, 0, 1), loc)
+	_, tomorrowEnd := prices.LocalDayWindow(now.AddDate(0, 0, 1), loc)
 
 	f := newFakeFetcher(ts(t, "2026-12-29T00:00:00Z"), tomorrowEnd)
 	h := newHarness(t, now.UTC(), f)

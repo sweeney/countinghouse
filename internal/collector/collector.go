@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -140,8 +141,9 @@ type Collector struct {
 	vatRateAt func(time.Time) (float64, bool)
 	log       *slog.Logger
 
-	mu     sync.Mutex
-	status Status
+	mu        sync.Mutex
+	status    Status
+	lastSweep time.Time
 }
 
 // Status is the collector's health, as rendered on /healthz.
@@ -349,8 +351,8 @@ func (c *Collector) CatchUp(ctx context.Context, days int) (SyncResult, error) {
 		days = 7
 	}
 	now := c.clock.Now()
-	start, _ := localDayWindow(now.AddDate(0, 0, -days), c.loc)
-	_, end := localDayWindow(now, c.loc)
+	start, _ := prices.LocalDayWindow(now.AddDate(0, 0, -days), c.loc)
+	_, end := prices.LocalDayWindow(now, c.loc)
 	return c.Backfill(ctx, start, end)
 }
 
@@ -422,12 +424,33 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 		})
 	}
 
-	todayStart, todayEnd := localDayWindow(now, c.loc)
+	todayStart, todayEnd := prices.LocalDayWindow(now, c.loc)
 	tomorrow := now.AddDate(0, 0, 1)
-	tomorrowStart, tomorrowEnd := localDayWindow(tomorrow, c.loc)
+	tomorrowStart, tomorrowEnd := prices.LocalDayWindow(tomorrow, c.loc)
 
-	today := c.dayCompleteness(ctx, now, todayStart, todayEnd)
-	tmrw := c.dayCompleteness(ctx, tomorrow, tomorrowStart, tomorrowEnd)
+	today, todayErr := c.dayCompleteness(ctx, now, todayStart, todayEnd)
+	tmrw, tmrwErr := c.dayCompleteness(ctx, tomorrow, tomorrowStart, tomorrowEnd)
+
+	// An unreadable archive is its own condition, and a loud one: we cannot say whether
+	// anything is missing, so every completeness verdict below would be a guess dressed
+	// as a fact. Reported and returned, rather than folded into "no prices held".
+	if todayErr != nil || tmrwErr != nil {
+		err := todayErr
+		if err == nil {
+			err = tmrwErr
+		}
+		c.alert(ctx, notify.Event{
+			Kind: notify.KindArchiveUnreadable, Severity: notify.SeverityError,
+			Summary:  "the price archive could not be read; completeness is unknown",
+			DedupKey: c.tariff.Code,
+			Detail: map[string]any{
+				"tariff_code": c.tariff.Code,
+				"error":       err.Error(),
+			},
+		})
+		return
+	}
+	c.resolve(notify.KindArchiveUnreadable, c.tariff.Code)
 
 	res.TomorrowComplete = tmrw.Complete
 	c.recordCompleteTo(today, tmrw, todayEnd, tomorrowEnd)
@@ -519,17 +542,22 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 }
 
 // dayCompleteness reads a day out of the archive and checks it.
-func (c *Collector) dayCompleteness(ctx context.Context, day, start, end time.Time) prices.DayCompleteness {
+func (c *Collector) dayCompleteness(ctx context.Context, day, start, end time.Time) (prices.DayCompleteness, error) {
 	held, err := c.store.Range(ctx, c.tariff.Code, start, end)
 	if err != nil {
-		// A read failure is not a completeness verdict. Report an empty day and
-		// let the error surface through the caller rather than asserting a day
-		// is complete on no evidence.
+		// A read failure is not a completeness verdict, and returning an empty day made
+		// it one: Present == 0 is indistinguishable from "no prices held", so assess
+		// paged "no prices held for today; energy consumed now cannot be priced" about
+		// an archive that may be perfectly full. Failure reading as data, which is the
+		// thing this package is otherwise careful about.
+		//
+		// The error now reaches the caller, which reports the archive being unreadable
+		// as its own condition — genuinely alert-worthy, and a different thing to say.
 		c.log.WarnContext(ctx, "collector: could not read day from archive",
 			"error", err, "day", start.Format(time.RFC3339))
-		return prices.DayCompleteness{Start: start, End: end}
+		return prices.DayCompleteness{Start: start, End: end}, err
 	}
-	return prices.CheckDay(held, day, c.loc)
+	return prices.CheckDay(held, day, c.loc), nil
 }
 
 // recordCompleteTo stores the end of the newest fully populated day.
@@ -583,13 +611,57 @@ func (c *Collector) pastDeadline(now time.Time) bool {
 // asserted in a test without running a loop. Short while actively waiting for a
 // publication, long otherwise — the idle cadence exists only as a backstop
 // against a publication that somehow misses the watch window.
+// sweepAtLocalHour is the local hour the daily re-read runs at: quiet, and after the
+// publication window has closed so it never competes with the watch.
+const sweepAtLocalHour = 2
+
+// sweepDays is how far back a sweep re-reads. A restatement is most likely to land on a
+// recent day, and a fortnight is cheap because every unchanged slot comes back Unchanged.
+const sweepDays = 14
+
+// sweepIfDue re-reads recent days once a day, so a restatement is actually FOUND.
+//
+// Sync short-circuits on UpToDate as soon as the horizon stops moving, which is the
+// common case by design — so no day already held was ever re-read except within the 2h
+// fetchOverlap. Backfill's own doc comment says a sweep "is the only thing that re-reads
+// days we already hold", and nothing scheduled one, which meant restatement detection
+// effectively only happened on restart. The data-model doc makes restatement the reason
+// the archive is append-only with a retrieved_at and a log table, so the gap between
+// stated intent and implementation was worth closing.
+//
+// Finding nothing is free: every slot comes back Unchanged.
+func (c *Collector) sweepIfDue(ctx context.Context) {
+	now := c.clock.Now().In(c.loc)
+	if now.Hour() != sweepAtLocalHour {
+		return
+	}
+	c.mu.Lock()
+	last := c.lastSweep
+	c.mu.Unlock()
+	// Once per local day, not once per tick within the hour.
+	if !last.IsZero() && last.In(c.loc).Format("2006-01-02") == now.Format("2006-01-02") {
+		return
+	}
+
+	res, err := c.CatchUp(ctx, sweepDays)
+	c.mu.Lock()
+	c.lastSweep = c.clock.Now()
+	c.mu.Unlock()
+	if err != nil {
+		c.log.WarnContext(ctx, "collector: daily sweep failed", "error", err)
+		return
+	}
+	c.log.InfoContext(ctx, "collector: daily sweep complete",
+		"days", sweepDays, "restated", res.Stored.Restated, "inserted", res.Stored.Inserted)
+}
+
 func (c *Collector) DueIn() time.Duration {
 	now := c.clock.Now()
 	c.mu.Lock()
 	completeThrough := c.status.CompleteTo
 	c.mu.Unlock()
 
-	_, tomorrowEnd := localDayWindow(now.AddDate(0, 0, 1), c.loc)
+	_, tomorrowEnd := prices.LocalDayWindow(now.AddDate(0, 0, 1), c.loc)
 	tomorrowCovered := !completeThrough.Before(tomorrowEnd)
 
 	if c.inWatchWindow(now) && !tomorrowCovered {
@@ -619,6 +691,7 @@ func (c *Collector) Run(ctx context.Context) {
 		if _, err := c.Sync(ctx); err != nil {
 			c.log.WarnContext(ctx, "collector: sync failed, keeping the archive as it was", "error", err)
 		}
+		c.sweepIfDue(ctx)
 
 		timer := time.NewTimer(c.DueIn())
 		select {
@@ -697,20 +770,16 @@ func rejectionReasons(rejections []prices.Rejection) string {
 	for _, r := range rejections {
 		counts[r.Reason]++
 	}
-	parts := make([]string, 0, len(counts))
-	for reason, n := range counts {
-		parts = append(parts, fmt.Sprintf("%s=%d", reason, n))
+	reasons := make([]string, 0, len(counts))
+	for reason := range counts {
+		reasons = append(reasons, string(reason))
+	}
+	// Sorted, for the reason checkJumps already sorts its groups: a log line that
+	// reorders itself run to run is a log line nobody can diff.
+	sort.Strings(reasons)
+	parts := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		parts = append(parts, fmt.Sprintf("%s=%d", reason, counts[prices.RejectReason(reason)]))
 	}
 	return strings.Join(parts, " ")
-}
-
-// localDayWindow returns the UTC bounds of the local day containing t.
-//
-// The next midnight comes from the calendar rather than from adding 24h, so the
-// zone decides how long the day was — 23, 24 or 25 hours.
-func localDayWindow(t time.Time, loc *time.Location) (start, end time.Time) {
-	local := t.In(loc)
-	start = time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
-	end = time.Date(local.Year(), local.Month(), local.Day()+1, 0, 0, 0, 0, loc)
-	return start.UTC(), end.UTC()
 }

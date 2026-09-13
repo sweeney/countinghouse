@@ -56,6 +56,12 @@ const (
 	// until somebody asks for that window.
 	KindPricesMissing = "prices_missing"
 
+	// KindArchiveUnreadable: the archive could not be READ, so no completeness verdict
+	// is possible. Distinct from prices being missing — the archive may be perfectly
+	// full — and it was previously reported as exactly that, which is a false statement
+	// about the data instead of a true one about the failure.
+	KindArchiveUnreadable = "archive_unreadable"
+
 	// KindRestatement: the supplier changed a price we had already stored, and
 	// possibly already billed. The archive records it, but somebody has to know.
 	KindRestatement = "restatement"
