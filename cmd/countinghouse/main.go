@@ -34,10 +34,25 @@ var version = "dev"
 
 func main() {
 	configPath := flag.String("config", "/etc/countinghouse/config.yaml", "path to YAML config")
+	// Collect-only mode fills the price archive and starts nothing else. It needs no
+	// config file, no Influx, no remote config and no credentials, because the
+	// supplier's rate endpoints are public — see collect.go.
+	collectOnly := flag.Bool("collect", false, "only collect prices into the archive; start no server")
+	cf := registerCollectFlags(flag.CommandLine)
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
+
+	if *collectOnly {
+		ctx, cancel := signalContext()
+		defer cancel()
+		if err := runCollect(ctx, cf, logger); err != nil {
+			logger.Error("collect", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {

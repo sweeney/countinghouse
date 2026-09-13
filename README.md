@@ -440,6 +440,36 @@ prices:
   the entire reason to keep it is the day that stops being true. Roughly 225 bytes a slot —
   measured at 7.8 MB for two years of one tariff, so ~80 MB over twenty.
 
+#### Collecting without the rest of the service
+
+The supplier's rate endpoints need **no authentication** — they are public product data —
+so filling the archive needs no API key, no Influx, no remote config and no identity.
+`-collect` runs only the collector:
+
+```sh
+# Fill the archive and keep it current. Ctrl-C to stop.
+countinghouse -collect -prices-db ~/prices.db -tariff E-1R-AGILE-24-10-01-X -vat 0.05
+
+# One sync and exit, for a cron or a check.
+countinghouse -collect -once -prices-db ~/prices.db -tariff …
+
+# Backfill from a date first.
+countinghouse -collect -once -back-to 2025-01-01 -prices-db ~/prices.db -tariff …
+```
+
+It is the same collector, store, validation gates and migrations the service uses — not a
+second implementation that could drift from them and write a subtly different archive. It
+exists for three jobs: **start accumulating real prices now**, on any machine, before the
+service is deployed (several open questions here are measurements waiting on weeks of data
+rather than decisions waiting on thought); a one-shot **backfill**; and reproducing a
+collector problem against the live API without standing the service up around it.
+
+`-vat` is optional and only feeds the inc/exc consistency check — pricing never uses it.
+Omitting it means *do not check*, which is different from checking against 0%.
+
+Measured against the live API: 34,942 slots in one pass, 0 rejections, and a second run a
+clean no-op.
+
 No backfill step is needed: a first sync against an empty archive requests an unbounded range
 and so pulls the supplier's whole published history in one pass (measured: 34,894 slots in
 6.5 s). Afterwards each sync fetches only what is new, detected by a single ~350-byte probe.
