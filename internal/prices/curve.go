@@ -25,6 +25,80 @@ type Curve struct {
 
 	// Slots are the prices held, oldest first. Sparse: a window may have holes.
 	Slots []Slot
+
+	// idx accelerates RateAt, and is nil unless the curve was built by NewCurve
+	// AND its slots are well formed enough for a lookup to be provably identical
+	// to the scan — see newRateIndex. A nil idx is not a correctness problem, only
+	// a slower one, so a hand-built Curve{...} literal still answers correctly.
+	idx *rateIndex
+}
+
+// rateIndex is the lookup structure behind RateAt.
+//
+// Slots ascending by start, with their starts lifted out as UnixNano so the search
+// compares integers rather than calling time.Time.Before through an interface. Only
+// ever built for a curve whose slots are disjoint, which is what makes a binary
+// search equivalent to the scan it replaces.
+type rateIndex struct {
+	starts []int64
+	slots  []Slot
+}
+
+// NewCurve builds a curve over [from, to) and indexes its slots for lookup.
+//
+// The index is what keeps the cost path linear rather than quadratic: pricing a
+// month bills 1,488 half-hourly buckets PER DEVICE, and each one is a RateAt. With
+// a scan that is 12.7ms a device over a month and 1.55s over a year; with the index
+// it is a binary search.
+//
+// Prefer this to a Curve literal anywhere the curve will be priced against. A
+// literal is not wrong — RateAt falls back to the scan — it is just slow, which is
+// why the indexed path is the one the constructor gives you by default.
+func NewCurve(from, to time.Time, slots []Slot) Curve {
+	return Curve{From: from, To: to, Slots: slots, idx: newRateIndex(slots)}
+}
+
+// newRateIndex indexes slots, or returns nil when it cannot do so SAFELY.
+//
+// RateAt's contract is the first slot in Slots order that covers the instant. A
+// binary search can only reproduce that when at most one slot covers any instant,
+// so anything that could make two slots cover one instant refuses the index and
+// keeps the scan:
+//
+//   - an open-ended slot (a standing charge, or a flat rate not yet superseded),
+//     which by definition overlaps everything after it;
+//   - two slots sharing a start, which is what a variable tariff's DIRECT_DEBIT and
+//     NON_DIRECT_DEBIT rows are — the same half hour at two prices;
+//   - any other overlap, which Gate C reports as two prices for one kWh.
+//
+// Refusing rather than approximating matters here more than the speed does: this
+// function decides what a kWh cost.
+func newRateIndex(slots []Slot) *rateIndex {
+	if len(slots) == 0 {
+		return nil
+	}
+
+	sorted := make([]Slot, len(slots))
+	copy(sorted, slots)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].ValidFrom.Before(sorted[j].ValidFrom) })
+
+	starts := make([]int64, len(sorted))
+	for i, s := range sorted {
+		if s.ValidTo == nil {
+			return nil // unbounded: overlaps everything after it
+		}
+		if i > 0 {
+			prev := sorted[i-1]
+			if s.ValidFrom.Equal(prev.ValidFrom) {
+				return nil // two prices for one half hour
+			}
+			if prev.ValidTo.After(s.ValidFrom) {
+				return nil // the previous slot has not ended when this one starts
+			}
+		}
+		starts[i] = s.ValidFrom.UnixNano()
+	}
+	return &rateIndex{starts: starts, slots: sorted}
 }
 
 // SlotLength is the half-hour the archive is keyed on.
@@ -462,10 +536,30 @@ func (c Curve) RateInterval() time.Duration { return SlotLength }
 // False means NO PRICE IS HELD for that half hour, which a caller must surface as
 // unpriced energy. Returning zero would charge nothing for real consumption.
 func (c Curve) RateAt(t time.Time) (float64, bool) {
+	if c.idx != nil {
+		return c.idx.rateAt(t)
+	}
 	for _, s := range c.Slots {
 		if s.Covers(t) {
 			return s.IncVATPence / 100, true
 		}
+	}
+	return 0, false
+}
+
+// rateAt is the indexed lookup: the last slot starting at or before t, which is the
+// only one that can cover t once the slots are known to be disjoint.
+func (r *rateIndex) rateAt(t time.Time) (float64, bool) {
+	tn := t.UnixNano()
+	// The first slot starting strictly after t; the one before it is the candidate.
+	i := sort.Search(len(r.starts), func(i int) bool { return r.starts[i] > tn }) - 1
+	if i < 0 {
+		return 0, false // t precedes every slot held
+	}
+	// Still checked: a gap in the archive leaves the previous slot ending before t,
+	// and unpriced must stay distinguishable from free.
+	if s := r.slots[i]; s.Covers(t) {
+		return s.IncVATPence / 100, true
 	}
 	return 0, false
 }

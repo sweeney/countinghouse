@@ -96,7 +96,10 @@ func (s *Server) curveFor(ctx context.Context, code string, from, to time.Time) 
 	if err != nil {
 		return prices.Curve{}, err
 	}
-	return prices.Curve{From: from, To: to, Slots: slots}, nil
+	// NewCurve rather than a literal: it indexes the slots, which is what keeps the
+	// cost path's per-bucket RateAt off a linear scan. A month bills 1,488 buckets
+	// per device and every one of them is a lookup.
+	return prices.NewCurve(from, to, slots), nil
 }
 
 // slotJSON renders one classified slot with the derivations a consumer would

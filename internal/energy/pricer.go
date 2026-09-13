@@ -145,11 +145,31 @@ func (s SegmentedPricer) RateInterval() time.Duration {
 	return finest
 }
 
+// sorted returns the segments oldest first.
+//
+// RateAt is called once per bucket per device — 1,488 times a device for a month on
+// the half-hourly grid — so the common case must not allocate. Segments arrive
+// already ordered (PeriodsBetween tiles the window in order), and checking that is
+// a walk over one or two elements; only genuinely unordered input pays for a copy
+// and a sort.
 func (s SegmentedPricer) sorted() []PricedSegment {
+	if segmentsAreOrdered(s.Segments) {
+		return s.Segments
+	}
 	out := make([]PricedSegment, len(s.Segments))
 	copy(out, s.Segments)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
 	return out
+}
+
+// segmentsAreOrdered reports whether segments are already oldest first.
+func segmentsAreOrdered(segs []PricedSegment) bool {
+	for i := 1; i < len(segs); i++ {
+		if segs[i].Start.Before(segs[i-1].Start) {
+			return false
+		}
+	}
+	return true
 }
 
 // CostBuckets prices per-bucket energy at each bucket's own rate.
