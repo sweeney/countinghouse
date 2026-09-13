@@ -354,25 +354,30 @@ func (c Curve) DailyStats(loc *time.Location) []DayStats {
 	return out
 }
 
+// RateInterval reports the half-hour slot grid, satisfying energy.Granularity.
+//
+// This is what tells the series layer that a bucket coarser than a half hour cannot
+// be priced at the rate holding at its start — the difference between a monthly
+// chart's cost agreeing with the monthly bill and being out by tens of percent.
+func (c Curve) RateInterval() time.Duration { return SlotLength }
+
 // RateAt returns the VAT-inclusive £/kWh for the slot covering t, satisfying
 // energy.Pricer.
 //
 // £ rather than the pence the archive stores, because the cost layer works in
-// pounds; and VAT-inclusive because that is what is actually charged. The
-// supplier's own inc-VAT figure is used rather than one computed from ex-VAT — it
-// carries more precision than any rounding policy we would pick, and Gate A has
-// already checked the two agree.
+// pounds; and VAT-inclusive because that is what is actually charged.
+//
+// The supplier's own inc-VAT figure is used rather than one computed from ex-VAT.
+// It carries more precision than any rounding policy we would pick, and — more to
+// the point — it is the number the supplier actually bills. That is why the
+// inc/exc consistency check is a Gate B WARNING rather than a Gate A rejection: if
+// the two columns disagree with our configured vat_rate, the figure used here is
+// unaffected, because it never passed through that rate. A slot flagged for a VAT
+// mismatch is still priced from the supplier's delivered inc figure, which is the
+// right answer.
 //
 // False means NO PRICE IS HELD for that half hour, which a caller must surface as
 // unpriced energy. Returning zero would charge nothing for real consumption.
-// RateInterval reports the half-hour slot grid, satisfying energy.Granularity.
-//
-// This is what tells the series layer that a bucket coarser than a half hour cannot
-// be priced at the rate holding at its start — which is the difference between a
-// monthly chart's cost agreeing with the monthly bill and being out by tens of
-// percent.
-func (c Curve) RateInterval() time.Duration { return SlotLength }
-
 func (c Curve) RateAt(t time.Time) (float64, bool) {
 	for _, s := range c.Slots {
 		if s.Covers(t) {

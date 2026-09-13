@@ -79,9 +79,11 @@ const (
 	ReasonValidToNotAfter    RejectReason = "valid_to_not_after_valid_from"
 	ReasonSlotDuration       RejectReason = "slot_duration"
 	ReasonPriceNotFinite     RejectReason = "price_not_finite"
-	ReasonVATMismatch        RejectReason = "vat_mismatch"
-	ReasonTariffCode         RejectReason = "tariff_code_unparseable"
-	ReasonTariffMismatch     RejectReason = "tariff_code_mismatch"
+	// There is deliberately no vat_mismatch REJECTION reason: the inc/exc
+	// relationship is Gate B (WarnVATMismatch), because both columns come from the
+	// supplier and only our config can disagree with them. See checkVAT.
+	ReasonTariffCode     RejectReason = "tariff_code_unparseable"
+	ReasonTariffMismatch RejectReason = "tariff_code_mismatch"
 )
 
 // WarningKind names a Gate B finding. Also a metric label, also stable.
