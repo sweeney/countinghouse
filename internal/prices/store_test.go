@@ -84,8 +84,15 @@ func TestOpenAppliesMigrationsAndIsReRunnable(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// common/db re-runs every migration file on every boot, so the migrations
-	// must be idempotent. Reopening must neither fail nor lose data.
+	// common/db re-runs every migration file on every boot, so the migrations must be
+	// idempotent. Reopening must neither fail nor lose data.
+	//
+	// This second Open is the tripwire for sweeney/identity#44, and it is worth not
+	// deleting. That bug only bites on a re-run — `ADD COLUMN` cannot be made idempotent,
+	// so it errors with `duplicate column name` and drops into a retry that splits the
+	// file on `;` without regard for comments. The upstream issue observes that a suite
+	// which only ever opens a fresh database exercises the first boot alone and cannot
+	// catch it. This test is why we would.
 	s2, err := Open(path)
 	if err != nil {
 		t.Fatalf("second Open (migrations must be idempotent): %v", err)

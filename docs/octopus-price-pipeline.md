@@ -137,6 +137,22 @@ operator needs in order to correct config and most of what a per-slot `vat_rate`
 would have bought — so this largely answers deferred **D4**. The residual exposure is the
 standing charge, which really does use the config rate.
 
+> **If D4 is ever built, read this first.** A `vat_rate` column means
+> `ALTER TABLE unit_price ADD COLUMN`, and that is the one statement that trips
+> [sweeney/identity#44](https://github.com/sweeney/identity/issues/44): `common/db` re-runs
+> every migration on every boot, `ADD COLUMN` cannot be made idempotent, and the
+> `duplicate column name` retry splits the file on `;` with no awareness of comments — so a
+> semicolon anywhere in the migration's prose breaks the **second** boot, not the first,
+> with an error naming a word from your own comment.
+>
+> Our migration comments are deliberately prose-heavy and 001 already contains one such
+> semicolon (harmlessly, since it has no `ADD COLUMN`). The bug is present in the pinned
+> `common@v0.5.0`. Two things protect us: keep semicolons out of a migration's comments,
+> and `TestOpenAppliesMigrationsAndIsReRunnable` — which opens the archive, writes,
+> closes and opens it **again**. That second open is the whole point: the upstream issue
+> notes that a suite which only ever opens a fresh database exercises only the first boot
+> and cannot catch this. Ours does not.
+
 The expected rate is resolved **per slot**, from the agreement covering that slot's
 `valid_from`, and an instant no agreement covers yields *no opinion* rather than a rate of
 zero. Zero is a legal VAT rate and so cannot double as "unknown": conflating them meant
