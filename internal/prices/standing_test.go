@@ -244,3 +244,103 @@ func TestStandingChargeWrongTariffIsRejected(t *testing.T) {
 		t.Fatalf("want a tariff mismatch rejection, got %+v", res.Rejected)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// first_seen_at: the fact the sweep was destroying
+// ---------------------------------------------------------------------------
+
+// retrieved_at advances on every confirmation; first_seen_at must not move once
+// written. This is the pair that lets "when did the supplier publish this?" and
+// "when did we last confirm it?" both be answerable — the first sweep overwrote
+// 716 rows' worth of the former before the column existed.
+func TestFirstSeenAtIsImmutableWhileRetrievedAtAdvances(t *testing.T) {
+	st := scStore(t)
+	ctx := context.Background()
+	from := day(2026, 3, 1)
+	end := from.Add(SlotLength)
+
+	first := Slot{
+		TariffCode: "E-1R-AGILE-24-10-01-A", ValidFrom: from, ValidTo: &end,
+		ExcVATPence: 20, IncVATPence: 21,
+		RetrievedAt: time.Date(2026, 2, 28, 15, 55, 0, 0, time.UTC), // publication
+	}
+	if _, err := st.Put(ctx, []Slot{first}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A sweep re-reads it a fortnight later, unchanged.
+	sweep := first
+	sweep.RetrievedAt = time.Date(2026, 3, 14, 2, 0, 0, 0, time.UTC)
+	res, err := st.Put(ctx, []Slot{sweep})
+	if err != nil || res.Unchanged != 1 {
+		t.Fatalf("sweep should be Unchanged: %+v %v", res, err)
+	}
+
+	var firstSeen, retrieved string
+	if err := st.db.DB().QueryRowContext(ctx,
+		`SELECT first_seen_at, retrieved_at FROM unit_price WHERE valid_from = ?`,
+		from.Format(timeLayout)).Scan(&firstSeen, &retrieved); err != nil {
+		t.Fatal(err)
+	}
+
+	if want := "2026-02-28T15:55:00Z"; firstSeen != want {
+		t.Errorf("first_seen_at = %q, want %q — the sweep must not move it", firstSeen, want)
+	}
+	if want := "2026-03-14T02:00:00Z"; retrieved != want {
+		t.Errorf("retrieved_at = %q, want %q — it means LAST CONFIRMED", retrieved, want)
+	}
+}
+
+// A restatement changes the value and moves retrieved_at, but the row is still
+// the same row: we first saw a price for that half hour when we first saw it.
+func TestFirstSeenAtSurvivesARestatement(t *testing.T) {
+	st := scStore(t)
+	ctx := context.Background()
+	from := day(2026, 3, 2)
+	end := from.Add(SlotLength)
+
+	s := Slot{
+		TariffCode: "E-1R-AGILE-24-10-01-A", ValidFrom: from, ValidTo: &end,
+		ExcVATPence: 20, IncVATPence: 21,
+		RetrievedAt: time.Date(2026, 3, 1, 15, 55, 0, 0, time.UTC),
+	}
+	if _, err := st.Put(ctx, []Slot{s}); err != nil {
+		t.Fatal(err)
+	}
+	s.IncVATPence = 25
+	s.RetrievedAt = time.Date(2026, 3, 2, 9, 10, 0, 0, time.UTC)
+	res, err := st.Put(ctx, []Slot{s})
+	if err != nil || res.Restated != 1 {
+		t.Fatalf("want a restatement: %+v %v", res, err)
+	}
+
+	var firstSeen string
+	if err := st.db.DB().QueryRowContext(ctx,
+		`SELECT first_seen_at FROM unit_price WHERE valid_from = ?`,
+		from.Format(timeLayout)).Scan(&firstSeen); err != nil {
+		t.Fatal(err)
+	}
+	if want := "2026-03-01T15:55:00Z"; firstSeen != want {
+		t.Errorf("first_seen_at = %q, want %q", firstSeen, want)
+	}
+}
+
+// Standing charges get the column too, so the storage path stays one path.
+func TestStandingChargesAlsoRecordFirstSeen(t *testing.T) {
+	st := scStore(t)
+	ctx := context.Background()
+	c := charge(day(2026, 1, 1), nil, 56.19, 59.0)
+	c.RetrievedAt = time.Date(2026, 1, 1, 8, 0, 0, 0, time.UTC)
+	if _, err := st.PutStandingCharges(ctx, []DailyCharge{c}); err != nil {
+		t.Fatal(err)
+	}
+	var firstSeen string
+	if err := st.db.DB().QueryRowContext(ctx,
+		`SELECT first_seen_at FROM standing_charge WHERE valid_from = ?`,
+		c.ValidFrom.Format(timeLayout)).Scan(&firstSeen); err != nil {
+		t.Fatal(err)
+	}
+	if want := "2026-01-01T08:00:00Z"; firstSeen != want {
+		t.Errorf("first_seen_at = %q, want %q", firstSeen, want)
+	}
+}

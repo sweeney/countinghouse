@@ -232,14 +232,19 @@ func putOne(ctx context.Context, tx *sql.Tx, rel relation, sl Slot) (outcome, er
 }
 
 func insert(ctx context.Context, tx *sql.Tx, rel relation, sl Slot) error {
+	// first_seen_at is written HERE and nowhere else. This is the only path that
+	// creates a row, so setting it alongside retrieved_at on insert — and never
+	// touching it in putOne's UPDATE — is what makes it immutable by construction
+	// rather than by discipline.
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO `+rel.table+` (
 			tariff_code, payment_method, valid_from, valid_to,
-			exc_vat_pence, inc_vat_pence, retrieved_at)
-		VALUES (?,?,?,?,?,?,?)`,
+			exc_vat_pence, inc_vat_pence, retrieved_at, first_seen_at)
+		VALUES (?,?,?,?,?,?,?,?)`,
 		sl.TariffCode, sl.PaymentMethod,
 		sl.ValidFrom.UTC().Format(timeLayout), nullableTime(sl.ValidTo),
-		sl.ExcVATPence, sl.IncVATPence, sl.RetrievedAt.UTC().Format(timeLayout),
+		sl.ExcVATPence, sl.IncVATPence,
+		sl.RetrievedAt.UTC().Format(timeLayout), sl.RetrievedAt.UTC().Format(timeLayout),
 	)
 	if err != nil {
 		return fmt.Errorf("prices: insert slot %s/%s: %w",

@@ -1,0 +1,22 @@
+-- When we FIRST saw a price, as against when we last confirmed it.
+--
+-- retrieved_at means "last confirmed": the nightly sweep re-reads the past
+-- fortnight and rewrites it on every unchanged row, which is deliberate — it
+-- tightens the bound on when a restatement must have happened. But until the
+-- sweep existed, nothing ever re-read a held day, so retrieved_at had
+-- incidentally been recording FIRST SEEN. That is what the supplier's ~15:55
+-- publication time was measured from, and the first sweep quietly overwrote 716
+-- rows' worth of it.
+--
+-- Both facts are wanted (docs/octopus-price-data-model.md), so they get two
+-- columns: this one is written once on insert and never updated again.
+--
+-- Rows that predate this column keep NULL rather than being backfilled from
+-- retrieved_at. For the rows a sweep has already touched that would be a
+-- fabrication, and "we do not know when we first saw this" is the true answer.
+--
+-- ADD COLUMN is safe to re-run: common/db records applied migrations in
+-- schema_migrations, and separately tolerates SQLite's "duplicate column name"
+-- for ADD COLUMN specifically.
+ALTER TABLE unit_price ADD COLUMN first_seen_at TEXT;
+ALTER TABLE standing_charge ADD COLUMN first_seen_at TEXT;

@@ -1,8 +1,13 @@
 -- The price archive.
 --
--- Every statement here must be IDEMPOTENT: common/db re-runs every migration
--- file on every boot and keeps no applied-migrations table, so anything that
--- cannot be executed twice will break startup the second time.
+-- common/db records applied migrations in `schema_migrations` (since v0.6.0), so
+-- each file runs ONCE. It separately tolerates SQLite's "duplicate column name"
+-- from an ADD COLUMN, and only from that, so a column can be added safely.
+--
+-- Statements here are still written idempotently where it costs nothing. What
+-- must NOT happen is editing a file after it has shipped: databases that already
+-- recorded it will never run it again, so the change reaches only new databases
+-- and the two drift apart. A changed body is warned about on the next boot.
 --
 -- Timestamps are stored as RFC3339 TEXT in UTC with a trailing Z and a fixed
 -- width, which makes lexicographic order identical to chronological order. That
