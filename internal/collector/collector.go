@@ -591,27 +591,34 @@ func (c *Collector) dayCompleteness(ctx context.Context, day, start, end time.Ti
 // gaps?" — and a complete tomorrow behind an incomplete today would not make
 // today priceable.
 func (c *Collector) recordCompleteTo(today, tomorrow prices.DayCompleteness, todayEnd, tomorrowEnd time.Time) {
+	// "How far can we price without gaps?" — so it runs forward from today and stops
+	// at the FIRST thing that would break a bill, which is an interior hole. The
+	// supplier's routine two-slot tail on the furthest published day is not such a
+	// thing: everything before it is priceable, and that is where this stops.
 	var completeTo time.Time
 	switch {
 	case today.Complete:
 		completeTo = todayEnd
-		if tomorrow.Complete {
+		switch {
+		case tomorrow.Complete:
 			completeTo = tomorrowEnd
+		case tomorrow.MissingTailOnly() && len(tomorrow.Missing) <= publishedTailSlack:
+			// After the afternoon publication TOMORROW is the furthest day and carries
+			// the tail, so this is the routine state for the rest of the day.
+			completeTo = tomorrow.TailGapStart()
 		}
 	case today.MissingTailOnly() && len(today.Missing) <= publishedTailSlack:
-		// Today short only by the supplier's routine tail. Everything before that gap
-		// is priceable, so report it — leaving the ZERO time here was read downstream
-		// as "no complete day of prices held" and degraded /healthz for the ~16 hours
-		// a day before the publication, on an archive holding years of prices.
+		// Before the publication, TODAY is the furthest day and carries the tail.
+		// Leaving the ZERO time here was read downstream as "no complete day of prices
+		// held" and degraded /healthz for the ~16 hours a day before the publication,
+		// on an archive holding years of prices.
 		completeTo = today.TailGapStart()
 	}
-	// Deliberately NOT advanced into a tail-shortened tomorrow, even though everything
-	// before the gap is priceable. Doing so makes complete_to equal known_to in the
-	// routine case, collapsing a distinction the health block exists to draw — a
-	// publication can advance the horizon across a whole day while leaving that day
-	// short, and known_to alone would answer "do we have tomorrow?" with yes when it is
-	// no. Whether complete_to should instead mean "priceable to here" is a separate
-	// decision about a documented field, not a side effect of quieting an alert.
+	// This does make complete_to equal known_to in the routine case, which was once the
+	// argument against advancing it. That turns out to be the point rather than the
+	// objection: the two then diverge precisely when an INTERIOR hole exists, which is
+	// the fault worth alerting on. A field permanently a day behind its neighbour
+	// carries less information than one that matches it until something is wrong.
 	c.mu.Lock()
 	c.status.CompleteTo = completeTo
 	c.mu.Unlock()

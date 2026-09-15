@@ -564,14 +564,33 @@ difference matters:
 | field | means | use |
 |---|---|---|
 | `known_to` | end of the newest slot held | "prices are arriving" |
-| `complete_to` | end of the newest **fully populated** local day | **"we can bill this far"** |
+| `complete_to` | how far prices run with **no gaps** | **"we can bill this far"** |
 
-Alert on `complete_to`. A publication routinely advances the horizon across a whole day while
-leaving that day two slots short, so `known_to` alone will tell you yes when the answer is no.
-`complete_to` at or behind now means today cannot be priced in full, and degrades the
-top-level `status`.
+Alert on `complete_to`. It stops at the first *interior* hole and **not** at the supplier's
+routine two-slot tail on the furthest published day, because everything before that tail is
+billable. `complete_to` at or behind now means today cannot be priced in full, and degrades
+the top-level `status`.
+
+In normal operation `complete_to` therefore **equals** `known_to`. That is the signal rather
+than a redundancy: the two diverge exactly when a slot the supplier published never reached
+us, so `complete_to < known_to` means a real hole rather than a horizon. It was previously
+held back a day so the two would look distinct, which cost more than it bought — a field
+permanently behind its neighbour carries less information than one that matches until
+something is wrong.
 
 ### Backing up the archive
+
+> **Not configured yet, deliberately.** The service goes live without offsite backups
+> and they are added afterwards. That is defensible only because the archive is still
+> rebuildable from Octopus today — which is precisely the property this section says we
+> cannot rely on forever, so it is a debt with a due date rather than a decision. It
+> needs an R2 API token scoped to the `countinghouse-sqlite` bucket. Leave the whole
+> `prices.backup` block out until then: a **partial** block is refused at startup, on
+> the grounds that a backup quietly not happening is worse than no backup.
+>
+> The restore has also never been performed. A backup that has not been restored is a
+> hypothesis.
+
 
 The archive is the one thing countinghouse writes and the only state here that is not
 rebuildable from Influx, so it is the one thing that gets a backup rather than a

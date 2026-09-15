@@ -590,10 +590,15 @@ func TestSyncRecoversAfterFailure(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // The real 2026-09-10 case. The horizon covers all of tomorrow while tomorrow is
-// missing its last two slots. complete_to must NOT advance past the
-// incomplete day, and the collector must report it as still worth polling rather
-// than alerting immediately.
-func TestSyncDistinguishesKnownToFromCompleteTo(t *testing.T) {
+// missing its last two slots — the supplier's routine tail.
+//
+// This test once asserted that complete_to must NOT advance into that day. It now
+// asserts the opposite, because the field means "how far can we bill", and
+// everything before the tail is billable. In this routine state known_to and
+// complete_to therefore AGREE; they diverge on an interior hole, which is the
+// fault worth seeing and is covered by
+// TestCompleteToStopsAtAnInteriorHoleNotTheHorizon.
+func TestSyncOnATailShortenedTomorrow(t *testing.T) {
 	// Exactly the observed case: published through 22:00Z, so the last slot is
 	// [21:30,22:00) and local 2026-09-11 is missing its final two — 46 of 48.
 	f := newFakeFetcher(ts(t, "2026-09-09T23:00:00Z"), ts(t, "2026-09-11T22:00:00Z"))
@@ -609,9 +614,14 @@ func TestSyncDistinguishesKnownToFromCompleteTo(t *testing.T) {
 	if !st.KnownTo.Equal(ts(t, "2026-09-11T22:00:00Z")) {
 		t.Errorf("KnownTo = %s, want the newest slot's end", st.KnownTo)
 	}
-	// The incomplete day must not count as complete.
-	if st.CompleteTo.After(ts(t, "2026-09-10T23:00:00Z")) {
-		t.Errorf("CompleteTo = %s; it must not advance past an incomplete day", st.CompleteTo)
+	// Billable up to the start of tomorrow's routine tail — which is exactly where
+	// the newest slot ends, so the two fields match here.
+	if !st.CompleteTo.Equal(ts(t, "2026-09-11T22:00:00Z")) {
+		t.Errorf("CompleteTo = %s, want the start of tomorrow's tail", st.CompleteTo)
+	}
+	if !st.CompleteTo.Equal(st.KnownTo) {
+		t.Errorf("CompleteTo %s and KnownTo %s should agree in the routine case",
+			st.CompleteTo, st.KnownTo)
 	}
 	if res.TomorrowComplete {
 		t.Error("tomorrow is missing two slots and must not be reported complete")

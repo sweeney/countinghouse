@@ -373,3 +373,53 @@ type readFailingStore struct{ prices.Store }
 func (readFailingStore) Range(context.Context, string, time.Time, time.Time) ([]prices.Slot, error) {
 	return nil, errors.New("disk I/O error")
 }
+
+// After the afternoon publication, TOMORROW becomes the furthest day and carries
+// the routine two-slot tail. Everything up to that tail is priceable, and
+// complete_to is documented as "we can bill this far" — so it must advance into
+// tomorrow rather than stopping at the end of today.
+//
+// It was deliberately not advanced, on the grounds that doing so makes complete_to
+// equal known_to in the routine case. It does — and that turns out to be the point:
+// the two then diverge precisely when an INTERIOR hole exists, which is the actual
+// fault. A field that is equal to its neighbour except when something is wrong is a
+// better signal than one that is permanently a day behind.
+func TestCompleteToAdvancesIntoATailShortenedTomorrow(t *testing.T) {
+	// Published through 22:00Z on the 11th: local 2026-09-11 is short its final two
+	// half hours, and local 2026-09-10 (today) is complete. Clock at 18:00 local,
+	// after the publication.
+	f := newFakeFetcher(ts(t, "2026-09-08T23:00:00Z"), ts(t, "2026-09-11T22:00:00Z"))
+	h := newHarness(t, ts(t, "2026-09-10T17:00:00Z"), f)
+
+	if _, err := h.c.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	st := h.c.Status()
+	want := ts(t, "2026-09-11T22:00:00Z") // 23:00 local on the 11th: the tail's start
+	if !st.CompleteTo.Equal(want) {
+		t.Errorf("CompleteTo = %s, want %s — everything up to tomorrow's routine tail "+
+			"is priceable, and that is what the field says it reports",
+			st.CompleteTo, want)
+	}
+}
+
+// The distinction the field exists to draw, now sharpened: an INTERIOR hole pulls
+// complete_to back to the hole, while known_to runs on to the horizon. That gap
+// between the two is the fault signal.
+func TestCompleteToStopsAtAnInteriorHoleNotTheHorizon(t *testing.T) {
+	f := newFakeFetcher(ts(t, "2026-09-08T23:00:00Z"), ts(t, "2026-09-11T22:00:00Z"))
+	// Drop one slot from the middle of today (local 2026-09-10, 12:00Z).
+	f.omit = map[time.Time]bool{ts(t, "2026-09-10T12:00:00Z"): true}
+	h := newHarness(t, ts(t, "2026-09-10T17:00:00Z"), f)
+
+	if _, err := h.c.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	st := h.c.Status()
+	if !st.CompleteTo.Before(ts(t, "2026-09-10T22:00:00Z")) {
+		t.Errorf("CompleteTo = %s; an interior hole at 12:00Z must pull it back to the "+
+			"hole rather than reporting the horizon", st.CompleteTo)
+	}
+}
