@@ -1029,6 +1029,12 @@ components:
         min:   { type: number }
         max:   { type: number }
         mean:  { type: number }
+        median:
+          type: number
+          description: >
+            The centre `band` is measured against. Served because a consumer is
+            invited to derive its own banding from this summary, which is
+            impossible without the figure the bands are actually drawn from.
         current:
           type: number
           description: >

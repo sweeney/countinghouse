@@ -714,8 +714,9 @@ whether now is a good time.
   share of the window as peak, which on a flat day is false. And the mean is dragged
   about by plunge clusters: on a real published day with ten negative slots the mean
   fell to 23.38p against a median of 28.42p, which would have banded **28 of 48 slots
-  as peak** — more than half the day — diluting the signal to nothing. The median shrugs that off — and plunge days are
-  exactly the days these endpoints exist for, so the statistic has to survive them.
+  as peak** — more than half the day — diluting the signal to nothing. The median
+  shrugs that off, and plunge days are exactly the days these endpoints exist for, so
+  the statistic has to survive them.
 - **`rank` 1 is the cheapest**, because the question is "when should I run this".
 - **`percentile`** is served too, so a consumer that dislikes our thresholds can band
   it differently without refetching — and `summary.median` carries the centre our own
@@ -736,7 +737,10 @@ question with no answer rather than a bad request.
 `/prices/stats` reports per-**local**-day figures — the only framing in which a 23- or
 25-hour day makes sense. `spread` is max − min: the single number saying whether
 shifting load that day was worth the bother. Figures are **VAT-inclusive**, as on every
-sibling price route, with ex-VAT values alongside under `*_exc_vat` keys.
+sibling price route, with ex-VAT values alongside under `*_exc_vat` keys. They were the
+other way round, and a dashboard plotting a daily mean against a live price was then out
+by the VAT rate with nothing on the wire to say so — a trap that had been documented in
+three places rather than removed.
 
 All four carry an **ETag** and a short `Cache-Control`, so a dashboard polling every
 few seconds gets a 304 rather than re-downloading 48 slots. The tag hashes the
@@ -895,9 +899,6 @@ as on the consumption routes. Today's prices are published in full before today 
 so a to-date curve would hand a dashboard half a chart and report it `complete`. `week`
 and `month` stay period-to-date, since the supplier publishes only about a day and a
 half ahead.
-
-`/prices/stats` emits **both VAT bases**: the unsuffixed keys stay ex-VAT and
-`*_inc_vat` siblings match the other price routes.
 
 `/healthz` carries a `reasons` array naming every failing condition, sorted and omitted
 when healthy.

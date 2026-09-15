@@ -473,7 +473,21 @@ window with three unpriced slots should still return a bill, and should still sa
 ## 7. Open decisions
 
 1. ~~Store~~ — **decided: SQLite via `common/db`** (§1). Behind `prices.Store`.
-2. **`AGREEMENT` from config, or synced from the account API?**
+2. ~~`AGREEMENT` from config, or synced from the account API?~~ — **decided: config
+   stays authoritative, and the service stays credential-free.**
+
+   The account API knows which tariff we are actually on, and cross-checking it would
+   catch a stale `energy_agreements` document that would otherwise price the wrong
+   tariff while looking entirely healthy. That is a real gap and it stays open.
+
+   It loses to what the check would cost. Countinghouse needs **no Octopus credential
+   at all** today — the rate endpoints are public — so adding this puts a live account
+   key on the host permanently, to catch a failure that requires somebody to have
+   edited config wrongly. A tariff switch is a deliberate human act that comes with a
+   config edit anyway, and the VAT half of the same risk is now covered: a batch whose
+   implied VAT disagrees with configuration raises `agreement_drift` (see
+   `vatDrift` in internal/collector). Revisit if a switchover is ever missed in
+   practice.
 3. **Amend the CLAUDE.md invariant** to permit one narrow write path for external facts —
    and note the archive is *not* a rebuildable-from-Influx cache, so the existing cache
    clause doesn't cover it.

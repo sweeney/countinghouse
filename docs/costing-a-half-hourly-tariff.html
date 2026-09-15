@@ -1,0 +1,1117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>:root{color-scheme:light dark}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>Costing a Half-Hourly Tariff</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+</head>
+<body>
+
+<style>
+:root{
+  /* Palette taken from how this domain already colours a price: a diverging scale
+     with zero as the pivot — teal below, amber above — over a cool neutral. */
+  --ground:#F5F7FA;
+  --surface:#FFFFFF;
+  --sunken:#EDF1F6;
+  --ink:#101826;
+  --ink-2:#3C475C;
+  --muted:#5D6880;
+  --faint:#8C96AC;
+  --rule:#D6DDE8;
+  --rule-2:#E7ECF3;
+
+  --grid:#24479E;        /* the accent: grid blue */
+  --grid-soft:#E7ECF9;
+  --plunge:#0B7A82;      /* negative / free energy */
+  --plunge-soft:#DFF0F1;
+  --peak:#B0511C;        /* dear */
+  --peak-soft:#F8EAE0;
+  --alarm:#9E2B2B;       /* defects */
+  --alarm-soft:#F8E7E7;
+
+  --measure:66ch;
+  --step--1:.8125rem;
+  --step-0:1.0625rem;
+  --step-1:1.3125rem;
+  --step-2:1.75rem;
+  --step-3:2.375rem;
+  --step-4:3.25rem;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0D131D;
+    --surface:#141C29;
+    --sunken:#101825;
+    --ink:#E4EAF4;
+    --ink-2:#BCC6D8;
+    --muted:#95A1B8;
+    --faint:#6B7692;
+    --rule:#263144;
+    --rule-2:#1C2534;
+    --grid:#7D9CEE;
+    --grid-soft:#1A2540;
+    --plunge:#4FC5CC;
+    --plunge-soft:#102A2D;
+    --peak:#E9945C;
+    --peak-soft:#2E1D12;
+    --alarm:#E47979;
+    --alarm-soft:#2C1618;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0D131D; --surface:#141C29; --sunken:#101825;
+  --ink:#E4EAF4; --ink-2:#BCC6D8; --muted:#95A1B8; --faint:#6B7692;
+  --rule:#263144; --rule-2:#1C2534;
+  --grid:#7D9CEE; --grid-soft:#1A2540;
+  --plunge:#4FC5CC; --plunge-soft:#102A2D;
+  --peak:#E9945C; --peak-soft:#2E1D12;
+  --alarm:#E47979; --alarm-soft:#2C1618;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--ground);
+  color:var(--ink);
+  font-family:"IBM Plex Serif",Georgia,"Times New Roman",serif;
+  font-size:var(--step-0);
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1040px;margin:0 auto;padding-inline:20px;padding-block:0}
+.col{max-width:var(--measure)}
+
+h1,h2,h3,h4,.dsp{font-family:Archivo,"Helvetica Neue",Arial,sans-serif;text-wrap:balance}
+h1{font-size:var(--step-4);line-height:1.02;font-weight:700;letter-spacing:-.022em;margin:0}
+h2{font-size:var(--step-2);line-height:1.12;font-weight:600;letter-spacing:-.014em;margin:0}
+h3{font-size:var(--step-1);line-height:1.2;font-weight:600;letter-spacing:-.008em;margin:0}
+h4{font-size:1.0625rem;font-weight:600;margin:0}
+p{margin:0}
+a{color:var(--grid)}
+code,kbd,.mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace}
+code{font-size:.875em;background:var(--sunken);padding:.1em .34em;border-radius:3px;color:var(--ink-2)}
+strong{font-weight:600;color:var(--ink)}
+em{font-style:italic}
+
+.eyebrow{
+  font-family:"IBM Plex Mono",monospace;font-size:.7rem;font-weight:500;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--faint);
+}
+
+/* ── masthead ─────────────────────────────────────────────── */
+.mast{border-bottom:1px solid var(--rule);background:var(--surface)}
+.mast .wrap{padding-block:56px 0}
+.mast-grid{display:flex;flex-direction:column;gap:22px}
+.thesis{font-size:var(--step-1);line-height:1.48;color:var(--ink-2);max-width:60ch}
+.mast-meta{
+  display:flex;flex-wrap:wrap;gap:0 30px;padding-top:6px;
+  font-family:"IBM Plex Mono",monospace;font-size:var(--step--1);color:var(--muted);
+}
+.mast-meta b{color:var(--ink);font-weight:500;font-variant-numeric:tabular-nums}
+
+/* ── the 48-slot rule: the fundamental unit of this whole subject ── */
+.daystrip{display:flex;gap:2px;height:13px;margin-block:30px 0}
+.daystrip i{flex:1;background:var(--rule);border-radius:1px}
+.daystrip i.neg{background:var(--plunge)}
+.daystrip i.pk{background:var(--peak)}
+.daystrip i.gap{background:transparent;border:1px dashed var(--faint);border-radius:0}
+
+/* ── figures ─────────────────────────────────────────────── */
+figure{margin:0;background:var(--surface);border:1px solid var(--rule);border-radius:4px;overflow:hidden}
+figure .scroller{overflow-x:auto}
+figcaption{
+  padding:12px 18px;border-top:1px solid var(--rule-2);
+  font-size:var(--step--1);line-height:1.5;color:var(--muted);
+}
+figcaption b{color:var(--ink-2);font-weight:600}
+svg{display:block;max-width:100%;height:auto}
+.svgpad{padding:16px 10px 6px}
+
+/* ── sections ────────────────────────────────────────────── */
+section{padding-block:60px;border-top:1px solid var(--rule)}
+section:first-of-type{border-top:none}
+.shead{display:flex;gap:16px;align-items:baseline;margin-bottom:26px}
+.snum{
+  font-family:"IBM Plex Mono",monospace;font-size:.78rem;font-weight:600;
+  color:var(--grid);padding-top:.45em;font-variant-numeric:tabular-nums;
+}
+.stack{display:flex;flex-direction:column;gap:20px}
+.stack-tight{display:flex;flex-direction:column;gap:12px}
+
+/* ── callouts, by role not by decoration ─────────────────── */
+.note{border-left:3px solid var(--grid);padding:2px 0 2px 18px;color:var(--ink-2)}
+.defect{border-left:3px solid var(--alarm);padding:2px 0 2px 18px}
+.defect .eyebrow{color:var(--alarm)}
+.found{border-left:3px solid var(--plunge);padding:2px 0 2px 18px}
+.found .eyebrow{color:var(--plunge)}
+
+/* ── definition list ─────────────────────────────────────── */
+.terms{display:grid;gap:0;border-top:1px solid var(--rule)}
+.term{display:grid;grid-template-columns:minmax(150px,210px) 1fr;gap:8px 26px;
+      padding-block:16px;border-bottom:1px solid var(--rule-2)}
+.term dt{font-family:Archivo,sans-serif;font-weight:600;font-size:1rem;line-height:1.35}
+.term dt span{display:block;font-family:"IBM Plex Mono",monospace;font-size:.72rem;
+              font-weight:400;color:var(--faint);letter-spacing:.02em;margin-top:3px}
+.term dd{margin:0;color:var(--ink-2);font-size:.9875rem;line-height:1.56}
+@media(max-width:620px){.term{grid-template-columns:1fr;gap:4px}}
+
+/* ── data table ──────────────────────────────────────────── */
+table{border-collapse:collapse;width:100%;font-family:"IBM Plex Mono",monospace;
+      font-size:.8125rem;font-variant-numeric:tabular-nums}
+th,td{padding:8px 16px;text-align:left;border-bottom:1px solid var(--rule-2)}
+th{white-space:nowrap}
+td{white-space:normal}
+th{font-weight:600;color:var(--faint);font-size:.7rem;letter-spacing:.08em;
+   text-transform:uppercase;border-bottom:1px solid var(--rule)}
+td.num{text-align:right;white-space:nowrap}
+tr.hl td{background:var(--alarm-soft)}
+tr.ok td{background:var(--plunge-soft)}
+
+/* ── code block ──────────────────────────────────────────── */
+pre{margin:0;background:var(--sunken);border:1px solid var(--rule-2);border-radius:4px;
+    padding:14px 16px;overflow-x:auto;font-size:.8125rem;line-height:1.6;color:var(--ink-2)}
+pre b{color:var(--alarm);font-weight:500}
+pre i{color:var(--plunge);font-style:normal}
+
+/* ── metric row ──────────────────────────────────────────── */
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(152px,1fr));gap:1px;
+         background:var(--rule);border:1px solid var(--rule);border-radius:4px;overflow:hidden}
+.metric{background:var(--surface);padding:16px 18px;display:flex;flex-direction:column;gap:3px}
+.metric .v{font-family:Archivo,sans-serif;font-size:1.5rem;font-weight:600;
+           letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.1}
+.metric .k{font-family:"IBM Plex Mono",monospace;font-size:.68rem;letter-spacing:.09em;
+           text-transform:uppercase;color:var(--faint)}
+.metric.bad .v{color:var(--alarm)}
+.metric.good .v{color:var(--plunge)}
+
+/* ── flow diagram ────────────────────────────────────────── */
+.flow{display:flex;flex-wrap:wrap;gap:10px;align-items:stretch}
+.fstep{flex:1 1 150px;background:var(--surface);border:1px solid var(--rule);
+       border-radius:4px;padding:13px 15px;display:flex;flex-direction:column;gap:5px;min-width:0}
+.fstep .t{font-family:Archivo,sans-serif;font-weight:600;font-size:.9375rem}
+.fstep .d{font-size:.8125rem;line-height:1.45;color:var(--muted)}
+.fstep .tag{font-family:"IBM Plex Mono",monospace;font-size:.66rem;letter-spacing:.08em;
+            text-transform:uppercase;color:var(--grid)}
+.fstep.stop{border-color:var(--alarm);}
+.fstep.stop .tag{color:var(--alarm)}
+
+footer{border-top:1px solid var(--rule);padding-block:44px 64px;color:var(--muted);
+       font-size:var(--step--1)}
+footer .wrap{display:flex;flex-direction:column;gap:10px}
+
+@media (prefers-reduced-motion:no-preference){
+  .daystrip i{transition:background .2s ease}
+}
+:focus-visible{outline:2px solid var(--grid);outline-offset:2px}
+</style>
+
+<header class="mast">
+  <div class="wrap">
+    <div class="mast-grid">
+      <div class="eyebrow">countinghouse &middot; pull request 35</div>
+      <h1>Costing a<br>Half-Hourly Tariff</h1>
+      <p class="thesis">A home electricity bill used to be one multiplication. On a tariff
+      that re-prices every thirty minutes — sometimes below zero — it stops being one, and
+      almost every assumption downstream of that multiplication turns out to have been
+      load-bearing.</p>
+      <div class="mast-meta">
+        <span>45 commits</span>
+        <span><b>+24,321</b> / <b>−459</b></span>
+        <span><b>99</b> files</span>
+        <span><b>1,064</b> tests</span>
+        <span><b>35,086</b> prices archived</span>
+      </div>
+    </div>
+
+    <figure style="margin-top:38px;border-bottom:none;border-radius:4px 4px 0 0">
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 260" width="880" role="img"
+             aria-label="A recorded day of half-hourly prices, falling from 33p to minus 2.6p in the early afternoon and rising to 50p in the evening peak.">
+          <!-- horizontal grid -->
+          <g stroke="var(--rule-2)" stroke-width="1">
+            <line x1="52" y1="31.9" x2="866" y2="31.9"/>
+            <line x1="52" y1="66.5" x2="866" y2="66.5"/>
+            <line x1="52" y1="101.2" x2="866" y2="101.2"/>
+            <line x1="52" y1="135.9" x2="866" y2="135.9"/>
+            <line x1="52" y1="170.5" x2="866" y2="170.5"/>
+          </g>
+          <!-- the zero line is the pivot of the whole subject -->
+          <line x1="52" y1="205.2" x2="866" y2="205.2" stroke="var(--ink-2)" stroke-width="1.25"/>
+          <path d="M52.0 205.2 L52.0 88.8 L69.3 90.1 L86.6 98.1 L104.0 92.6 L121.3 92.0 L138.6 105.2 L155.9 101.3 L173.2 109.3 L190.6 97.9 L207.9 107.3 L225.2 106.1 L242.5 109.9 L259.8 112.8 L277.1 112.8 L294.5 116.7 L311.8 118.7 L329.1 134.4 L346.4 139.5 L363.7 166.9 L381.1 185.1 L398.4 205.8 L415.7 212.4 L433.0 214.3 L450.3 214.3 L467.7 214.3 L485.0 214.3 L502.3 213.4 L519.6 212.0 L536.9 210.4 L554.3 199.1 L571.6 206.9 L588.9 181.8 L606.2 111.0 L623.5 77.1 L640.9 50.9 L658.2 31.1 L675.5 34.6 L692.8 31.8 L710.1 81.4 L727.4 76.6 L744.8 77.3 L762.1 79.8 L779.4 80.2 L796.7 77.8 L814.0 83.6 L831.4 91.7 L848.7 94.9 L866.0 95.1 L866.0 205.2 Z"
+                fill="var(--grid-soft)" stroke="none"/>
+          <path d="M52.0 88.8 L69.3 90.1 L86.6 98.1 L104.0 92.6 L121.3 92.0 L138.6 105.2 L155.9 101.3 L173.2 109.3 L190.6 97.9 L207.9 107.3 L225.2 106.1 L242.5 109.9 L259.8 112.8 L277.1 112.8 L294.5 116.7 L311.8 118.7 L329.1 134.4 L346.4 139.5 L363.7 166.9 L381.1 185.1 L398.4 205.8 L415.7 212.4 L433.0 214.3 L450.3 214.3 L467.7 214.3 L485.0 214.3 L502.3 213.4 L519.6 212.0 L536.9 210.4 L554.3 199.1 L571.6 206.9 L588.9 181.8 L606.2 111.0 L623.5 77.1 L640.9 50.9 L658.2 31.1 L675.5 34.6 L692.8 31.8 L710.1 81.4 L727.4 76.6 L744.8 77.3 L762.1 79.8 L779.4 80.2 L796.7 77.8 L814.0 83.6 L831.4 91.7 L848.7 94.9 L866.0 95.1"
+                fill="none" stroke="var(--grid)" stroke-width="2" stroke-linejoin="round"/>
+          <!-- the ten negative slots -->
+          <rect x="398" y="205.2" width="174" height="10" fill="var(--plunge)" opacity=".9"/>
+          <circle cx="658.2" cy="31.1" r="3.5" fill="var(--peak)"/>
+          <circle cx="450.3" cy="214.3" r="3.5" fill="var(--plunge)"/>
+          <line x1="430" y1="174" x2="430" y2="203" stroke="var(--plunge)" stroke-width="1"/>
+          <g font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--faint)">
+            <text x="44" y="35.4" text-anchor="end">50p</text>
+            <text x="44" y="70" text-anchor="end">40p</text>
+            <text x="44" y="104.7" text-anchor="end">30p</text>
+            <text x="44" y="139.4" text-anchor="end">20p</text>
+            <text x="44" y="174" text-anchor="end">10p</text>
+            <text x="44" y="208.7" text-anchor="end" fill="var(--ink-2)">0</text>
+            <text x="52" y="238">00:00</text>
+            <text x="190.6" y="238">04:00</text>
+            <text x="329.1" y="238">08:00</text>
+            <text x="467.7" y="238">12:00</text>
+            <text x="606.2" y="238">16:00</text>
+            <text x="744.8" y="238">20:00</text>
+          </g>
+          <g font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="500">
+            <text x="668" y="27" fill="var(--peak)">50.22p peak</text>
+            <text x="400" y="168" fill="var(--plunge)">ten slots below zero — min −2.62p</text>
+          </g>
+        </svg>
+      </div></div>
+      <figcaption><b>One real published day, forty-eight prices.</b> Recorded from the
+      supplier and committed as a test fixture, because money code has to meet both signs:
+      a day of tidy 20p slots would never catch a stray <code>abs()</code>. Between 10:00
+      and 15:00 this household was <em>paid</em> to consume. Six hours later the same kWh
+      cost 50.22p — a spread of 52.84p within one day.</figcaption>
+    </figure>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">01</span><h2>Why a bill stops being a multiplication</h2></div>
+  <div class="stack col">
+    <p>Countinghouse reads per-device telemetry out of InfluxDB and answers questions about
+    energy and money over arbitrary windows. Until this change, every cost it produced was
+    the same expression:</p>
+
+    <pre>cost = kWh × unit_rate × (1 + vat_rate)</pre>
+
+    <p>That works because a fixed tariff has exactly one price. The expression has nowhere
+    to put a second one, and — more quietly — nowhere to put <em>"I don't know."</em></p>
+
+    <p>An <strong>Agile</strong> tariff prices electricity per half-hour settlement period,
+    tracking the wholesale day-ahead market. Forty-eight prices a day, published the
+    afternoon before, and on a windy low-demand afternoon they go <em>negative</em>: the
+    grid pays you to take the electricity. The chart above is one such day.</p>
+
+    <p>So the multiplication needs three things it cannot express: a rate that varies
+    within the window, a rate that might be unknown for some of it, and a rate that can be
+    below zero. The last is the easiest to get right and the easiest to forget — VAT on a
+    negative price makes it <em>more</em> negative, not less.</p>
+
+    <div class="note">
+      <p class="eyebrow" style="margin-bottom:6px">The shape of the work</p>
+      <p>Record every price for perpetuity; verify what arrives before trusting it; use it
+      to cost real consumption per half hour; and publish the forward curve so other
+      services can move load into the cheap slots. Everything else in this document follows
+      from those four.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">02</span><h2>Terms</h2></div>
+  <div class="stack">
+    <p class="col">Defined once, used throughout. Several are ordinary words used in a
+    narrow sense, which is exactly when a glossary earns its place.</p>
+
+    <dl class="terms">
+      <div class="term">
+        <dt>Slot<span>half-hour settlement period</span></dt>
+        <dd>The atom of this entire system: a 30-minute window with one price. A local day
+        holds 48 of them — except across a daylight-saving changeover, where it holds 46 or
+        50. Every interval here is half-open, <code>[from, to)</code>, so the boundary
+        instant belongs to the later slot.</dd>
+      </div>
+      <div class="term">
+        <dt>Tariff code<span>E-1R-AGILE-24-10-01-A</span></dt>
+        <dd>The supplier's identifier, parsed rather than pattern-matched:
+        <code>{fuel}-{registers}R-{product}-{region}</code>. The trailing letter is the
+        grid supply point — one of fourteen UK distribution regions — and it changes the
+        price. The standing charge alone differs by 57% between regions, so a
+        mix-up is a silently wrong bill rather than a 404.</dd>
+      </div>
+      <div class="term">
+        <dt>Bitemporal<span>two independent time axes</span></dt>
+        <dd>Every archived price carries <em>two</em> times, and conflating them is the
+        classic archive bug. <strong>Valid time</strong> is when the price applied —
+        the half hour it governs. <strong>Transaction time</strong> is when we
+        learned it. A price for Tuesday evening, learned on Monday afternoon, revised on
+        Tuesday morning, has one valid time and two transaction times.</dd>
+      </div>
+      <div class="term">
+        <dt>retrieved_at<span>transaction time, as stored</span></dt>
+        <dd>When the archive last <em>confirmed</em> a price — not when it first saw it. A
+        re-read that agrees still moves it forward. That choice is deliberate and it
+        matters for restatements; §10 covers what it cost.</dd>
+      </div>
+      <div class="term">
+        <dt>Restatement<span>a price that changed after we stored it</span></dt>
+        <dd>The supplier publishing a different value for a half hour we had already
+        recorded — possibly already billed. The archive is append-only with a separate
+        restatement log precisely so <em>"has any price we billed ever changed?"</em> is
+        answerable later, not only at the moment it happens. Observed so far: none.</dd>
+      </div>
+      <div class="term">
+        <dt>Horizon<span>how far the feed reaches</span></dt>
+        <dd>The end of the newest slot the supplier has published. One request of about 350
+        bytes answers it, which is what makes polling for a new publication cheap.</dd>
+      </div>
+      <div class="term">
+        <dt>Tail gap<span>the furthest day is always short</span></dt>
+        <dd>The published horizon stops at 23:00 local, so the furthest day held is always
+        missing its final two half hours. Not a fault — the feed's normal shape. §9 is the
+        measurement, and the trouble it caused.</dd>
+      </div>
+      <div class="term">
+        <dt>Sweep<span>a deliberate re-read of days already held</span></dt>
+        <dd>A routine sync stops as soon as the horizon stops moving, so nothing ever
+        re-reads a day it already has — and a restatement would go unnoticed. A sweep
+        re-reads the last fortnight nightly. Finding nothing is nearly free: every
+        unchanged slot comes back unchanged.</dd>
+      </div>
+      <div class="term">
+        <dt>known_to / complete_to<span>two different questions</span></dt>
+        <dd><code>known_to</code> is the end of the newest slot held. <code>complete_to</code>
+        is the end of the newest <em>fully populated</em> local day. They differ, and the
+        difference is load-bearing: a publication can push the horizon across a whole day
+        while leaving that day short, so <code>known_to</code> alone answers "do we have
+        tomorrow?" with yes when the answer is no.</dd>
+      </div>
+      <div class="term">
+        <dt>Attribution<span>counter_slot | flat_rate</span></dt>
+        <dd>How a cost was arrived at, reported on the wire because the <em>method</em>
+        changes how closely a figure should be read. <code>flat_rate</code>: kWh × one
+        rate, exact. <code>counter_slot</code>: each half hour's metered energy priced at
+        that half hour's own rate.</dd>
+      </div>
+      <div class="term">
+        <dt>unpriced_kwh<span>energy we cannot price</span></dt>
+        <dd>Consumption in a half hour the archive holds no rate for. Reported separately
+        and deliberately <em>not</em> folded into the cost, because charging nothing for
+        real energy is the quiet way a bill comes out wrong. Absent when zero, so its
+        presence always means the answer is incomplete.</dd>
+      </div>
+      <div class="term">
+        <dt>Counter quantisation<span>0.1 kWh steps</span></dt>
+        <dd>Plug-class devices report a cumulative hardware counter that ticks in 0.1 kWh
+        increments. A 67 W fridge takes about 90 minutes to accumulate one tick, so its
+        per-slot energy is a series of spikes rather than a smooth draw. §8 is about what
+        that does to a per-device price.</dd>
+      </div>
+      <div class="term">
+        <dt>Plunge pricing<span>at or below zero</span></dt>
+        <dd>Slots where electricity is free or paid-for. The entire point of the tariff, and
+        the reason a validation gate must never reject a "surprising" price: it would
+        discard exactly the slots worth knowing about.</dd>
+      </div>
+      <div class="term">
+        <dt>Effective rate<span>cost ÷ priced kWh</span></dt>
+        <dd>What was actually paid per kWh, VAT inclusive. On a half-hourly tariff there is
+        no single unit rate to report, so this is the number that makes a cost readable —
+        whether a device ran cheap or dear against the day. It can be negative.</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">03</span><h2>The defect that started it</h2></div>
+  <div class="stack col">
+    <p>A half-hourly tariff has no unit rate in configuration. It cannot: the price varies
+    within the agreement, so there is no single number to put there, and a "representative"
+    one would be read as <em>the</em> price and be wrong. The field is therefore zero, and
+    the rate lives in the archive.</p>
+
+    <p>Which means the old expression did not fail on such a tariff. It returned:</p>
+
+    <pre>cost = 12.4 kWh × <b>0</b> × 1.05
+     = <b>£0.00</b></pre>
+
+    <div class="defect">
+      <p class="eyebrow" style="margin-bottom:6px">Defect · silent zero</p>
+      <p>The moment the tariff configuration was switched over, <code>/bill</code>,
+      <code>/series</code> and <code>/devices/{id}/cost</code> would all have reported
+      <strong>£0.00 for real consumption</strong>. Not an error. Not an empty response. A
+      confident zero in the shape of a correct answer — the worst available outcome,
+      because nothing about it invites a second look.</p>
+    </div>
+
+    <p>The fix is a type that can say "I don't know":</p>
+
+    <pre>type Pricer interface {
+    <i>// The bool is load-bearing: false means NO PRICE IS KNOWN,</i>
+    <i>// which a caller must surface as unpriced energy rather than</i>
+    <i>// treat as free. Returning (0, true) would be a lie, and it is</i>
+    <i>// the specific lie this interface exists to prevent.</i>
+    RateAt(t time.Time) (float64, bool)
+}</pre>
+
+    <p>Everything in §7 follows from making unknown-ness expressible.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">04</span><h2>The pipeline</h2></div>
+  <div class="stack">
+    <p class="col">Five stages, with one governing rule: <strong>fail open on fetching,
+    fail loud on pricing.</strong> A fetch that does not work leaves the archive exactly as
+    it was and records why — it never writes a guess, because a plausible wrong price is
+    worse than a visible gap. A gap that will affect billing is pushed at somebody rather
+    than left on a health endpoint for whenever they next look.</p>
+
+    <div class="flow">
+      <div class="fstep">
+        <span class="tag">01 · detect</span>
+        <span class="t">Probe the horizon</span>
+        <span class="d">One ~350-byte request asks how far the feed reaches. If it hasn't
+        moved, nothing else runs.</span>
+      </div>
+      <div class="fstep">
+        <span class="tag">02 · fetch</span>
+        <span class="t">Pull new slots</span>
+        <span class="d">From the last known horizon, with two hours of overlap so a slot
+        missed at a boundary is picked up rather than skipped forever.</span>
+      </div>
+      <div class="fstep stop">
+        <span class="tag">03 · verify</span>
+        <span class="t">Three gates</span>
+        <span class="d">Structure, plausibility, completeness. Only the first can reject a
+        row. See §6.</span>
+      </div>
+      <div class="fstep">
+        <span class="tag">04 · store</span>
+        <span class="t">Archive</span>
+        <span class="d">SQLite, idempotent, append-only, with the engine enforcing the key
+        and a separate restatement log.</span>
+      </div>
+      <div class="fstep">
+        <span class="tag">05 · serve</span>
+        <span class="t">Cost &amp; publish</span>
+        <span class="d">Per-slot costing behind <code>/bill</code>, and the forward curve
+        behind four <code>/prices</code> routes.</span>
+      </div>
+    </div>
+
+    <div class="col stack-tight" style="margin-top:8px">
+      <h3>Scheduling</h3>
+      <p>Work and scheduling are separated: one function does a unit of work, another says
+      when to come back, and both are pure functions of the clock and the archive. That
+      split is what lets a test drive an entire publication day — including a late
+      publication, and one that never arrives — deterministically and in microseconds.</p>
+      <p>Prices for the next day appear after 16:00, so the collector watches every five
+      minutes from 15:00, and otherwise idles at hourly. A sweep runs at 02:00.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">05</span><h2>The archive, and two kinds of time</h2></div>
+  <div class="stack">
+    <p class="col">This is the one thing the service writes. Everything else it knows is
+    derived on demand from InfluxDB and survives a restart with no state at all; the price
+    archive cannot be, because it is not rebuildable from Influx. It is rebuildable from the
+    supplier <em>today</em>, and the entire reason to keep it is the day that stops being
+    true.</p>
+
+    <figure>
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 300" width="880" role="img"
+             aria-label="Two-axis diagram: valid time along the horizontal, transaction time up the vertical, showing one price learned on Monday and restated on Tuesday.">
+          <!-- axes -->
+          <line x1="150" y1="250" x2="840" y2="250" stroke="var(--ink-2)" stroke-width="1.25"/>
+          <line x1="150" y1="250" x2="150" y2="40" stroke="var(--ink-2)" stroke-width="1.25"/>
+          <g font-family="Archivo, sans-serif" font-size="12" font-weight="600" fill="var(--ink-2)">
+            <text x="840" y="276" text-anchor="end">VALID TIME — the half hour the price governs</text>
+            <text x="150" y="30" text-anchor="start">TRANSACTION TIME — when we learned it</text>
+          </g>
+
+          <!-- the slot being described -->
+          <rect x="560" y="236" width="96" height="14" fill="var(--grid-soft)" stroke="var(--grid)" stroke-width="1"/>
+          <text x="608" y="247" text-anchor="middle" font-family="IBM Plex Mono, monospace"
+                font-size="9.5" fill="var(--grid)">Tue 18:00</text>
+
+          <!-- learned Monday -->
+          <line x1="560" y1="170" x2="656" y2="170" stroke="var(--grid)" stroke-width="3"/>
+          <circle cx="560" cy="170" r="4" fill="var(--grid)"/>
+          <text x="666" y="174" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--grid)">28.5p &nbsp;learned Mon 15:55</text>
+          <line x1="150" y1="170" x2="556" y2="170" stroke="var(--rule)" stroke-width="1" stroke-dasharray="3 3"/>
+
+          <!-- restated Tuesday -->
+          <line x1="560" y1="105" x2="656" y2="105" stroke="var(--peak)" stroke-width="3"/>
+          <circle cx="560" cy="105" r="4" fill="var(--peak)"/>
+          <text x="666" y="109" font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--peak)">31.2p &nbsp;restated Tue 09:10</text>
+          <line x1="150" y1="105" x2="556" y2="105" stroke="var(--rule)" stroke-width="1" stroke-dasharray="3 3"/>
+
+          <!-- the window in which the revision happened -->
+          <line x1="430" y1="170" x2="430" y2="105" stroke="var(--alarm)" stroke-width="1.25"/>
+          <line x1="424" y1="170" x2="436" y2="170" stroke="var(--alarm)" stroke-width="1.25"/>
+          <line x1="424" y1="105" x2="436" y2="105" stroke="var(--alarm)" stroke-width="1.25"/>
+          <text x="418" y="142" text-anchor="end" font-family="IBM Plex Mono, monospace"
+                font-size="10" fill="var(--alarm)">the revision</text>
+          <text x="418" y="155" text-anchor="end" font-family="IBM Plex Mono, monospace"
+                font-size="10" fill="var(--alarm)">happened in here</text>
+        </svg>
+      </div></div>
+      <figcaption><b>One price, one valid time, two transaction times.</b> A single-axis
+      store would have to overwrite Monday's value and lose the fact that it ever said
+      28.5p. Keeping both axes is what makes <em>"what did we believe when we sent that
+      bill?"</em> a question with an answer — and the two confirmation times bound when the
+      supplier actually revised it.</figcaption>
+    </figure>
+
+    <div class="col stack-tight">
+      <h3>The key, enforced by the engine</h3>
+      <p>The primary key is <code>(tariff_code, payment_method, valid_from)</code>. The
+      payment method is in there because a variable tariff splits into direct-debit and
+      non-direct-debit rows <em>for the same slot</em>: without it, the second row looks
+      like a restatement of the first and fires a false alarm.</p>
+      <p><code>valid_to</code> is nullable, because the supplier genuinely omits it on an
+      open-ended row, and inventing an end is a different statement from not knowing one.</p>
+      <h3 style="margin-top:14px">Two relations, not one</h3>
+      <p>The supplier's daily <strong>standing charge</strong> is archived the same way, in
+      its own table with the same key and its own restatement log. A separate table rather
+      than a <code>kind</code> column, because the two hold different units — pence per
+      <em>day</em> against pence per kWh — and one table makes it possible to sum them with
+      a query that forgot to filter. The Go types are separate for the same reason and
+      convert explicitly; the storage path is shared, so the bitemporal machinery has one
+      implementation to be right.</p>
+      <p>It was the last piece to land, and the reason it stopped being optional is the
+      subject of §12: while the standing charge was computed from configuration, it was the
+      only number left in a bill grossed up from a rate a human has to keep current.</p>
+
+      <h3 style="margin-top:14px">Why SQLite, not the time-series database</h3>
+      <p>The obvious answer is Influx — the service already reads it. The argument for it
+      was that prices and energy could then be joined in one query. That benefit turned out
+      to be illusory: no money logic lives in the Influx layer at all, so there was no join
+      to be had. What remained was that prices are <em>relational</em> facts with a
+      compound key, a nullable field, restatement history and an audit requirement, which
+      is a row store's job. Roughly 225 bytes a slot — measured at 7.8 MB for two years of
+      one tariff.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">06</span><h2>Three gates, differing in what a failure costs</h2></div>
+  <div class="stack">
+    <p class="col">Validation is not one check with one severity. What a failure should cost
+    depends entirely on what failed, and getting that wrong in either direction is
+    expensive: too strict and you discard correct data, too lax and you bill on nonsense.</p>
+
+    <figure>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Gate</th><th>Asks</th><th>A failure means</th><th>Examples</th></tr></thead>
+          <tbody>
+            <tr><td><b>A</b> — structural</td><td>Is this money at all?</td>
+                <td style="color:var(--alarm)">Reject the row</td>
+                <td>NaN or ±Inf; valid_from not on :00/:30; a tariff code we didn't request</td></tr>
+            <tr><td><b>B</b> — plausibility</td><td>Is this surprising?</td>
+                <td style="color:var(--plunge)">Store it, flag it</td>
+                <td>above cap, below floor, a big jump, a VAT relationship we didn't expect</td></tr>
+            <tr><td><b>C</b> — set level</td><td>Is the day complete?</td>
+                <td>Gates the <em>signal</em>, not the rows</td>
+                <td>contiguity, 46/48/50 slots for the local day</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption><b>Gate B never rejects.</b> Plunge pricing is the entire point of the
+      tariff, so a collector that refused surprising prices would discard exactly the slots
+      worth knowing about. The observed range across two years runs from −11.11p to 76.67p
+      ex-VAT.</figcaption>
+    </figure>
+
+    <div class="col stack-tight">
+      <h3>The VAT check moved gates, and that was the interesting decision</h3>
+      <p>The supplier sends each price twice — excluding and including VAT. Checking that
+      they agree catches two disasters in one assertion: a VAT change nobody told us about,
+      and a unit error (pence read as pounds) in either column.</p>
+      <p>It was originally a Gate A <em>rejection</em>. That is wrong, and the argument is
+      worth stating because it generalises. Both columns come from the supplier and are
+      self-consistent with each other; what disagrees is <em>our own configuration's</em>
+      VAT rate. And no unit price is ever derived from that rate — the cost path reads the
+      supplier's delivered inc-VAT figure directly. So rejecting the slot discarded correct
+      data to protect an assumption nothing downstream reads.</p>
+      <div class="defect">
+        <p class="eyebrow" style="margin-bottom:6px">The case that settled it — and it has a date</p>
+        <p>On a real VAT change, Gate A would have refused <em>every</em> slot published
+        after it until somebody edited configuration. The window in which prices matter most
+        would be the window with no prices — while the health endpoint cheerfully reported
+        fetches succeeding.</p>
+        <p style="margin-top:10px">This stopped being hypothetical while the work was in
+        progress. HMRC zero-rates domestic electricity in Great Britain for supplies from
+        <strong>1 October 2026 to 31 March 2027</strong>, then back to 5%. Under the original
+        Gate A rejection, the archive would have emptied itself on the morning of the 1st and
+        again on 1 April — twice, on schedule, for a change everybody knew was coming.</p>
+      </div>
+      <p>One further thing the warning now does, because a warning nobody reads is the
+      failure this service already learned once: when a whole batch implies <em>one
+      consistent</em> rate that is not the configured one, that is a rate change rather than
+      a data blip, and it escalates to an alert naming the rate the supplier is actually
+      charging. Slots disagreeing in <em>different</em> directions stay per-slot warnings —
+      that is a data problem, and paging for it would train somebody to ignore the page.</p>
+      <p>It is now a Gate B warning carrying the <em>implied</em> rate
+      (<code>inc ÷ exc − 1</code>), which is both what an operator needs in order to correct
+      configuration and — since it is recorded per slot by construction — most of what a
+      per-slot VAT column would have bought.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">07</span><h2>Costing, and the axis that wasn't</h2></div>
+  <div class="stack">
+    <p class="col">With a pricer that can say "I don't know", costing a window becomes: take
+    each half hour's metered energy, price it at that half hour's own rate, and sum. A
+    window spanning a tariff change splits into segments, each with its own rate and its own
+    VAT multiplier — not a corner case, since the first bill after any switchover
+    necessarily is one.</p>
+
+    <p class="col">Then a reviewer asked what happens when the bucket is wider than the
+    price.</p>
+
+    <div class="defect col">
+      <p class="eyebrow" style="margin-bottom:6px">Defect · the cost axis</p>
+      <p>A chart does not ask for 48 buckets a day. The default interval is
+      <strong>1 hour</strong> for a day-long window and <strong>1 day</strong> for a month.
+      Pricing a bucket at the rate holding at its <em>start</em> is exact when the axes line
+      up and silently wrong otherwise — a one-day bucket charged the whole day at its
+      midnight rate.</p>
+    </div>
+
+    <figure>
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 186" width="880" role="img"
+             aria-label="Bar chart: the same energy and prices cost 37.59 pence on a 30-minute axis, 37.31 on hourly, and 53.98 on daily.">
+          <g font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--muted)">
+            <text x="0" y="38">30m</text><text x="0" y="93">1h</text><text x="0" y="148">1d</text>
+          </g>
+          <!-- truth line -->
+          <line x1="52" y1="12" x2="52" y2="160" stroke="var(--rule)" stroke-width="1"/>
+          <line x1="377.8" y1="12" x2="377.8" y2="160" stroke="var(--plunge)" stroke-width="1" stroke-dasharray="4 3"/>
+          <text x="377.8" y="176" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--plunge)">truth</text>
+
+          <rect x="52" y="20" width="325.8" height="26" fill="var(--plunge)" opacity=".85"/>
+          <rect x="52" y="75" width="323.4" height="26" fill="var(--grid)" opacity=".8"/>
+          <rect x="52" y="130" width="467.8" height="26" fill="var(--alarm)" opacity=".85"/>
+
+          <g font-family="IBM Plex Mono, monospace" font-size="12" font-weight="500">
+            <text x="388" y="38" fill="var(--plunge)">£0.3759</text>
+            <text x="386" y="93" fill="var(--grid)">£0.3731 &nbsp;<tspan fill="var(--muted)">−0.7%</tspan></text>
+            <text x="530" y="148" fill="var(--alarm)">£0.5398 &nbsp;<tspan font-weight="600">+43.6%</tspan></text>
+          </g>
+        </svg>
+      </div></div>
+      <figcaption><b>Measured on the recorded day at the top of this page.</b> The monthly
+      chart and the monthly bill disagreed by 44% over the same devices and the same window —
+      the opening defect of this document, one layer up. Sharing a costing function was
+      necessary and not sufficient: a shared function handed an axis coarser than the price
+      grid still returns a confident wrong number, and nothing detected that it had.</figcaption>
+    </figure>
+
+    <div class="col stack-tight">
+      <h3>The fix, and the fix that was rejected</h3>
+      <p>The tempting cheap answer is to spread a coarse bucket's energy evenly across its
+      slots. That is exact for a fridge and badly wrong for a dishwasher — which is
+      precisely the load a half-hourly tariff exists to shift. So it was rejected.</p>
+      <p>Instead the energy is <em>queried</em> at slot resolution, costed there, and the
+      costs folded up into whatever buckets the caller asked to see. <code>kwh[]</code> keeps
+      the requested resolution, <code>cost[]</code> is exact, and the chart agrees with the
+      bill by construction rather than at one particular interval.</p>
+      <p>A flat tariff skips all of it: the price cannot change inside a bucket, so a monthly
+      chart stays one query per day rather than 1,488. That is decided by an optional
+      interface a pricer implements to declare how fast it varies — flat rates decline, and
+      declining means "treat me as constant".</p>
+      <p>Folding maps fine buckets to display buckets by <em>timestamp</em>, never by a fixed
+      ratio, because a local day is 46, 48 or 50 half hours. A ratio would misalign every
+      bucket after a changeover — on the one day of the year nobody checks.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">08</span><h2>Whose kWh was it, and when?</h2></div>
+  <div class="stack">
+    <p class="col">Whole-house cost under this tariff is exact: the meter is fine-grained
+    and is the billing reference. <em>Per-device</em> cost is not, and the reason is the
+    counter.</p>
+
+    <figure>
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 150" width="880" role="img"
+             aria-label="Comparison: a fridge draws a steady 67 watts all day, but its counter reports energy as sixteen discrete spikes.">
+          <text x="0" y="34" font-family="Archivo, sans-serif" font-size="12" font-weight="600" fill="var(--ink-2)">reality</text>
+          <rect x="96" y="20" width="744" height="18" fill="var(--plunge)" opacity=".55"/>
+          <text x="96" y="52" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--faint)">~67 W continuous, all day</text>
+
+          <text x="0" y="104" font-family="Archivo, sans-serif" font-size="12" font-weight="600" fill="var(--ink-2)">reported</text>
+          <g fill="var(--grid)">
+            <rect x="96" y="76" width="14" height="28"/><rect x="142" y="76" width="14" height="28"/>
+            <rect x="188" y="76" width="14" height="28"/><rect x="235" y="76" width="14" height="28"/>
+            <rect x="281" y="76" width="14" height="28"/><rect x="328" y="76" width="14" height="28"/>
+            <rect x="374" y="76" width="14" height="28"/><rect x="420" y="76" width="14" height="28"/>
+            <rect x="467" y="76" width="14" height="28"/><rect x="513" y="76" width="14" height="28"/>
+            <rect x="560" y="76" width="14" height="28"/><rect x="606" y="76" width="14" height="28"/>
+            <rect x="652" y="76" width="14" height="28"/><rect x="699" y="76" width="14" height="28"/>
+            <rect x="745" y="76" width="14" height="28"/><rect x="792" y="76" width="14" height="28"/>
+          </g>
+          <line x1="96" y1="104" x2="840" y2="104" stroke="var(--rule)" stroke-width="1"/>
+          <text x="96" y="122" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--faint)">16 counter ticks of 0.1 kWh — each lands in whichever half hour reported it</text>
+        </svg>
+      </div></div>
+      <figcaption><b>The same electricity, twice.</b> A 0.1 kWh tick takes roughly 90
+      minutes to accumulate on a fridge, so its metered energy arrives in spikes. Price each
+      spike at its own slot and a single day's figure carries a few percent of noise.</figcaption>
+    </figure>
+
+    <div class="col stack-tight">
+      <h3>Three options, and why the noisy one won</h3>
+      <p>The alternatives were to take the <em>shape</em> from the power series and the
+      <em>magnitude</em> from the counter, or to abandon per-device pricing and apportion the
+      house total. Pricing each counter delta at its own slot's rate was chosen because of
+      where its noise lands: it is worst for low-draw continuous devices, whose consumption
+      cannot be shifted anyway, and it stays clean for the deferrable loads — dishwasher,
+      washing machine, tumble dryer — where the number is actually actionable. Roughly 6:1
+      signal to noise, measured over a month.</p>
+      <p>It also sums exactly to the monitored house cost, by construction, rather than
+      approximately.</p>
+    </div>
+
+    <figure>
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 300" width="880" role="img"
+             aria-label="Per-device effective rates from a live bill, ranging from 25 pence for the washing machine to 52 pence for the toaster, against a 32.7 pence mean.">
+          <!-- mean line -->
+          <line x1="352" y1="14" x2="352" y2="266" stroke="var(--ink-2)" stroke-width="1.25" stroke-dasharray="4 3"/>
+          <text x="356" y="24" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--ink-2)">house mean 32.68p</text>
+
+          <g font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--muted)">
+            <text x="0" y="46">washingmachine</text><text x="0" y="74">dishwasher</text>
+            <text x="0" y="102">basement-fridge</text><text x="0" y="130">officeav</text>
+            <text x="0" y="158">winefridge</text><text x="0" y="186">bigfreezer</text>
+            <text x="0" y="214">bigfridge</text><text x="0" y="242">sittingroomav</text>
+            <text x="0" y="266">toaster</text>
+          </g>
+          <!-- scale: 0p at x=130, 55p at x=860 -> 13.27 px per pence -->
+          <g>
+            <rect x="130" y="36" width="335.8" height="14" fill="var(--plunge)" opacity=".8"/>
+            <rect x="130" y="64" width="383.1" height="14" fill="var(--plunge)" opacity=".8"/>
+            <rect x="130" y="92" width="403.4" height="14" fill="var(--plunge)" opacity=".6"/>
+            <rect x="130" y="120" width="427.7" height="14" fill="var(--muted)" opacity=".6"/>
+            <rect x="130" y="148" width="444.1" height="14" fill="var(--peak)" opacity=".5"/>
+            <rect x="130" y="176" width="463.7" height="14" fill="var(--peak)" opacity=".6"/>
+            <rect x="130" y="204" width="474.6" height="14" fill="var(--peak)" opacity=".6"/>
+            <rect x="130" y="232" width="631.6" height="14" fill="var(--peak)" opacity=".85"/>
+            <rect x="130" y="256" width="696.7" height="14" fill="var(--peak)" opacity=".95"/>
+          </g>
+          <g font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--ink-2)" font-weight="500">
+            <text x="473" y="47">25.31p</text><text x="521" y="75">28.87p</text>
+            <text x="541" y="103">30.40p</text><text x="565" y="131">32.23p</text>
+            <text x="582" y="159">33.47p</text><text x="601" y="187">34.95p</text>
+            <text x="612" y="215">35.77p</text><text x="769" y="243">47.60p</text>
+            <text x="834" y="267">52.50p</text>
+          </g>
+          <g font-family="IBM Plex Mono, monospace" font-size="9.5" fill="var(--faint)">
+            <text x="130" y="290">deferrable — shifted into cheap slots</text>
+            <text x="620" y="290" text-anchor="end">continuous</text>
+            <text x="860" y="290" text-anchor="end">used at peak</text>
+          </g>
+        </svg>
+      </div></div>
+      <figcaption><b>From the first live bill, unprompted.</b> Deferrable loads land below
+      the house mean, continuous loads slightly above, bursts at whatever the clock said.
+      That is the structure the attribution decision predicted, showing up in production
+      data on the first day it ran.</figcaption>
+    </figure>
+
+    <div class="found col">
+      <p class="eyebrow" style="margin-bottom:6px">Measured, and it overturned a hypothesis</p>
+      <p>The continuous devices' small positive bias was suspected to be an artefact — the
+      counter reporting each tick <em>late</em>, pushing energy into later and dearer slots.
+      It is not. Removing quantisation entirely, by pricing the unquantised power shape
+      instead, leaves the bias intact. These devices genuinely do consume more in dearer half
+      hours, because compressor duty tracks ambient temperature and temperature and the
+      evening peak share a daily shape.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">09</span><h2>The tail gap</h2></div>
+  <div class="stack">
+    <p class="col">The archive holds 729 local days. 724 of them are exactly complete. The
+    only short day is <em>always</em> the furthest one published, and it is always missing
+    precisely its final two half hours.</p>
+
+    <figure>
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 250" width="880" role="img"
+             aria-label="Timeline showing that before the daily 16:00 publication today is two slots short, and after it tomorrow is two slots short.">
+          <!-- before publication -->
+          <text x="0" y="40" font-family="Archivo, sans-serif" font-size="12.5" font-weight="600" fill="var(--ink-2)">00:00 – 16:00</text>
+          <text x="0" y="56" font-family="IBM Plex Mono, monospace" font-size="9.5" fill="var(--faint)">~16 hrs of every day</text>
+          <rect x="176" y="26" width="300" height="22" fill="var(--grid-soft)" stroke="var(--grid)"/>
+          <text x="326" y="41" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--grid)">TODAY — 46 of 48</text>
+          <rect x="476" y="26" width="26" height="22" fill="none" stroke="var(--alarm)" stroke-dasharray="3 2"/>
+          <text x="512" y="41" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--alarm)">← the two missing slots</text>
+
+          <!-- publication -->
+          <line x1="176" y1="104" x2="840" y2="104" stroke="var(--rule)" stroke-width="1"/>
+          <circle cx="502" cy="104" r="5" fill="var(--peak)"/>
+          <text x="514" y="108" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--peak)">publication, observed 15:54 and 15:55</text>
+          <text x="0" y="108" font-family="Archivo, sans-serif" font-size="12.5" font-weight="600" fill="var(--ink-2)">~16:00</text>
+
+          <!-- after -->
+          <text x="0" y="176" font-family="Archivo, sans-serif" font-size="12.5" font-weight="600" fill="var(--ink-2)">16:00 – 24:00</text>
+          <rect x="176" y="162" width="326" height="22" fill="var(--plunge-soft)" stroke="var(--plunge)"/>
+          <text x="339" y="177" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--plunge)">TODAY — complete, 48</text>
+          <rect x="502" y="162" width="300" height="22" fill="var(--grid-soft)" stroke="var(--grid)"/>
+          <text x="652" y="177" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--grid)">TOMORROW — 46 of 48</text>
+          <rect x="802" y="162" width="26" height="22" fill="none" stroke="var(--alarm)" stroke-dasharray="3 2"/>
+
+          <text x="176" y="220" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">The horizon ends at 23:00 local. Whichever day is furthest is the one two slots short —</text>
+          <text x="176" y="234" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">and for two thirds of every day, that day is <tspan fill="var(--ink)" font-weight="600">today</tspan>.</text>
+        </svg>
+      </div></div>
+      <figcaption><b>Publication time is documented by the supplier; the 23:00 horizon is
+      not.</b> It rests on this measurement, which is one of the reasons to keep an archive
+      at all.</figcaption>
+    </figure>
+
+    <div class="col stack-tight">
+      <h3>Why it mattered</h3>
+      <p>The collector treated an incomplete today as a fault. It is not — it is what a
+      healthy feed looks like for two thirds of every day. Worse, <code>complete_to</code>
+      collapsed to the zero time whenever today was short, which the health endpoint read as
+      <em>"no complete day of prices held"</em> — about an archive holding two years of them.</p>
+    </div>
+
+    <figure>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Over two days, live</th><th class="num">before the fix</th><th class="num">after</th></tr></thead>
+          <tbody>
+            <tr class="hl"><td>"today's prices are incomplete" — ERROR</td><td class="num">37</td><td class="num">0</td></tr>
+            <tr class="hl"><td>"still incomplete past the deadline" — ERROR</td><td class="num">2</td><td class="num">0</td></tr>
+            <tr class="ok"><td>health endpoint verdict</td><td class="num">degraded</td><td class="num">ok</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption>The 37 is the alert throttle working exactly as designed — hourly on a
+      condition that never clears — which is what makes the case that throttling was
+      necessary and not sufficient. <b>A signal that is always red is a signal nobody
+      reads.</b> The silence afterwards was verified in the presence of the trigger: today
+      was 46/48 at the time of checking.</figcaption>
+    </figure>
+
+    <p class="col">A tail gap within two slots is now tolerated on either day. An
+    <em>interior</em> hole still pages at any size — that means the supplier published a slot
+    that never reached us, which is a real fault. Telling those two apart is the whole
+    distinction.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">10</span><h2>What running it found that reading it didn't</h2></div>
+  <div class="stack">
+    <p class="col">Four defects in this work were found by data rather than by inspection.
+    They are listed together because the pattern is the point: each was invisible to a test
+    suite that only ever constructs fresh state.</p>
+
+    <div class="stack-tight col">
+      <div class="defect">
+        <p class="eyebrow" style="margin-bottom:6px">Found by a reviewer reading carefully</p>
+        <p><strong>The second pricing loop.</strong> The rest-of-home decomposition had its
+        own copy of the costing code. It was fixed in one place and not the other — so a
+        month's unmonitored cost was understated by a third, and missing prices rounded away
+        to an <code>unpriced_kwh</code> of exactly zero, which reads as
+        <em>"nothing was missing"</em>. Three adversarial tests existed and all three pointed
+        at the copy that had been fixed.</p>
+      </div>
+      <div class="defect">
+        <p class="eyebrow" style="margin-bottom:6px">Found by running it against the live feed</p>
+        <p><strong>The alert that never clears.</strong> §9. Two days of production logging
+        turned an argument into a count.</p>
+      </div>
+      <div class="defect">
+        <p class="eyebrow" style="margin-bottom:6px">Found by looking at the archive the morning after</p>
+        <p><strong>The sweep erases its own evidence.</strong> The nightly sweep reported
+        <code>restated=0 inserted=0</code> — which reads as "did nothing" — having rewritten
+        716 rows' <code>retrieved_at</code> to its own timestamp. That is deliberate:
+        <code>retrieved_at</code> means <em>last confirmed</em>, which gives a restatement a
+        tighter bound. But nothing had ever re-read held days before, so the column had
+        incidentally recorded <em>first seen</em> — and that is exactly what the publication
+        schedule in §9 was measured from. Both facts are wanted, so they need two columns.
+        Not yet built.</p>
+      </div>
+      <div class="found">
+        <p class="eyebrow" style="margin-bottom:6px">Found by upgrading a dependency</p>
+        <p><strong>Two versions behind.</strong> A shared library's database-copy routine was
+        believed unsafe and worked around locally. It had been fixed two releases earlier;
+        the belief came from reading a checked-out copy rather than the version the build
+        resolves. Bumping it deleted 155 lines of local workaround and picked up three
+        security changes that had been sitting unused.</p>
+      </div>
+    </div>
+
+    <p class="col">The common thread is that none of these was a logic error visible in the
+    diff. Each was a mismatch between what the code was believed to do and what it did when
+    something real was pointed at it.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">11</span><h2>Evidence</h2></div>
+  <div class="stack">
+    <p class="col">Run against production telemetry and two years of archived prices, on a
+    throwaway instance beside the live service.</p>
+
+    <div class="metrics">
+      <div class="metric good"><span class="v">£3.5723</span><span class="k">energy cost, one day</span></div>
+      <div class="metric"><span class="v">counter_slot</span><span class="k">attribution</span></div>
+      <div class="metric"><span class="v">32.683p</span><span class="k">effective rate</span></div>
+      <div class="metric good"><span class="v">absent</span><span class="k">unpriced kwh</span></div>
+      <div class="metric good"><span class="v">0.000%</span><span class="k">bill vs chart</span></div>
+    </div>
+
+    <figure>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>window</th><th>display interval</th><th class="num">/bill</th><th class="num">/series</th><th class="num">difference</th></tr></thead>
+          <tbody>
+            <tr class="ok"><td>today</td><td>1h</td><td class="num">£3.5725</td><td class="num">£3.5725</td><td class="num">+0.000%</td></tr>
+            <tr class="ok"><td>month</td><td>1d</td><td class="num">£55.6070</td><td class="num">£55.6071</td><td class="num">+0.000%</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption><b>The monthly row is the one that matters.</b> A one-day display interval
+      is exactly where the bill and the chart disagreed by 44%. The remaining 0.0001 is a
+      rounding tail on £55.</figcaption>
+    </figure>
+
+    <div class="col stack-tight">
+      <h3>And, incidentally, the question the tariff exists to ask</h3>
+      <p>The same month, the same 226.9 kWh of monitored consumption, priced two ways:</p>
+    </div>
+
+    <figure>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>tariff</th><th class="num">energy</th><th class="num">standing</th><th class="num">total</th><th class="num">effective</th></tr></thead>
+          <tbody>
+            <tr><td>fixed</td><td class="num">£49.78</td><td class="num">£8.22</td><td class="num">£58.00</td><td class="num">21.93p</td></tr>
+            <tr><td>half-hourly</td><td class="num">£55.61</td><td class="num">£8.60</td><td class="num">£64.21</td><td class="num">24.50p</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption>Agile cost 2.57p/kWh more on monitored load. Not a verdict on the tariff —
+      this is 48% of the meter and <em>no load has been shifted yet</em>. It is the number
+      the forward-curve endpoints exist to move, and now there is a way to watch it.</figcaption>
+    </figure>
+
+    <div class="col stack-tight" style="margin-top:6px">
+      <h3>Performance</h3>
+      <p>Rendering a price curve was quadratic — ranking is linear per slot, percentile calls
+      ranking, and banding re-sorted every price to find the median, once per slot.</p>
+    </div>
+
+    <figure>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>operation</th><th class="num">before</th><th class="num">after</th><th class="num">factor</th></tr></thead>
+          <tbody>
+            <tr><td>render a month (1,488 slots)</td><td class="num">43.8 ms</td><td class="num">0.089 ms</td><td class="num">490×</td></tr>
+            <tr class="hl"><td>render a year (17,520 slots)</td><td class="num">2.98 s</td><td class="num">0.90 ms</td><td class="num">3,300×</td></tr>
+            <tr><td>price a year, one device</td><td class="num">883 ms</td><td class="num">1.46 ms</td><td class="num">600×</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption>Sort the prices once, index the slots by start once, take the median once.
+      No API change — and the slot index had been specified in the design document and then
+      implemented as a slice.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════ -->
+<section>
+  <div class="shead"><span class="snum">12</span><h2>What is still open</h2></div>
+  <div class="stack col">
+    <div class="stack-tight">
+      <h4>Decisions, not work</h4>
+      <p><strong>What <code>complete_to</code> should mean</strong> when tomorrow is
+      tail-short. Advancing it makes it equal <code>known_to</code> in the routine case,
+      collapsing a distinction the health block exists to draw.</p>
+      <p><strong>Two columns for two times</strong> — an immutable <code>first_seen_at</code>
+      beside the mutable <code>retrieved_at</code>, per §10.</p>
+    </div>
+    <div class="stack-tight">
+      <h4>Known gaps</h4>
+      <p><strong>The tariff code is still trusted.</strong> Nothing cross-checks the
+      configured tariff <em>code</em> against the supplier's own record of which tariff this
+      account is on, so a stale document would price the wrong tariff and nothing would look
+      unhealthy. The VAT half of that gap is now closed — a systematic disagreement between
+      the supplier's figures and the configured rate raises an alert — but the code itself is
+      still taken on faith.</p>
+      <p><strong>An untested restore.</strong> The archive is backed up offsite and the
+      upload is verified; nothing has yet been restored from it. A backup that has not been
+      restored is a hypothesis.</p>
+    </div>
+    <div class="stack-tight">
+      <h4>Deliberately parked</h4>
+      <p>Lifecycle events over MQTT, export tariffs, and multi-site — each recorded with the
+      original reasoning so they can be picked up rather than re-derived.</p>
+      <p><strong>Per-appliance run energy</strong> — the figure that would let a price
+      display say “save 27p” rather than “save 12p/kWh”. Parked because it sits outside this
+      service's boundary rather than beyond its ability: countinghouse answers what a
+      window <em>cost</em>, from meters, past tense. What a dishwasher <em>will</em> draw is
+      a forward statement about a load, and statehouse already publishes it — the
+      <code>appliance_cycle</code> measurement carries per-cycle
+      <code>selected_energy_kwh</code> and <code>integrated_kwh</code> (AGENT_BRIEF §3). A
+      consumer wanting money rather than unit rates should read that, or assume a fixed kWh
+      per cycle and be most of the way there.</p>
+    </div>
+  </div>
+</section>
+
+</div>
+
+<footer>
+  <div class="wrap">
+    <div class="daystrip" aria-hidden="true">
+      <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      <i class="neg"></i><i class="neg"></i><i class="neg"></i><i class="neg"></i><i class="neg"></i>
+      <i class="neg"></i><i class="neg"></i><i class="neg"></i><i class="neg"></i><i class="neg"></i>
+      <i></i><i></i><i class="pk"></i><i class="pk"></i><i class="pk"></i><i class="pk"></i>
+      <i class="pk"></i><i class="pk"></i><i></i><i></i><i></i><i></i><i></i><i></i>
+      <i></i><i></i><i class="gap"></i><i class="gap"></i>
+    </div>
+    <p style="margin-top:14px">Forty-eight half hours: ten below zero, six at peak, and the
+    last two not yet published. One day, and the unit everything above is built on.</p>
+    <p>All figures measured on this branch against the live supplier feed and production
+    telemetry. Tariff codes shown use region <code>A</code> throughout.</p>
+    <p>Companion piece: <a href="https://claude.ai/artifact/P1niA8agh92L3KfRVbjeab"><strong>Consuming the Price API</strong></a> — what the
+    four new JSON routes answer, worked recipes for a dashboard and a scheduler, and the
+    traps worth knowing before you build against them.</p>
+  </div>
+</footer>
+</body>
+</html>

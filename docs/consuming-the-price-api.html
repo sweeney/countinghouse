@@ -1,0 +1,1164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>:root{color-scheme:light dark}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>Consuming the Price API</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+</head>
+<body>
+
+<style>
+/* Sibling to "Costing a Half-Hourly Tariff": same faces, same diverging price
+   palette. Different layout system, because this one is operated rather than read —
+   a catalogue and a set of recipes, not an argument. */
+:root{
+  --ground:#F5F7FA; --surface:#FFFFFF; --sunken:#EDF1F6; --panel:#141C29;
+  --ink:#101826; --ink-2:#3C475C; --muted:#5D6880; --faint:#8C96AC;
+  --rule:#D6DDE8; --rule-2:#E7ECF3;
+  --grid:#24479E; --grid-soft:#E7ECF9;
+  --plunge:#0B7A82; --plunge-soft:#DFF0F1;
+  --cool:#4E8FA8;
+  --neutral:#A9B4C6;
+  --peak:#B0511C; --peak-soft:#F8EAE0;
+  --alarm:#9E2B2B; --alarm-soft:#F8E7E7;
+  --panel-ink:#DCE4F2; --panel-key:#8FB4F0; --panel-str:#7FC8A9; --panel-num:#E9A96B;
+  --measure:66ch;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0D131D; --surface:#141C29; --sunken:#101825; --panel:#080D15;
+    --ink:#E4EAF4; --ink-2:#BCC6D8; --muted:#95A1B8; --faint:#6B7692;
+    --rule:#263144; --rule-2:#1C2534;
+    --grid:#7D9CEE; --grid-soft:#1A2540;
+    --plunge:#4FC5CC; --plunge-soft:#102A2D;
+    --cool:#6FB2CC;
+    --neutral:#5C6880;
+    --peak:#E9945C; --peak-soft:#2E1D12;
+    --alarm:#E47979; --alarm-soft:#2C1618;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0D131D; --surface:#141C29; --sunken:#101825; --panel:#080D15;
+  --ink:#E4EAF4; --ink-2:#BCC6D8; --muted:#95A1B8; --faint:#6B7692;
+  --rule:#263144; --rule-2:#1C2534;
+  --grid:#7D9CEE; --grid-soft:#1A2540;
+  --plunge:#4FC5CC; --plunge-soft:#102A2D;
+  --cool:#6FB2CC; --neutral:#5C6880;
+  --peak:#E9945C; --peak-soft:#2E1D12;
+  --alarm:#E47979; --alarm-soft:#2C1618;
+}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--ground);color:var(--ink);
+  font-family:"IBM Plex Serif",Georgia,serif;font-size:1.0625rem;line-height:1.62;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1040px;margin:0 auto;padding-inline:20px;padding-block:0}
+.col{max-width:var(--measure)}
+h1,h2,h3,h4{font-family:Archivo,"Helvetica Neue",Arial,sans-serif;text-wrap:balance}
+h1{font-size:3.25rem;line-height:1.02;font-weight:700;letter-spacing:-.022em;margin:0}
+h2{font-size:1.75rem;line-height:1.14;font-weight:600;letter-spacing:-.014em;margin:0}
+h3{font-size:1.3125rem;line-height:1.2;font-weight:600;margin:0}
+h4{font-size:1rem;font-weight:600;margin:0}
+p{margin:0}
+a{color:var(--grid)}
+code{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:.875em;
+  background:var(--sunken);padding:.1em .34em;border-radius:3px;color:var(--ink-2)}
+strong{font-weight:600;color:var(--ink)}
+.eyebrow{font-family:"IBM Plex Mono",monospace;font-size:.7rem;font-weight:500;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--faint)}
+
+/* masthead */
+.mast{background:var(--surface);border-bottom:1px solid var(--rule)}
+.mast .wrap{padding-block:56px 46px}
+.mast-grid{display:flex;flex-direction:column;gap:22px}
+.thesis{font-size:1.3125rem;line-height:1.48;color:var(--ink-2);max-width:60ch}
+
+/* the lane marker replaces doc 1's numbering: these are kinds, not a sequence */
+.lane{border-top:1px solid var(--rule);padding-block:58px}
+.lane-head{display:flex;flex-direction:column;gap:9px;margin-bottom:28px}
+.stack{display:flex;flex-direction:column;gap:20px}
+.stack-tight{display:flex;flex-direction:column;gap:12px}
+
+/* endpoint catalogue */
+.routes{display:flex;flex-direction:column;gap:1px;background:var(--rule);
+  border:1px solid var(--rule);border-radius:4px;overflow:hidden}
+.rt{background:var(--surface);padding:18px 20px;display:grid;
+  grid-template-columns:minmax(210px,290px) 1fr;gap:6px 28px;align-items:start}
+.rt .sig{font-family:"IBM Plex Mono",monospace;font-size:.875rem;font-weight:500;
+  color:var(--grid);word-break:break-word}
+.rt .sig b{color:var(--faint);font-weight:500}
+.rt .q{font-family:Archivo,sans-serif;font-weight:600;font-size:1.0625rem;
+  line-height:1.3;margin-bottom:4px}
+.rt .d{font-size:.9375rem;line-height:1.5;color:var(--muted)}
+.rt .params{font-family:"IBM Plex Mono",monospace;font-size:.75rem;color:var(--faint);
+  margin-top:7px;line-height:1.7}
+@media(max-width:680px){.rt{grid-template-columns:1fr;gap:10px}}
+
+/* decision flow */
+.flow{display:flex;flex-direction:column;gap:9px}
+.fq{display:grid;grid-template-columns:1fr auto minmax(180px,260px);gap:14px;
+  align-items:center;background:var(--surface);border:1px solid var(--rule);
+  border-radius:4px;padding:13px 17px}
+.fq .ask{font-size:.9375rem;line-height:1.4}
+.fq .arr{color:var(--faint);font-family:"IBM Plex Mono",monospace;font-size:.9rem}
+.fq .go{font-family:"IBM Plex Mono",monospace;font-size:.8125rem;font-weight:500;
+  color:var(--grid);text-align:right}
+@media(max-width:620px){.fq{grid-template-columns:1fr;gap:6px}.fq .arr{display:none}
+  .fq .go{text-align:left}}
+
+/* code panels */
+.panel{background:var(--panel);border-radius:4px;overflow:hidden;
+  border:1px solid var(--rule)}
+.panel-bar{display:flex;gap:12px;align-items:center;padding:9px 16px;
+  border-bottom:1px solid rgba(255,255,255,.08);
+  font-family:"IBM Plex Mono",monospace;font-size:.72rem;letter-spacing:.06em;
+  text-transform:uppercase;color:#7C8AA6}
+.panel-bar .m{color:var(--panel-str);font-weight:600}
+.panel pre{margin:0;padding:15px 17px;overflow-x:auto;
+  font-family:"IBM Plex Mono",monospace;font-size:.78rem;line-height:1.62;
+  color:var(--panel-ink)}
+.panel pre .k{color:var(--panel-key)}
+.panel pre .s{color:var(--panel-str)}
+.panel pre .n{color:var(--panel-num)}
+.panel pre .c{color:#66748F;font-style:italic}
+.panel pre .hl{background:rgba(125,156,238,.16);border-radius:2px;
+  box-shadow:0 0 0 2px rgba(125,156,238,.16)}
+
+/* figures */
+figure{margin:0;background:var(--surface);border:1px solid var(--rule);
+  border-radius:4px;overflow:hidden}
+figure .scroller{overflow-x:auto}
+.svgpad{padding:16px 10px 6px}
+figcaption{padding:12px 18px;border-top:1px solid var(--rule-2);
+  font-size:.8125rem;line-height:1.5;color:var(--muted)}
+figcaption b{color:var(--ink-2);font-weight:600}
+svg{display:block;max-width:100%;height:auto}
+
+/* recipes are a genuine sequence, so they get numbered steps */
+.steps{display:flex;flex-direction:column;gap:14px;counter-reset:st}
+.step{display:grid;grid-template-columns:auto 1fr;gap:16px;align-items:start}
+.step::before{counter-increment:st;content:counter(st);
+  font-family:"IBM Plex Mono",monospace;font-size:.72rem;font-weight:600;
+  color:var(--grid);background:var(--grid-soft);border-radius:50%;
+  width:24px;height:24px;display:grid;place-items:center;margin-top:3px}
+.step .b{font-size:.9875rem;line-height:1.55;color:var(--ink-2)}
+.step .b b{color:var(--ink)}
+
+/* callouts */
+.trap{border-left:3px solid var(--alarm);padding:2px 0 2px 18px}
+.trap .eyebrow{color:var(--alarm)}
+.note{border-left:3px solid var(--grid);padding:2px 0 2px 18px;color:var(--ink-2)}
+.good{border-left:3px solid var(--plunge);padding:2px 0 2px 18px}
+.good .eyebrow{color:var(--plunge)}
+
+/* tables */
+table{border-collapse:collapse;width:100%;font-family:"IBM Plex Mono",monospace;
+  font-size:.8125rem;font-variant-numeric:tabular-nums}
+th,td{padding:9px 16px;text-align:left;border-bottom:1px solid var(--rule-2);
+  vertical-align:top}
+th{white-space:nowrap;font-weight:600;color:var(--faint);font-size:.7rem;
+  letter-spacing:.08em;text-transform:uppercase;border-bottom:1px solid var(--rule)}
+td.num{text-align:right;white-space:nowrap}
+td.code{white-space:nowrap;color:var(--grid)}
+
+/* band legend chips */
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;
+  border:1px solid var(--rule);border-radius:999px;background:var(--surface);
+  font-family:"IBM Plex Mono",monospace;font-size:.72rem;color:var(--ink-2)}
+.chip i{width:9px;height:9px;border-radius:2px;display:block}
+
+/* before/after */
+.ba{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule);
+  border:1px solid var(--rule);border-radius:4px;overflow:hidden}
+.ba>div{background:var(--surface);padding:15px 17px;display:flex;
+  flex-direction:column;gap:7px}
+.ba .t{font-family:"IBM Plex Mono",monospace;font-size:.68rem;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--faint)}
+.ba .was .t{color:var(--alarm)}
+.ba .now .t{color:var(--plunge)}
+.ba .v{font-family:"IBM Plex Mono",monospace;font-size:.8125rem;line-height:1.55;
+  color:var(--ink-2)}
+@media(max-width:560px){.ba{grid-template-columns:1fr}}
+
+footer{border-top:1px solid var(--rule);padding-block:40px 60px;
+  color:var(--muted);font-size:.8125rem}
+footer .wrap{display:flex;flex-direction:column;gap:9px}
+:focus-visible{outline:2px solid var(--grid);outline-offset:2px}
+</style>
+
+<header class="mast">
+  <div class="wrap">
+    <div class="mast-grid">
+      <div class="eyebrow">countinghouse &middot; consumer guide &middot; companion to “Costing a Half-Hourly Tariff”</div>
+      <h1>Consuming the<br>Price API</h1>
+      <p class="thesis">Four new JSON routes say when electricity is cheap. They are the
+      only part of this service that can change what a house <em>does</em> rather than
+      report what it did — so the payloads are shaped for a consumer that has to decide,
+      not merely draw.</p>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ════════════════ ROUTES ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">The routes</span>
+    <h2>Four questions, four endpoints</h2>
+  </div>
+  <div class="stack">
+    <p class="col">All four sit behind the same bearer auth as the rest of the API, accept
+    <strong>user and service tokens</strong> alike — the consumers here are other services
+    as often as dashboards — and send permissive CORS plus <code>Timing-Allow-Origin</code>,
+    so a browser page served from <code>file://</code> can call them and still read its own
+    timing breakdown.</p>
+
+    <div class="routes">
+      <div class="rt">
+        <div>
+          <div class="sig"><b>GET</b> /prices/upcoming</div>
+          <div class="params">hours=1…48 &nbsp;(default 24)</div>
+        </div>
+        <div>
+          <div class="q">What is about to happen, and when should I act?</div>
+          <div class="d">The dashboard endpoint, and the one to reach for first. Carries the
+          forward curve plus every derivation a consumer would otherwise compute — and would
+          compute differently from the next consumer: per-slot band, rank and percentile, the
+          price in force right now, and the cheapest contiguous run at four durations.</div>
+        </div>
+      </div>
+      <div class="rt">
+        <div>
+          <div class="sig"><b>GET</b> /prices/cheapest</div>
+          <div class="params">duration=90m|3h &nbsp;<b>required</b><br>before=RFC3339</div>
+        </div>
+        <div>
+          <div class="q">When should this specific load run?</div>
+          <div class="d">One question, one answer. Give it a duration and optionally a
+          deadline; it returns the cheapest contiguous window, or <code>404</code> if no
+          window of that length exists in the prices held.</div>
+        </div>
+      </div>
+      <div class="rt">
+        <div>
+          <div class="sig"><b>GET</b> /prices</div>
+          <div class="params">window=today|week|month|custom|Nd|Nh<br>from, to &nbsp;(custom only)</div>
+        </div>
+        <div>
+          <div class="q">What were — or will be — the prices over this window?</div>
+          <div class="d">The curve over any window, past or future. The archive and the
+          forward curve are the same table, which is the whole point of keeping prices
+          rather than only fetching what is next. Carries <code>known_to</code> and
+          <code>summary.current</code>, so a live display drawing retrospective context can
+          watch for the daily publication from this one call. Capped at
+          <strong>31 days</strong>: a row per half hour adds up.</div>
+        </div>
+      </div>
+      <div class="rt">
+        <div>
+          <div class="sig"><b>GET</b> /prices/stats</div>
+          <div class="params">window=… &nbsp;(same vocabulary)</div>
+        </div>
+        <div>
+          <div class="q">Is this tariff actually worth the bother?</div>
+          <div class="d">Per-local-day min, max, mean, spread and plunge-slot count. A row
+          per day, so the cap is <strong>366</strong>. <code>spread</code> is the number that
+          says whether shifting load that day was worth doing at all.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="flow" style="margin-top:8px">
+      <div class="fq">
+        <span class="ask">I am drawing a chart of the next day and want bands and a “now” marker.</span>
+        <span class="arr">→</span>
+        <span class="go">/prices/upcoming</span>
+      </div>
+      <div class="fq">
+        <span class="ask">I have a dishwasher, it needs three hours, and it must be done by 07:00.</span>
+        <span class="arr">→</span>
+        <span class="go">/prices/cheapest</span>
+      </div>
+      <div class="fq">
+        <span class="ask">I want today’s whole curve, or last Tuesday’s, on one axis.</span>
+        <span class="arr">→</span>
+        <span class="go">/prices?window=…</span>
+      </div>
+      <div class="fq">
+        <span class="ask">I want a sparkline of daily spread over the last three months.</span>
+        <span class="arr">→</span>
+        <span class="go">/prices/stats</span>
+      </div>
+      <div class="fq">
+        <span class="ask">I want to know what I actually <em>paid</em>, not what it cost per kWh.</span>
+        <span class="arr">→</span>
+        <span class="go">/bill &nbsp;· &nbsp;/devices/{id}/cost</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ DERIVATIONS ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">Why the payload is shaped this way</span>
+    <h2>The derivations are served, not invented</h2>
+  </div>
+  <div class="stack">
+    <p class="col">A raw list of prices would be a smaller response and a worse API. Two
+    dashboards inventing their own definition of “cheap” is how a house ends up with two
+    screens disagreeing about whether now is a good time to put the washing on. So
+    <code>band</code>, <code>rank</code> and <code>percentile</code> come down the wire.</p>
+
+    <div class="chips">
+      <span class="chip"><i style="background:var(--plunge)"></i>plunge &nbsp;≤ 0p</span>
+      <span class="chip"><i style="background:var(--cool)"></i>cheap &nbsp;≤ median − 15%</span>
+      <span class="chip"><i style="background:var(--neutral)"></i>normal</span>
+      <span class="chip"><i style="background:var(--peak)"></i>peak &nbsp;≥ median + 15%</span>
+    </div>
+
+    <figure>
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 300" width="880" role="img"
+             aria-label="Forty-eight half-hourly prices for one day, coloured by band, with the median at 28.42 pence and the mean dragged down to 23.38 pence by ten negative slots.">
+          <g stroke="var(--rule-2)" stroke-width="1">
+            <line x1="46" y1="39.2" x2="866" y2="39.2"/>
+            <line x1="46" y1="77.5" x2="866" y2="77.5"/>
+            <line x1="46" y1="115.8" x2="866" y2="115.8"/>
+            <line x1="46" y1="154.2" x2="866" y2="154.2"/>
+            <line x1="46" y1="192.5" x2="866" y2="192.5"/>
+          </g>
+          <rect x="46.0" y="102.2" width="13.9" height="128.7" fill="var(--peak)" rx="1"/>
+          <rect x="63.1" y="103.6" width="13.9" height="127.3" fill="var(--peak)" rx="1"/>
+          <rect x="80.2" y="112.4" width="13.9" height="118.4" fill="var(--neutral)" rx="1"/>
+          <rect x="97.2" y="106.4" width="13.9" height="124.5" fill="var(--neutral)" rx="1"/>
+          <rect x="114.3" y="105.7" width="13.9" height="125.2" fill="var(--neutral)" rx="1"/>
+          <rect x="131.4" y="120.2" width="13.9" height="110.6" fill="var(--neutral)" rx="1"/>
+          <rect x="148.5" y="116.0" width="13.9" height="114.9" fill="var(--neutral)" rx="1"/>
+          <rect x="165.6" y="124.8" width="13.9" height="106.1" fill="var(--neutral)" rx="1"/>
+          <rect x="182.7" y="112.2" width="13.9" height="118.6" fill="var(--neutral)" rx="1"/>
+          <rect x="199.8" y="122.6" width="13.9" height="108.3" fill="var(--neutral)" rx="1"/>
+          <rect x="216.8" y="121.2" width="13.9" height="109.6" fill="var(--neutral)" rx="1"/>
+          <rect x="233.9" y="125.4" width="13.9" height="105.4" fill="var(--neutral)" rx="1"/>
+          <rect x="251.0" y="128.7" width="13.9" height="102.2" fill="var(--neutral)" rx="1"/>
+          <rect x="268.1" y="128.7" width="13.9" height="102.2" fill="var(--neutral)" rx="1"/>
+          <rect x="285.2" y="133.0" width="13.9" height="97.8" fill="var(--neutral)" rx="1"/>
+          <rect x="302.2" y="135.2" width="13.9" height="95.6" fill="var(--neutral)" rx="1"/>
+          <rect x="319.3" y="152.5" width="13.9" height="78.3" fill="var(--cool)" rx="1"/>
+          <rect x="336.4" y="158.2" width="13.9" height="72.7" fill="var(--cool)" rx="1"/>
+          <rect x="353.5" y="188.5" width="13.9" height="42.3" fill="var(--cool)" rx="1"/>
+          <rect x="370.6" y="208.6" width="13.9" height="22.2" fill="var(--cool)" rx="1"/>
+          <rect x="387.7" y="230.8" width="13.9" height="1.0" fill="var(--plunge)" rx="1"/>
+          <rect x="404.8" y="230.8" width="13.9" height="8.0" fill="var(--plunge)" rx="1"/>
+          <rect x="421.8" y="230.8" width="13.9" height="10.1" fill="var(--plunge)" rx="1"/>
+          <rect x="438.9" y="230.8" width="13.9" height="10.1" fill="var(--plunge)" rx="1"/>
+          <rect x="456.0" y="230.8" width="13.9" height="10.1" fill="var(--plunge)" rx="1"/>
+          <rect x="473.1" y="230.8" width="13.9" height="10.1" fill="var(--plunge)" rx="1"/>
+          <rect x="490.2" y="230.8" width="13.9" height="9.1" fill="var(--plunge)" rx="1"/>
+          <rect x="507.2" y="230.8" width="13.9" height="7.5" fill="var(--plunge)" rx="1"/>
+          <rect x="524.3" y="230.8" width="13.9" height="5.8" fill="var(--plunge)" rx="1"/>
+          <rect x="541.4" y="224.1" width="13.9" height="6.8" fill="var(--cool)" rx="1"/>
+          <rect x="558.5" y="230.8" width="13.9" height="1.9" fill="var(--plunge)" rx="1"/>
+          <rect x="575.6" y="205.0" width="13.9" height="25.8" fill="var(--cool)" rx="1"/>
+          <rect x="592.7" y="126.7" width="13.9" height="104.2" fill="var(--neutral)" rx="1"/>
+          <rect x="609.8" y="89.2" width="13.9" height="141.6" fill="var(--peak)" rx="1"/>
+          <rect x="626.8" y="60.2" width="13.9" height="170.6" fill="var(--peak)" rx="1"/>
+          <rect x="643.9" y="38.3" width="13.9" height="192.5" fill="var(--peak)" rx="1"/>
+          <rect x="661.0" y="42.2" width="13.9" height="188.6" fill="var(--peak)" rx="1"/>
+          <rect x="678.1" y="39.1" width="13.9" height="191.8" fill="var(--peak)" rx="1"/>
+          <rect x="695.2" y="94.0" width="13.9" height="136.9" fill="var(--peak)" rx="1"/>
+          <rect x="712.2" y="88.7" width="13.9" height="142.2" fill="var(--peak)" rx="1"/>
+          <rect x="729.3" y="89.5" width="13.9" height="141.4" fill="var(--peak)" rx="1"/>
+          <rect x="746.4" y="92.1" width="13.9" height="138.7" fill="var(--peak)" rx="1"/>
+          <rect x="763.5" y="92.6" width="13.9" height="138.3" fill="var(--peak)" rx="1"/>
+          <rect x="780.6" y="90.0" width="13.9" height="140.8" fill="var(--peak)" rx="1"/>
+          <rect x="797.7" y="96.4" width="13.9" height="134.4" fill="var(--peak)" rx="1"/>
+          <rect x="814.8" y="105.3" width="13.9" height="125.5" fill="var(--peak)" rx="1"/>
+          <rect x="831.8" y="108.9" width="13.9" height="122.0" fill="var(--neutral)" rx="1"/>
+          <rect x="848.9" y="109.0" width="13.9" height="121.8" fill="var(--neutral)" rx="1"/>
+          <line x1="46" y1="230.8" x2="866" y2="230.8" stroke="var(--ink-2)" stroke-width="1.25"/>
+          <line x1="46" y1="121.9" x2="866" y2="121.9" stroke="var(--grid)" stroke-width="1.5" stroke-dasharray="5 3"/>
+          <line x1="46" y1="141.2" x2="866" y2="141.2" stroke="var(--alarm)" stroke-width="1.5" stroke-dasharray="2 3"/>
+          <g font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--faint)">
+            <text x="38" y="42.7" text-anchor="end">50p</text>
+            <text x="38" y="81" text-anchor="end">40p</text>
+            <text x="38" y="119.3" text-anchor="end">30p</text>
+            <text x="38" y="157.7" text-anchor="end">20p</text>
+            <text x="38" y="196" text-anchor="end">10p</text>
+            <text x="38" y="234.3" text-anchor="end" fill="var(--ink-2)">0</text>
+            <text x="46" y="266">00:00</text>
+            <text x="182.7" y="266">04:00</text>
+            <text x="319.3" y="266">08:00</text>
+            <text x="456" y="266">12:00</text>
+            <text x="592.7" y="266">16:00</text>
+            <text x="729.3" y="266">20:00</text>
+          </g>
+          <g font-family="IBM Plex Mono, monospace" font-size="10.5" font-weight="500">
+            <text x="330" y="117" fill="var(--grid)">median 28.42p — the banding centre</text>
+            <text x="330" y="157" fill="var(--alarm)">mean 23.38p — not the centre</text>
+          </g>
+        </svg>
+      </div></div>
+      <figcaption><b>One real published day, banded as the API bands it.</b> Ten slots below
+      zero pull the mean nearly five pence under the median. Band on the mean and the peak
+      threshold falls to 26.88p — which paints <b>28 of these 48 slots as “peak”</b>, more
+      than half the day, and tells a consumer nothing. On the median it is 15. Plunge days
+      are precisely the days these endpoints exist for, so the statistic has to survive
+      them.</figcaption>
+    </figure>
+
+    <div class="col stack-tight">
+      <h3>Reading the three derivations</h3>
+      <p><code>band</code> is the one to render. <strong>plunge</strong> is absolute — any
+      price at or below zero, whatever the rest of the day looks like — and kept separate
+      from “cheap” because free energy is categorically different from merely inexpensive.
+      The other three are relative to the window’s median, ±15%.</p>
+      <p><code>rank</code> is <strong>1 for the cheapest</strong>, because the question is
+      always “when should I run this”, never “what is the most expensive half hour”.</p>
+      <p><code>percentile</code> is 0 at the cheapest and 1 at the dearest, for consumers
+      that want their own thresholds — and <code>summary.median</code> now carries the
+      centre our bands are actually drawn from, so that invitation is one you can act on.
+      Offering the choice while withholding the figure it turns on was not really an offer;
+      see <strong>Five things I changed</strong> below.</p>
+      <div class="trap">
+        <p class="eyebrow" style="margin-bottom:6px">Bands are window-relative</p>
+        <p>The same half hour can be <code>normal</code> in one response and
+        <code>peak</code> in another, because the window it was ranked against differs. A
+        29.2p slot is the cheapest of the next eight hours and an unremarkable middle of the
+        whole day. Never cache a band against a timestamp and reuse it under a different
+        window — cache the <em>price</em>, which does not move, and re-derive.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ RECIPE 1 ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">Recipe</span>
+    <h2>A price dashboard</h2>
+  </div>
+  <div class="stack">
+    <p class="col">One request gives you everything a “what’s happening with electricity”
+    panel needs. This is a real response, trimmed to three of its sixteen slots.</p>
+
+    <div class="panel">
+      <div class="panel-bar"><span class="m">GET</span><span>/prices/upcoming?hours=8</span></div>
+<pre>{
+  <span class="k">"tariff_code"</span>: <span class="s">"E-1R-AGILE-24-10-01-A"</span>,
+  <span class="k">"unit"</span>: <span class="s">"p/kWh"</span>,  <span class="k">"vat_included"</span>: <span class="n">true</span>,
+  <span class="k">"generated_at"</span>: <span class="s">"2026-09-16T09:45:00+01:00"</span>,
+  <span class="k">"from"</span>: <span class="s">"2026-09-16T09:30:00+01:00"</span>,
+  <span class="k">"to"</span>:   <span class="s">"2026-09-16T17:30:00+01:00"</span>,
+  <span class="k">"known_to"</span>: <span class="s">"2026-09-16T23:00:00+01:00"</span>,   <span class="c">// how far prices run AT ALL</span>
+  <span class="k">"summary"</span>: {
+    <span class="k">"slots"</span>: <span class="n">16</span>, <span class="k">"current"</span>: <span class="n">31.028</span>,
+    <span class="k">"min"</span>: <span class="n">29.201</span>, <span class="k">"median"</span>: <span class="n">30.686</span>, <span class="k">"mean"</span>: <span class="n">34.212</span>, <span class="k">"max"</span>: <span class="n">53.991</span>
+  },
+  <span class="k">"slots"</span>: [
+    { <span class="k">"valid_from"</span>: <span class="s">"…T14:30:00+01:00"</span>, <span class="k">"valid_to"</span>: <span class="s">"…T15:00:00+01:00"</span>,
+      <span class="k">"price"</span>: <span class="n">29.201</span>, <span class="k">"rank"</span>: <span class="n">1</span>, <span class="k">"percentile"</span>: <span class="n">0</span>,    <span class="k">"band"</span>: <span class="s">"normal"</span> },
+    { <span class="k">"valid_from"</span>: <span class="s">"…T16:00:00+01:00"</span>, <span class="k">"valid_to"</span>: <span class="s">"…T16:30:00+01:00"</span>,
+      <span class="k">"price"</span>: <span class="n">46.589</span>, <span class="k">"rank"</span>: <span class="n">14</span>, <span class="k">"percentile"</span>: <span class="n">0.8667</span>, <span class="k">"band"</span>: <span class="s">"peak"</span> },
+    { <span class="k">"valid_from"</span>: <span class="s">"…T17:00:00+01:00"</span>, <span class="k">"valid_to"</span>: <span class="s">"…T17:30:00+01:00"</span>,
+      <span class="k">"price"</span>: <span class="n">53.991</span>, <span class="k">"rank"</span>: <span class="n">16</span>, <span class="k">"percentile"</span>: <span class="n">1</span>,    <span class="k">"band"</span>: <span class="s">"peak"</span> }
+  ],
+  <span class="k">"cheapest"</span>: {
+    <span class="k">"30m"</span>: { <span class="k">"from"</span>: <span class="s">"…T14:30"</span>, <span class="k">"to"</span>: <span class="s">"…T15:00"</span>, <span class="k">"slots"</span>: <span class="n">1</span>, <span class="k">"mean_price"</span>: <span class="n">29.2</span>   },
+    <span class="k">"1h"</span>:  { <span class="k">"from"</span>: <span class="s">"…T14:00"</span>, <span class="k">"to"</span>: <span class="s">"…T15:00"</span>, <span class="k">"slots"</span>: <span class="n">2</span>, <span class="k">"mean_price"</span>: <span class="n">29.4</span>   },
+    <span class="k">"2h"</span>:  { <span class="k">"from"</span>: <span class="s">"…T13:30"</span>, <span class="k">"to"</span>: <span class="s">"…T15:30"</span>, <span class="k">"slots"</span>: <span class="n">4</span>, <span class="k">"mean_price"</span>: <span class="n">29.786</span> },
+    <span class="k">"3h"</span>:  { <span class="k">"from"</span>: <span class="s">"…T13:00"</span>, <span class="k">"to"</span>: <span class="s">"…T16:00"</span>, <span class="k">"slots"</span>: <span class="n">6</span>, <span class="k">"mean_price"</span>: <span class="n">30.152</span> }
+  },
+  <span class="k">"missing"</span>: [], <span class="k">"complete"</span>: <span class="n">true</span>
+}</pre>
+    </div>
+
+    <div class="col">
+      <div class="steps">
+        <div class="step"><span class="b"><b>Draw <code>slots</code> as bars, coloured by
+        <code>band</code>.</b> Do not compute your own thresholds unless you mean to; if you
+        do, use <code>summary.median</code> so you are at least disagreeing with us on
+        purpose.</span></div>
+        <div class="step"><span class="b"><b>Mark <code>summary.current</code>.</b> It is the
+        price of the slot covering now, and it is <em>absent</em> when no held slot covers
+        it — which happens in the two-slot tail gap before a publication. Render the absence
+        as “unknown”, never as zero.</span></div>
+        <div class="step"><span class="b"><b>Put <code>cheapest["3h"]</code> in the corner.</b>
+        It is the actionable sentence on the whole panel: <em>“cheapest three hours start at
+        13:00.”</em> A duration that does not fit the window is <strong>omitted</strong>
+        rather than shortened — a run labelled 3h is always three hours — so check the key
+        exists before reading it.</span></div>
+        <div class="step"><span class="b"><b>Believe <code>unit</code> and
+        <code>vat_included</code>, don’t assume them.</b> Pence per kWh, VAT inclusive, on
+        every price route. A dashboard that guessed wrong is out by 5% on every number on
+        screen and looks completely plausible.</span></div>
+      </div>
+    </div>
+
+    <div class="note col">
+      <p class="eyebrow" style="margin-bottom:6px">Prices are signed</p>
+      <p>Negative is real and is the point of the tariff. A chart axis anchored at zero, a
+      <code>Math.abs()</code>, or a colour ramp that starts at the minimum will all quietly
+      erase the best hours of the day. The day in the chart above spent five hours below
+      zero.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ RECIPE 2 ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">Recipe</span>
+    <h2>Scheduling a deferrable load</h2>
+  </div>
+  <div class="stack">
+    <p class="col">This is the endpoint that justifies the archive. Two of its behaviours
+    are decisions rather than details, and both will bite a consumer that assumes the
+    obvious thing.</p>
+
+    <figure>
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 290" width="880" role="img"
+             aria-label="Diagram of a cheapest-run search: the deadline applies to the finish of the run, and a run never spans a gap in the prices.">
+          <g font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--faint)">
+            <text x="0" y="44">prices</text>
+            <text x="0" y="110">deadline</text>
+            <text x="0" y="215">gaps</text>
+          </g>
+          <rect x="80" y="30" width="470" height="20" fill="var(--grid-soft)" stroke="var(--grid)"/>
+          <rect x="550" y="30" width="90" height="20" fill="none" stroke="var(--alarm)" stroke-dasharray="4 3"/>
+          <rect x="640" y="30" width="200" height="20" fill="var(--grid-soft)" stroke="var(--grid)"/>
+          <g font-family="IBM Plex Mono, monospace" font-size="10">
+            <text x="315" y="44" text-anchor="middle" fill="var(--grid)">held</text>
+            <text x="595" y="44" text-anchor="middle" fill="var(--alarm)">GAP</text>
+            <text x="740" y="44" text-anchor="middle" fill="var(--grid)">held</text>
+          </g>
+
+          <line x1="470" y1="72" x2="470" y2="180" stroke="var(--alarm)" stroke-width="1.5"/>
+          <text x="476" y="82" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--alarm)">before=</text>
+          <rect x="290" y="96" width="180" height="18" fill="var(--plunge)" opacity=".85" rx="2"/>
+          <text x="282" y="109" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--plunge)">✓ ends on the deadline</text>
+          <rect x="380" y="140" width="180" height="18" fill="none" stroke="var(--alarm)" stroke-dasharray="4 3" rx="2"/>
+          <text x="372" y="153" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--alarm)">✗ overruns past it</text>
+
+          <rect x="470" y="200" width="200" height="18" fill="none" stroke="var(--alarm)" stroke-dasharray="4 3" rx="2"/>
+          <text x="462" y="213" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--alarm)">✗ straddles the gap</text>
+          <rect x="655" y="244" width="170" height="18" fill="var(--plunge)" opacity=".85" rx="2"/>
+          <text x="647" y="257" text-anchor="end" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--plunge)">✓ wholly inside held prices</text>
+        </svg>
+      </div></div>
+      <figcaption><b>Both rules exist because the alternative produces a confident wrong
+      answer.</b> A window whose prices we do not hold cannot honestly be called cheap; and
+      a load that overruns into the evening peak was not scheduled, it was merely
+      begun.</figcaption>
+    </figure>
+
+    <div class="panel">
+      <div class="panel-bar"><span class="m">GET</span><span>/prices/cheapest?duration=3h</span></div>
+<pre>{
+  <span class="k">"from"</span>: <span class="s">"2026-09-16T13:00:00+01:00"</span>,
+  <span class="k">"to"</span>:   <span class="s">"2026-09-16T16:00:00+01:00"</span>,
+  <span class="k">"slots"</span>: <span class="n">6</span>,
+  <span class="k">"mean_price"</span>: <span class="n">30.152</span>,
+  <span class="k">"searched_to"</span>: <span class="s">"2026-09-18T09:30:00+01:00"</span>,
+  <span class="k">"tariff_code"</span>: <span class="s">"E-1R-AGILE-24-10-01-A"</span>,
+  <span class="k">"unit"</span>: <span class="s">"p/kWh"</span>, <span class="k">"vat_included"</span>: <span class="n">true</span>
+}</pre>
+    </div>
+
+    <div class="col stack-tight">
+      <h3>The three rules</h3>
+      <p><strong><code>before</code> is a deadline for finishing, not for starting.</strong>
+      Ask for three hours before 07:00 and you will never be handed a run starting at 06:00.
+      This is the opposite of how most scheduling parameters read, and it is the only
+      reading that means anything: the point of the deadline is that the load is
+      <em>done</em>.</p>
+      <p><strong>A run never spans a gap.</strong> If the prices held have a hole in them,
+      no candidate window crosses it. Better a <code>404</code> than a window we cannot
+      actually price.</p>
+      <p><strong>A duration that is not a whole number of half hours rounds up.</strong> Ask
+      for 80 minutes and you get three slots. The slot is the atom; half of one cannot be
+      reserved.</p>
+      <div class="trap">
+        <p class="eyebrow" style="margin-bottom:6px">404 is an answer, not a fault</p>
+        <p>“No contiguous window of that length exists in the prices held” is a well-formed
+        question with no answer, which is why it is a <code>404</code> and not a
+        <code>400</code> or a <code>503</code>. Handle it by retrying after the next
+        publication — not by alerting. Asking for six hours before 07:00 at three in the
+        afternoon, with tomorrow unpublished, is an ordinary 404 that becomes a 200 shortly
+        after four.</p>
+      </div>
+      <div class="trap">
+        <p class="eyebrow" style="margin-bottom:6px">Read <code>searched_to</code> with care</p>
+        <p>It reports how far the search <em>looked</em>, which is a fixed 48 hours ahead —
+        not how far prices are actually held. In the response above it says the 18th while
+        <code>known_to</code> on the sibling route says the 16th. It bounds the search, not
+        the data. This is on the open list below.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ INCOMPLETENESS ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">The thing consumers get wrong</span>
+    <h2>Incompleteness is the normal state</h2>
+  </div>
+  <div class="stack">
+    <p class="col">The supplier publishes tomorrow’s prices in the late afternoon, and the
+    published horizon ends at <strong>23:00 local</strong> — so the furthest day held is
+    always missing its final two half hours. For roughly two thirds of every day, that day
+    is <em>today</em>. A consumer that treats <code>complete: false</code> as a fault will
+    be wrong most of the time.</p>
+
+    <figure>
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 210" width="880" role="img"
+             aria-label="Timeline of a day showing prices complete after the four o'clock publication, with a two-slot tail gap before it.">
+          <line x1="70" y1="150" x2="850" y2="150" stroke="var(--rule)" stroke-width="1"/>
+          <g font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--faint)">
+            <text x="70" y="172" text-anchor="middle">00:00</text>
+            <text x="265" y="172" text-anchor="middle">06:00</text>
+            <text x="460" y="172" text-anchor="middle">12:00</text>
+            <text x="655" y="172" text-anchor="middle">18:00</text>
+            <text x="850" y="172" text-anchor="middle">24:00</text>
+          </g>
+          <rect x="70" y="60" width="520" height="24" fill="var(--peak-soft)" stroke="var(--peak)"/>
+          <text x="330" y="76" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--peak)">complete: false — today is 46/48, tomorrow unpublished</text>
+          <rect x="590" y="60" width="260" height="24" fill="var(--plunge-soft)" stroke="var(--plunge)"/>
+          <text x="720" y="76" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--plunge)">complete: true</text>
+          <line x1="590" y1="50" x2="590" y2="150" stroke="var(--grid)" stroke-width="1.5"/>
+          <circle cx="590" cy="150" r="4.5" fill="var(--grid)"/>
+          <text x="597" y="46" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--grid)">publication — observed 15:54, 15:55</text>
+          <text x="70" y="110" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">Poll every 5 minutes from 15:00 if you need tomorrow the instant it lands.</text>
+          <text x="70" y="124" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">Otherwise hourly is plenty — and cached, it costs nothing.</text>
+        </svg>
+      </div></div>
+      <figcaption><b>Measured, not assumed.</b> 724 of 729 archived days are exactly
+      complete; the only short day is always the furthest one published, and always by
+      exactly two slots.</figcaption>
+    </figure>
+
+    <div class="col stack-tight">
+      <h3>Three fields, three different questions</h3>
+      <p><code>known_to</code> — the end of the newest slot held <em>for this tariff</em>,
+      which may be well beyond the window you asked for. This is the field to show a user as
+      “prices known until …”, and the one to compare a deadline against before deciding
+      whether an answer is even possible yet. It is <code>null</code>, never a zero date,
+      when the archive holds nothing.</p>
+      <p><code>complete</code> — whether every half hour of <em>the window you asked for</em>
+      holds a price. Routinely false. Treat it as “this chart has holes in it”, not as an
+      error.</p>
+      <p><code>missing</code> — the actual half-hour starts with no price, listed rather than
+      left to be inferred from a short <code>slots</code> array. Hatch them; do not
+      interpolate across them, and do not let a charting library join the line as though
+      nothing were absent.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ CACHING ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">Operating them</span>
+    <h2>Polling, caching, and saying no</h2>
+  </div>
+  <div class="stack">
+    <p class="col">The curve changes about once a day. A dashboard polls every few seconds.
+    Without conditional requests, each poll ships a 48-slot payload to say that nothing has
+    changed — so every price route carries a strong <strong>ETag</strong> and
+    <code>Cache-Control: private, max-age=30</code>.</p>
+
+    <div class="good col">
+      <p class="eyebrow" style="margin-bottom:6px">Browser consumers get this free</p>
+      <p>A plain <code>fetch()</code> uses the browser’s HTTP cache, so within 30 seconds a
+      repeat call never reaches the network, and after that it revalidates with
+      <code>If-None-Match</code> automatically and takes a <code>304</code>. The existing
+      <code>Auth.get()</code> helper in <code>consumer-demos</code> needs no change — just
+      don’t pass <code>cache: 'no-store'</code>, which would throw the benefit away.</p>
+    </div>
+
+    <div class="col stack-tight">
+      <p>Service consumers have to do it themselves: keep the <code>ETag</code>, send it back
+      as <code>If-None-Match</code>, and treat <code>304</code> as “what you have is still
+      current”. In Go, that is a stored tag and a header — and it turns a poll loop from
+      kilobytes into a few hundred bytes.</p>
+      <p>The tag hashes the <strong>rendered body</strong>, not a timestamp or
+      <code>known_to</code>. That matters more than it sounds: a band can shift because the
+      window slid forward even though no price changed, and a tag keyed on the data alone
+      would serve a stale chart while insisting it was fresh.</p>
+    </div>
+
+    <h3 class="col" style="margin-top:6px">When it says no</h3>
+    <figure>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>Status</th><th>Means</th><th>What a consumer should do</th></tr></thead>
+          <tbody>
+            <tr><td class="code">400</td><td>The window is malformed, longer than the cap
+              (31 days for <code>/prices</code>, 366 for <code>/prices/stats</code>), or it
+              spans a change of <em>tariff</em>.</td>
+              <td>Fix the request. Split a boundary-spanning window into two — the response
+              would otherwise mix two tariffs’ prices under one <code>tariff_code</code> and
+              contradict itself. Note this is keyed on the tariff actually changing, not on
+              the agreement being split: a split that leaves the code unchanged is served
+              normally. See change 4.</td></tr>
+            <tr><td class="code">404</td><td>Only on <code>/prices/cheapest</code>: no
+              contiguous run of that length exists in the prices held.</td>
+              <td>Retry after the next publication. Not an alert.</td></tr>
+            <tr><td class="code">503</td><td>No price archive is configured, or no tariff
+              covers the window, or the tariff is flat-rate where a curve was required.</td>
+              <td>Degrade the panel and say why. This is a deployment state, not a transient
+              one; retrying harder will not fix it.</td></tr>
+            <tr><td class="code">200</td><td><code>half_hourly: false</code> with a
+              <code>flat_price</code>.</td>
+              <td>The tariff has no curve. Render the flat rate — this is a different
+              <em>shape</em> of answer deliberately, so it cannot be mistaken for a broken
+              archive returning an empty array.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption>A flat-rate deployment is a supported state, not a degraded one. Every
+      price route answers on a flat tariff; it simply answers differently.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ════════════════ KITCHEN ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">Recipe</span>
+    <h2>The screen on the kitchen wall</h2>
+  </div>
+  <div class="stack">
+    <p class="col">A always-on display: the price over time, a marker on now, and an
+    answer to “is this a good moment to put the dishwasher on”. It is the use case these
+    routes were shaped for, and the one question it raises that the others do not is what
+    happens when the daily publication lands mid-afternoon.</p>
+
+    <div class="note col">
+      <p class="eyebrow" style="margin-bottom:6px">First, a correction worth having</p>
+      <p>At 09:00 you do <em>not</em> have prices “until about four o’clock”. You have them
+      until <strong>23:00 tonight</strong> — around fourteen hours of forward curve, already
+      published yesterday afternoon. The ~16:00 publication does not extend today; it adds
+      <strong>tomorrow</strong>. So breakfast is the time of day you know <em>most</em> about,
+      and the screen is never short of something to draw.</p>
+    </div>
+
+    <h3 class="col">Draw one span, in three zones</h3>
+    <p class="col">A fixed rolling window — say <strong>now − 3h to now + 12h</strong> — beats
+    an axis that ends at the horizon, because the horizon jumps by a day at publication and
+    a chart that rescales itself is unreadable at a glance. With a fixed span the axis never
+    moves; what changes is how much of it is filled.</p>
+
+    <figure>
+      <div class="scroller"><div class="svgpad">
+        <svg viewBox="0 0 880 280" width="880" role="img"
+             aria-label="The same fixed fifteen-hour window at three times of day: fully known at nine in the morning, four and a half hours unknown at half past three, and fully known again just after the four o'clock publication.">
+          <g stroke="var(--rule-2)" stroke-width="1">
+            <line x1="120" y1="36" x2="120" y2="238"/>
+            <line x1="302.5" y1="36" x2="302.5" y2="238"/>
+            <line x1="485" y1="36" x2="485" y2="238"/>
+            <line x1="667.5" y1="36" x2="667.5" y2="238"/>
+            <line x1="850" y1="36" x2="850" y2="238"/>
+          </g>
+          <g font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--faint)">
+            <text x="120" y="256" text-anchor="middle">06:00</text>
+            <text x="302.5" y="256" text-anchor="middle">12:00</text>
+            <text x="485" y="256" text-anchor="middle">18:00</text>
+            <text x="667.5" y="256" text-anchor="middle">00:00</text>
+            <text x="850" y="256" text-anchor="middle">06:00</text>
+          </g>
+
+          <!-- publication -->
+          <line x1="424.2" y1="30" x2="424.2" y2="238" stroke="var(--peak)" stroke-width="1.25" stroke-dasharray="4 3"/>
+          <text x="429" y="28" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--peak)">publication ~16:00</text>
+
+          <!-- row 1: 09:00 -->
+          <text x="0" y="62" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--ink-2)">09:00</text>
+          <rect x="120" y="46" width="456.2" height="26" fill="var(--grid-soft)" stroke="var(--grid)"/>
+          <line x1="211.2" y1="42" x2="211.2" y2="76" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="3 2"/>
+          <text x="340" y="63" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--grid)">all known — 14h of forward curve</text>
+
+          <!-- row 2: 15:30 -->
+          <text x="0" y="132" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--ink-2)">15:30</text>
+          <rect x="317.7" y="116" width="319.4" height="26" fill="var(--grid-soft)" stroke="var(--grid)"/>
+          <rect x="637.1" y="116" width="136.9" height="26" fill="none" stroke="var(--faint)" stroke-dasharray="3 3"/>
+          <line x1="409" y1="112" x2="409" y2="146" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="3 2"/>
+          <text x="705" y="133" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">not yet published</text>
+          <line x1="637.1" y1="104" x2="637.1" y2="116" stroke="var(--plunge)" stroke-width="1.5"/>
+          <text x="641" y="102" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--plunge)">known_to</text>
+
+          <!-- row 3: 16:10 -->
+          <text x="0" y="202" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--ink-2)">16:10</text>
+          <rect x="338" y="186" width="456.2" height="26" fill="var(--grid-soft)" stroke="var(--grid)"/>
+          <line x1="429.2" y1="182" x2="429.2" y2="216" stroke="var(--ink)" stroke-width="1.5" stroke-dasharray="3 2"/>
+          <text x="600" y="203" text-anchor="middle" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--grid)">filled in — known_to is now 23:00 TOMORROW</text>
+        </svg>
+      </div></div>
+      <figcaption><b>The same fixed window, three times of day.</b> The dashed vertical is
+      “now”. Nothing rescales at publication: the unknown tail simply fills in, which is a
+      far calmer thing to watch than an axis that doubles. The hatched zone is not an
+      error — it is the honest statement that tomorrow evening has not been priced
+      yet.</figcaption>
+    </figure>
+
+    <div class="col stack-tight">
+      <p><strong>Past, muted and unbanded.</strong> You cannot run the dishwasher at 07:00
+      this morning, so the retrospective third is context, not choice. Draw it greyed. This
+      also sidesteps a trap: <code>band</code> is relative to the window it was computed
+      against, so bands spanning past <em>and</em> future are diluted by history.</p>
+      <p><strong>Future, banded.</strong> These are the options. Colour by
+      <code>band</code>.</p>
+      <p><strong>Beyond <code>known_to</code>, hatched.</strong> Not missing — unpublished.
+      The distinction matters on a screen somebody trusts.</p>
+    </div>
+
+    <h3 class="col">Two calls, two jobs</h3>
+    <div class="panel">
+      <div class="panel-bar"><span class="m">GET</span><span>the drawing call · one consistent band scale across the whole span</span></div>
+<pre>/prices?window=custom&amp;from=<span class="c">&lt;now−3h&gt;</span>&amp;to=<span class="c">&lt;now+12h&gt;</span>
+
+<span class="c">// slots[]    — the curve, with band/rank/percentile</span>
+<span class="c">// known_to   — where the curve stops: everything after this is hatched</span>
+<span class="c">// summary.current — the price right now, for the big number</span>
+<span class="c">// summary.median  — the centre, if you want your own thresholds</span>
+<span class="c">// complete   — false means there are holes; see below</span></pre>
+    </div>
+    <div class="panel">
+      <div class="panel-bar"><span class="m">GET</span><span>the verdict call · judged against the choices you actually have</span></div>
+<pre>/prices/upcoming?hours=12
+
+<span class="c">// band on the CURRENT slot  — the good/bad light</span>
+<span class="c">// cheapest["2h"], ["3h"]    — “cheapest 3h starts 13:00”</span></pre>
+    </div>
+    <p class="col">Both are separate calls on purpose. The chart wants one band scale across
+    everything visible; the <em>verdict</em> wants bands measured against the future alone,
+    because “is now a good time” means “compared with my remaining options”, and a window
+    padded with this morning answers a different question. Both are ETagged and
+    <code>max-age=30</code>, so the second call costs almost nothing.</p>
+    <p class="col">For a specific appliance, skip the bands entirely and ask the question
+    directly: <code>/prices/cheapest?duration=3h&amp;before=&lt;bedtime&gt;</code> returns the
+    window to run it in, and the difference between its <code>mean_price</code> and the
+    current price is the saving to put on screen.</p>
+
+    <h3 class="col">The refresh loop</h3>
+    <div class="steps col">
+      <div class="step"><span class="b"><b>Move the “now” marker with no network at all.</b>
+      A local timer every 30 seconds redraws the dashed line and re-reads which slot covers
+      now — from data you already hold. A screen that fetches in order to move a marker is
+      doing the work of a clock over HTTP.</span></div>
+      <div class="step"><span class="b"><b>Fetch for DATA on a schedule.</b> Every five
+      minutes is ample for a curve that changes once a day. Between <strong>15:00 and
+      16:30</strong> local, drop to once a minute so the screen picks the publication up
+      within a minute of it landing — publication has been observed at 15:54 and
+      15:55.</span></div>
+      <div class="step"><span class="b"><b>Let the browser do the conditional request.</b> A
+      plain <code>fetch()</code> revalidates with <code>If-None-Match</code> and takes a
+      <code>304</code> on its own. Most polls cost a header exchange, not 48
+      slots.</span></div>
+      <div class="step"><span class="b"><b>Watch <code>known_to</code>, not the clock.</b> If
+      it moved, the publication landed — refill the hatched zone. If it did not but the body
+      changed, a price was restated: redraw the curve in place. Two different events,
+      distinguishable by one field, and neither needs you to guess what time the supplier
+      publishes.</span></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-bar"><span class="m">JS</span><span>the whole loop</span></div>
+<pre><span class="k">let</span> knownTo = <span class="n">null</span>;
+
+<span class="k">async function</span> refresh() {
+  <span class="c">// Plain fetch: the browser revalidates and takes the 304 by itself.</span>
+  <span class="k">const</span> r = <span class="k">await</span> fetch(url(), { headers: { Authorization: <span class="s">`Bearer ${token}`</span> } });
+  <span class="k">if</span> (!r.ok) <span class="k">return</span> markStale(r.status);   <span class="c">// keep the last good frame</span>
+  <span class="k">const</span> d = <span class="k">await</span> r.json();
+
+  <span class="k">if</span> (d.known_to !== knownTo) {        <span class="c">// the horizon moved: publication</span>
+    knownTo = d.known_to;
+    refillUnknownZone(d);
+  }
+  drawCurve(d);                        <span class="c">// slots, bands, summary.current</span>
+  markFresh();
+}
+
+<span class="c">// Data on a schedule — faster while the publication is due.</span>
+<span class="k">const</span> period = () =&gt; { <span class="k">const</span> h = <span class="k">new</span> Date().getHours();
+                      <span class="k">return</span> (h === <span class="n">15</span> || h === <span class="n">16</span>) ? <span class="n">60_000</span> : <span class="n">300_000</span>; };
+
+<span class="c">// The marker is a clock, not a request.</span>
+setInterval(moveNowMarker, <span class="n">30_000</span>);</pre>
+    </div>
+
+    <h3 class="col">Things that will happen to a screen nobody reboots</h3>
+    <figure>
+      <div class="scroller">
+        <table>
+          <thead><tr><th>When</th><th>What you will see</th><th>What the screen should do</th></tr></thead>
+          <tbody>
+            <tr><td>most of the day</td><td><code>complete: false</code></td>
+              <td>Nothing. It is the normal state for two thirds of every day — the furthest
+                published day is always two slots short. Never render it as an error.</td></tr>
+            <tr><td>windy afternoons</td><td>negative prices</td>
+              <td>Let the axis go below zero. An axis anchored at zero, or a colour ramp
+                starting at the minimum, erases the best hours of the day.</td></tr>
+            <tr><td>after ~16:30</td><td><code>known_to</code> has not moved</td>
+              <td>The publication is late. Badge it. Far better than an evening that looks
+                confidently empty.</td></tr>
+            <tr><td>rarely</td><td><code>404</code> from <code>/prices/cheapest</code></td>
+              <td>“No window that long before your deadline — yet.” Retry after the next
+                publication. Not an alert.</td></tr>
+            <tr><td>deploys, outages</td><td><code>503</code>, or a failed fetch</td>
+              <td>Keep the last good frame and show a staleness badge. Blanking a kitchen
+                screen tells somebody less than a slightly old curve does.</td></tr>
+            <tr><td>twice a year</td><td>a 46- or 50-slot day</td>
+              <td>Nothing, as long as you plot by timestamp. Anything that assumes 48
+                half hours breaks on exactly those two days.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption>Interior holes — a slot the supplier published that never reached us — are
+      the one genuine fault in this list, and they are rare. Find them by walking the
+      half-hour grid against <code>slots[]</code>; <code>complete: false</code> together with
+      a window ending before <code>known_to</code> is the signal that one exists.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<!-- ════════════════ MONEY ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">The other half</span>
+    <h2>What it actually cost</h2>
+  </div>
+  <div class="stack">
+    <p class="col">The price routes say what a kWh costs. <code>/bill</code>,
+    <code>/series</code> and <code>/devices/{id}/cost</code> say what <em>you</em> paid — and
+    they gained four fields that a consumer now has to read.</p>
+
+    <div class="panel">
+      <div class="panel-bar"><span class="m">GET</span><span>/bill?window=today</span></div>
+<pre>{
+  <span class="k">"cost"</span>: <span class="n">3.5723</span>, <span class="k">"kwh"</span>: <span class="n">10.929</span>, <span class="k">"currency"</span>: <span class="s">"GBP"</span>,
+  <span class="k">"attribution"</span>: <span class="s">"counter_slot"</span>,   <span class="c">// or "flat_rate"</span>
+  <span class="k">"effective_rate"</span>: <span class="n">0.32683</span>,      <span class="c">// GBP/kWh actually paid, inc VAT</span>
+  <span class="c">// "unpriced_kwh" is ABSENT here — nothing went unpriced.</span>
+  <span class="c">// When present, it is energy we could not price, and it is</span>
+  <span class="c">// NOT included in "cost". Surface it; do not add it in.</span>
+  <span class="k">"standing_charge"</span>: <span class="n">0.6195</span>,
+  <span class="k">"standing_charge_source"</span>: <span class="s">"archive"</span>  <span class="c">// or "config"</span>
+}</pre>
+    </div>
+
+    <div class="col stack-tight">
+      <p><code>attribution</code> tells you how closely to read the number.
+      <strong><code>flat_rate</code></strong> is kWh × one rate — exact.
+      <strong><code>counter_slot</code></strong> is each half hour’s metered energy priced at
+      that half hour’s own rate. Whole-house figures are exact either way; per-device figures
+      under <code>counter_slot</code> carry a few percent of noise on low-draw continuous
+      devices, because a plug-class counter ticks in 0.1 kWh steps rather than continuously.</p>
+      <p><code>effective_rate</code> is the number to put on screen next to a device.
+      On a half-hourly tariff there is no single unit rate to quote, so this is what makes a
+      cost legible — whether the dishwasher ran cheap or dear against the day. It can be
+      negative.</p>
+      <div class="trap">
+        <p class="eyebrow" style="margin-bottom:6px"><code>unpriced_kwh</code> is the one to not ignore</p>
+        <p>It is energy consumed in half hours the archive holds no rate for, it is
+        <strong>omitted when zero</strong>, and it is deliberately <em>not</em> folded into
+        <code>cost</code>. Its presence always means the answer is incomplete. Charging
+        nothing for real energy is the quiet way a bill comes out wrong, so the field exists
+        to make that visible rather than absorbed — which only works if a consumer renders
+        it.</p>
+      </div>
+      <p><code>standing_charge_source</code> says where the daily charge came from.
+      <strong><code>archive</code></strong> is the supplier's own VAT-inclusive figure, so a
+      VAT change arrives in it the same way it arrives in energy prices.
+      <strong><code>config</code></strong> is the configured ex-VAT rate grossed up by the
+      configured VAT rate — correct only while somebody keeps that rate current, and the
+      fallback when no archived charge covers the whole window (a fresh deployment, before
+      the first daily sweep), when the window spans a genuine tariff change, or when the
+      read fails. Nothing to act on in normal operation; worth surfacing in an audit view,
+      because the two have different things that can go wrong with them.</p>
+      <div class="note">
+        <p class="eyebrow" style="margin-bottom:6px">Charts and bills now agree by construction</p>
+        <p>A <code>/series</code> chart at a one-day interval used to disagree with
+        <code>/bill</code> over the same window by 44%, because a day-wide bucket was priced
+        at whatever the rate happened to be at midnight. Energy is now queried at slot
+        resolution, costed there, and folded up into whatever buckets you asked to see. You
+        can plot <code>cost[]</code> against a bill total and expect them to match.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ════════════════ CHANGES ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">Reconsidered</span>
+    <h2>Five things I changed for you</h2>
+  </div>
+  <div class="stack">
+    <p class="col">Writing this document was the first time I read these routes as a
+    consumer rather than as their author, and three choices did not survive it. Two more
+    came later — one from a dated external event, one from someone describing the screen
+    they wanted on their kitchen wall. Each was defensible in isolation; each cost a reader
+    something. All five were free to change <em>now</em>, because nothing consumes these
+    endpoints yet — which is exactly why now was the moment.</p>
+
+    <div class="stack-tight">
+      <h3 class="col">1 &nbsp;· &nbsp;The banding centre is now served</h3>
+      <p class="col"><code>percentile</code> was offered so a consumer that dislikes our
+      thresholds could band differently — but the summary carried <code>min</code>,
+      <code>max</code> and <code>mean</code>, and the bands are drawn from the
+      <strong>median</strong>. The one figure you needed to reproduce or replace our banding
+      was the one absent.</p>
+      <div class="ba">
+        <div class="was"><span class="t">was</span>
+          <span class="v">"summary": { "slots": 16, "min": 29.201,<br>&nbsp;&nbsp;"mean": 34.212, "max": 53.991 }</span></div>
+        <div class="now"><span class="t">now</span>
+          <span class="v">"summary": { "slots": 16, "min": 29.201,<br>&nbsp;&nbsp;"median": 30.686, "mean": 34.212, "max": 53.991 }</span></div>
+      </div>
+      <p class="col" style="font-size:.9375rem;color:var(--muted)">The OpenAPI description
+      also said bands sat ±15% from the <em>mean</em>, which was simply wrong — the code has
+      always used the median, and the README said so. Spec and code now agree.</p>
+    </div>
+
+    <div class="stack-tight">
+      <h3 class="col">2 &nbsp;· &nbsp;<code>/prices/stats</code> uses the same VAT basis as everything else</h3>
+      <p class="col">Every other price route reports VAT-inclusive pence.
+      <code>/prices/stats</code> reported ex-VAT under the same key names, on the grounds
+      that daily aggregates are analytical rather than prices on a screen. That is a real
+      argument and it lost to a simpler one: a dashboard plotting a daily mean against a
+      live price was out by the VAT rate with nothing on the wire to say so, and the
+      difference had been documented in <em>three places</em> — three places describing a
+      surprise instead of one preventing it.</p>
+      <div class="ba">
+        <div class="was"><span class="t">was</span>
+          <span class="v">"vat_included": false<br>"mean": 37.544 &nbsp;<span style="color:var(--alarm)">← ex-VAT</span><br>"mean_inc_vat": 39.421</span></div>
+        <div class="now"><span class="t">now</span>
+          <span class="v">"vat_included": true<br>"mean": 39.421 &nbsp;<span style="color:var(--plunge)">← matches siblings</span><br>"mean_exc_vat": 37.544</span></div>
+      </div>
+      <p class="col" style="font-size:.9375rem;color:var(--muted)">Both bases are still
+      emitted, computed independently rather than grossed up — VAT on a negative price makes
+      it more negative. Only which one owns the plain name changed.</p>
+    </div>
+
+    <div class="stack-tight">
+      <h3 class="col">3 &nbsp;· &nbsp;<code>window=today</code> now means the whole day</h3>
+      <p class="col">Everywhere else in this API, <code>today</code> is period-to-date,
+      because nobody has consumed this evening’s electricity yet. Prices are the exception:
+      today’s are published in full before today begins. Asking for today’s curve at 09:45
+      returned <strong>20 slots</strong> — and reported <code>complete: true</code>, because
+      the window it was measured against also stopped at 09:45.</p>
+      <div class="ba">
+        <div class="was"><span class="t">was — at 09:45</span>
+          <span class="v">"to": "2026-09-16T09:45:00+01:00"<br>20 slots<br>"complete": <span style="color:var(--alarm)">true</span> &nbsp;— half a chart, called whole</span></div>
+        <div class="now"><span class="t">now — at 09:45</span>
+          <span class="v">"to": "2026-09-17T00:00:00+01:00"<br>46 slots<br>"complete": <span style="color:var(--plunge)">false</span> &nbsp;— the whole day, honest about the tail gap</span></div>
+      </div>
+      <p class="col" style="font-size:.9375rem;color:var(--muted)"><code>week</code> and
+      <code>month</code> stay period-to-date on purpose. The supplier publishes about a day
+      and a half ahead, so extending those would return a window that is mostly holes and
+      never complete. The asymmetry tracks a real one in the data rather than a tidy rule.</p>
+    </div>
+
+    <div class="stack-tight">
+      <h3 class="col">4 &nbsp;· &nbsp;A tax change is not a tariff change</h3>
+      <p class="col">This one came from a dated event rather than from reading. HMRC
+      zero-rates domestic electricity in Great Britain for supplies from
+      <strong>1 October 2026 to 31 March 2027</strong>. Expressing that means splitting the
+      agreement into dated blocks — but the blocks differ only in VAT rate, under one
+      unchanged tariff code. The tax changed; the tariff did not.</p>
+      <p class="col">The boundary refusal was counting agreement blocks, so the moment that
+      configuration lands, every window crossing either boundary would have returned
+      <code>400 “this window spans a tariff change”</code> — about a window where the tariff
+      is identical throughout. That is every month-spanning price request blacked out for the
+      six months of the zero rate, and again for six months after it ends.</p>
+      <div class="ba">
+        <div class="was"><span class="t">was</span>
+          <span class="v">refuse when the window crosses<br><em>any</em> agreement boundary</span></div>
+        <div class="now"><span class="t">now</span>
+          <span class="v">refuse when the window crosses a change<br>of <em>curve identity</em> — the tariff code</span></div>
+      </div>
+      <p class="col" style="font-size:.9375rem;color:var(--muted)">Safe for a half-hourly
+      curve specifically because the prices served are the supplier’s own inc-VAT figures out
+      of the archive, never grossed up from the configured rate — so a VAT change simply
+      arrives in the data. A <strong>flat</strong> tariff across a VAT change is still
+      refused, because <code>flat_price</code> is a single config-derived number that
+      genuinely differs either side, and one field cannot carry both.</p>
+    </div>
+
+    <div class="stack-tight">
+      <h3 class="col">5 &nbsp;· &nbsp;<code>/prices</code> can now feed a live display on its own</h3>
+      <p class="col">Describing the kitchen screen above surfaced two fields in the wrong
+      place. <code>known_to</code> — the field a consumer polls to see the publication land —
+      was only on <code>/prices/upcoming</code>, which is forward-only. So any display
+      wanting a few hours of retrospective context had to call a second endpoint purely to
+      learn one number.</p>
+      <p class="col">And <code>summary.current</code> was worse than missing: <code>/prices</code>
+      and <code>/prices/upcoming</code> share the <code>PriceCurveSummary</code> schema, which
+      documents it — so the spec promised a field this route never sent.</p>
+      <div class="ba">
+        <div class="was"><span class="t">was</span>
+          <span class="v">chart + horizon = <b>two</b> calls<br>summary.current documented, never sent</span></div>
+        <div class="now"><span class="t">now</span>
+          <span class="v">chart + horizon = <b>one</b> call<br>summary.current sent when the window covers now</span></div>
+      </div>
+      <p class="col" style="font-size:.9375rem;color:var(--muted)"><code>known_to</code> also
+      joined the ETag, which was not optional: a publication extends the horizon without
+      touching the slots of a <em>past</em> window, so a tag keyed only on that window's
+      content would answer <code>304</code> while the field being polled for had moved —
+      the same failure the content fingerprint was introduced to fix.</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- ════════════════ OPEN ════════════════ -->
+<section class="lane">
+  <div class="lane-head">
+    <span class="eyebrow">Not yet settled</span>
+    <h2>Open questions a consumer would notice</h2>
+  </div>
+  <div class="stack col stack-tight">
+    <p><strong><code>searched_to</code> overstates what is known.</strong> On
+    <code>/prices/cheapest</code> it reports the search horizon — a flat 48 hours — not how
+    far prices actually run. Adding <code>known_to</code> to that response would let a
+    scheduler tell “there is no cheap window” apart from “tomorrow isn’t published yet”,
+    which are different situations needing different retries.</p>
+    <p><strong>Omitted <code>cheapest</code> keys are easy to trip over.</strong>
+    <code>data.cheapest["3h"].from</code> throws when 3h did not fit the window. Omission is
+    the right call — a run labelled 3h must be three hours — but an explicit
+    <code>{"fits": false}</code> would be kinder than absence.</p>
+    <p><strong>No push.</strong> Everything here is polled. The publication is a discrete
+    daily event that consumers actively wait for, and a lifecycle event over MQTT would suit
+    it better than five-minute polling from 15:00. Deliberately parked, with the reasoning
+    recorded.</p>
+    <p><strong>No <code>/prices</code> demo page yet.</strong> The ten existing
+    <code>consumer-demos</code> pages cover energy, cost and climate; none of them draws a
+    price curve. Until one does, these routes have documentation but no worked consumer —
+    and a worked consumer is what actually finds the awkward parts, as the three changes
+    above rather demonstrate.</p>
+  </div>
+</section>
+
+</div>
+
+<footer>
+  <div class="wrap">
+    <p>Companion to <a href="https://claude.ai/artifact/F44MaTTKNuYx7ZR2cAQyHD"><strong>Costing a Half-Hourly Tariff</strong></a>, which
+    covers the archive, the validation gates and the costing model from first principles.</p>
+    <p>Every payload on this page is a real response from the price archive, with the grid
+    supply point shown as region <code>A</code>. Prices are pence per kWh, VAT inclusive
+    unless a field says otherwise.</p>
+  </div>
+</footer>
+</body>
+</html>
