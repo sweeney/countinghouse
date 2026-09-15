@@ -2,16 +2,9 @@ package main
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"log/slog"
-	"os"
-	"strings"
-	"sync"
-	"time"
 
 	"github.com/sweeney/identity/common/backup"
-	_ "modernc.org/sqlite"
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/httpapi"
@@ -21,307 +14,60 @@ import (
 // ---------------------------------------------------------------------------
 // Offsite backup of the price archive.
 //
-// The archive is the one thing countinghouse writes, and the only state here that is
-// NOT rebuildable from Influx — CLAUDE.md is explicit that it is primary durable state
+// The archive is the one thing countinghouse writes, and the only state here that is NOT
+// rebuildable from Influx — CLAUDE.md is explicit that it is primary durable state
 // "which is exactly why it gets an enforced key, a restatement log and a backup — not a
 // retention policy". This is that backup.
 //
 // Unconfigured is a legitimate, silent state: a development box, or any deployment whose
-// agreements are all flat-rate and which therefore has no archive. A PARTIALLY
-// configured one is not — config.BackupConfig.Validate refuses it at startup, because a
-// backup that is quietly not happening is worse than none.
+// agreements are all flat-rate and which therefore has no archive. A PARTIALLY configured
+// one is not — config.BackupConfig.Validate refuses it at startup, because a backup that
+// is quietly not happening is worse than none.
 //
-// WHY THIS DOES NOT USE backup.Manager
+// This file used to be ~230 lines: its own snapshot, its own schedule loop, its own
+// status bookkeeping and its own credential redactor, because `common/backup.Manager`
+// could not be asked what it had done and could not be tested against a clock. All four
+// gaps are now closed upstream (identity#45 / PR #46), so all four local versions are
+// gone and the Manager does the work.
 //
-// Originally: because `Manager` in common@v0.3.0 copied the database with `os.ReadFile`
-// + `os.WriteFile`, and the archive is WAL-mode, so that uploaded the main file with
-// `-wal` ignored — at best the database as of the last checkpoint, and on a fresh
-// archive a file with no schema in it at all.
-//
-// **That is fixed upstream.** common/v0.4.0 replaced copyDB with `VACUUM INTO`, and this
-// repo is now on v0.5.0, so `Manager` would take a consistent snapshot today. The
-// snapshot is no longer the reason.
-//
-// What remains the reason is smaller and still real:
-//
-//   - `Manager` reports outcomes through a fire-and-forget callback and keeps `lastRun`
-//     private, so a consumer cannot ask it what happened. /healthz needs exactly that.
-//   - `Manager` calls time.Now directly (backup.go:189, :199, :305, and time.After at
-//     :326), so its schedule cannot be tested from a consumer — which is why
-//     daily/weekly/monthly and the next-run arithmetic are verified here against an
-//     injected clock instead of by waiting a day.
-// A third reason used to be listed here and was WRONG: that NewManager treats
-// `ScheduleHour == 0` as unset. That was true of v0.3.0, which this repo was pinned to
-// when the local loop was written, and it was fixed before v0.5.0 — which preserves 0
-// and has a test saying so. Removed rather than left, because a justification that has
-// stopped being true is how a reader concludes the whole comment is stale.
-//
-// snapshotDB below is therefore now belt-and-braces rather than load-bearing: it does
-// the same `VACUUM INTO` the library does, and keeping it means the guarantee does not
-// silently depend on which version of common is pinned. The key layout is deliberately
-// identical to `common/backup`'s so these objects stay restorable by its tooling.
-//
-// Tracked upstream for the three points above: sweeney/identity#45.
+// What remains is the adapter: config to backup.Config, and backup.Status to the
+// /healthz block. Which is what the issue was filed to make possible.
 // ---------------------------------------------------------------------------
 
-// uploader is the one thing this needs from the R2 client, narrowed so the schedule and
-// the snapshot can be tested without credentials or a network.
-type uploader interface {
-	Upload(ctx context.Context, key, localPath string) error
-}
-
-// uploadTimeout bounds a single upload. Generous enough for a large archive over a slow
-// link, short enough that a wedged connection does not disable backups indefinitely.
-const uploadTimeout = 10 * time.Minute
-
-// archiveBackup snapshots the price archive and uploads it on a schedule.
-type archiveBackup struct {
-	dbPath   string
-	up       uploader
-	env      string
-	bucket   string
-	schedule string
-	hour     int
-	clock    testutil.Clock
-	log      *slog.Logger
-
-	status *backupStatus
-}
-
-// snapshotDB writes a consistent, self-contained copy of the SQLite database at src to
-// dst, using VACUUM INTO.
+// backupProvider adapts a *backup.Manager to httpapi.BackupProvider.
 //
-// Three properties that a file copy does not have: it includes writes still in the WAL,
-// it cannot capture a torn page because SQLite serialises it against writers, and the
-// result needs no `-wal`/`-shm` companion to open — which matters because the restore
-// path is "download one object and open it".
-//
-// Pure SQL, so the CGO-free build survives. The destination is cleared first: VACUUM
-// INTO refuses a path that already exists, and without this the second backup of the
-// process's life would fail while the first looked fine.
-func snapshotDB(src, dst string) error {
-	if _, err := os.Stat(src); err != nil {
-		// Checked explicitly: sql.Open is lazy and would CREATE an empty database at a
-		// missing path, and uploading an empty archive over a good backup is the worst
-		// available outcome.
-		return fmt.Errorf("archive not readable at %s: %w", src, err)
-	}
-	db, err := sql.Open("sqlite", src)
-	if err != nil {
-		return fmt.Errorf("open archive: %w", err)
-	}
-	defer db.Close() //nolint:errcheck
-
-	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("clear snapshot path: %w", err)
-	}
-	if _, err := db.Exec("VACUUM INTO ?", dst); err != nil {
-		return fmt.Errorf("vacuum into %s: %w", dst, err)
-	}
-	// VACUUM INTO creates the file under the process umask. This is a full copy of the
-	// price history and the live archive is 0600; the copy must not be looser.
-	if err := os.Chmod(dst, 0o600); err != nil {
-		return fmt.Errorf("chmod snapshot: %w", err)
-	}
-	return nil
-}
-
-// backupKey is the R2 object key for a backup taken at t.
-//
-// Format: {env}/backups/{service}/{YYYY/MM/DD}/{service}-{RFC3339}.sqlite3
-//
-// Byte-for-byte the layout `identity/common/backup` writes and its restore tooling
-// matches on — deliberately, so these objects stay restorable by that tooling even
-// though this file does the uploading. TestBackupKeyMatchesTheUpstreamLayout pins it;
-// changing it silently would strand every prior backup under a prefix nothing looks in.
-func backupKey(env, service string, t time.Time) string {
-	return fmt.Sprintf("%s/backups/%s/%s/%s-%s.sqlite3",
-		env, service, t.Format("2006/01/02"), service, t.Format(time.RFC3339))
-}
-
-// RunNow takes a snapshot and uploads it, synchronously.
-func (b *archiveBackup) RunNow(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, uploadTimeout)
-	defer cancel()
-
-	start := b.clock.Now().UTC()
-	key := backupKey(b.env, config.BackupServiceName, start)
-
-	tmp, err := os.CreateTemp("", config.BackupServiceName+"-backup-*.sqlite3")
-	if err != nil {
-		b.status.record(false, fmt.Sprintf("create temp file: %v", err))
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	path := tmp.Name()
-	tmp.Close()           //nolint:errcheck
-	defer os.Remove(path) //nolint:errcheck
-
-	if err := snapshotDB(b.dbPath, path); err != nil {
-		b.status.record(false, fmt.Sprintf("snapshot: %v", err))
-		return fmt.Errorf("snapshot archive: %w", err)
-	}
-	if err := b.up.Upload(ctx, key, path); err != nil {
-		b.status.record(false, fmt.Sprintf("upload: %v", err))
-		return fmt.Errorf("upload backup: %w", err)
-	}
-
-	b.status.record(true, key)
-	if b.log != nil {
-		b.log.Info("price archive backed up", "key", key, "bucket", b.bucket,
-			"took", b.clock.Now().Sub(start).Round(time.Millisecond))
-	}
-	return nil
-}
-
-// nextRun returns the next scheduled instant strictly after `from`, in UTC.
-//
-// Strictly after, so a run landing exactly on the scheduled hour schedules the NEXT one
-// rather than the same instant again — the difference between a daily backup and a tight
-// loop. Hour 0 is midnight, a real setting; the config layer defaults the hour so this
-// never has to read 0 as "unset", which is the ambiguity that sends an explicit
-// `hour: 0` to 03:00 in common@v0.3.0 while /healthz reports 0.
-func (b *archiveBackup) nextRun(from time.Time) (time.Time, bool) {
-	if b.schedule == "off" {
-		return time.Time{}, false
-	}
-	from = from.UTC()
-	at := time.Date(from.Year(), from.Month(), from.Day(), b.hour, 0, 0, 0, time.UTC)
-	for !at.After(from) || !b.scheduledOn(at) {
-		at = at.AddDate(0, 0, 1)
-	}
-	return at, true
-}
-
-// scheduledOn reports whether a backup runs on the given day.
-func (b *archiveBackup) scheduledOn(at time.Time) bool {
-	switch b.schedule {
-	case "weekly":
-		return at.Weekday() == time.Sunday
-	case "monthly":
-		return at.Day() == 1
-	default: // daily, or empty meaning daily
-		return true
-	}
-}
-
-// Start runs the schedule until ctx is cancelled.
-func (b *archiveBackup) Start(ctx context.Context) {
-	if b.schedule == "off" {
-		b.log.Info("price archive backups are on-demand only (schedule: off)")
-		return
-	}
-	go b.loop(ctx)
-}
-
-func (b *archiveBackup) loop(ctx context.Context) {
-	for {
-		next, ok := b.nextRun(b.clock.Now())
-		if !ok {
-			return
-		}
-		// A real timer against a clock-derived deadline, the same shape Collector.Run
-		// uses. The CLOCK decides when the next run is due (so the schedule is testable
-		// without waiting a day); the timer only does the sleeping.
-		timer := time.NewTimer(next.Sub(b.clock.Now()))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
-		// Fail-open: a failed backup is logged and recorded, and the loop continues to
-		// the next scheduled run. One bad night must not disable backups until somebody
-		// restarts the service.
-		if err := b.RunNow(ctx); err != nil {
-			b.log.Error("price archive backup failed", "error", err, "bucket", b.bucket)
-		}
-	}
+// The bucket, env, schedule and hour come from config rather than from Status: they are
+// what was ASKED for, the Manager reports what HAPPENED, and /healthz wants both.
+type backupProvider struct {
+	mgr    *backup.Manager
+	bucket string
+	env    string
+	sched  string
+	hour   int
 }
 
 // BackupHealth implements httpapi.BackupProvider.
-func (b *archiveBackup) BackupHealth() *httpapi.BackupHealth { return b.status.BackupHealth() }
-
-// ---------------------------------------------------------------------------
-
-// backupStatus records what the backup has done, for /healthz and /metrics.
 //
-// Written from the backup goroutine and read by every HTTP request, hence the mutex.
-type backupStatus struct {
-	mu sync.Mutex
-
-	bucket   string
-	env      string
-	schedule string
-	hour     int
-
-	lastAttempt time.Time
-	lastSuccess time.Time
-	lastKey     string
-	lastError   string
-	successes   int
-	failures    int
-
-	now func() time.Time
-}
-
-// record notes one outcome. On success `detail` is the object key, which is how the
-// backup is found later without listing the bucket; on failure it is the error.
-func (b *backupStatus) record(success bool, detail string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	now := b.now()
-	b.lastAttempt = now
-	if success {
-		b.lastSuccess = now
-		b.lastKey = detail
-		b.lastError = ""
-		b.successes++
-		return
-	}
-	b.failures++
-	// Scrub anything credential-shaped out of an error that is about to be served on
-	// /healthz. The AWS SDK's messages do not normally carry the secret, but "normally"
-	// is not a property worth betting a credential on, and the error is still useful
-	// without whatever this removes.
-	b.lastError = redactSecrets(detail)
-}
-
-// BackupHealth renders the current state.
-func (b *backupStatus) BackupHealth() *httpapi.BackupHealth {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// A straight projection now. LastError arrives already passed through the library's
+// RedactSecrets, so there is nothing to scrub here — and the local redactor that used to
+// do it was blunter, truncating at the first marker word where the library's is
+// key-aware.
+func (b backupProvider) BackupHealth() *httpapi.BackupHealth {
+	st := b.mgr.Status()
 	return &httpapi.BackupHealth{
 		Bucket:      b.bucket,
 		Env:         b.env,
-		Schedule:    b.schedule,
+		Schedule:    b.sched,
 		Hour:        b.hour,
-		LastAttempt: b.lastAttempt,
-		LastSuccess: b.lastSuccess,
-		LastKey:     b.lastKey,
-		LastError:   b.lastError,
-		Successes:   b.successes,
-		Failures:    b.failures,
+		LastAttempt: st.LastAttempt,
+		LastSuccess: st.LastSuccess,
+		LastKey:     st.LastKey,
+		LastError:   st.LastError,
+		Successes:   st.Successes,
+		Failures:    st.Failures,
+		NextRun:     st.NextRun,
 	}
 }
-
-// redactSecrets removes anything that looks like a credential from text bound for an
-// HTTP response.
-//
-// Deliberately blunt: it drops the remainder of any line mentioning a secret-ish word
-// rather than trying to parse the SDK's error formats, because a redactor that
-// understands its input is a redactor that stops working when the input changes.
-func redactSecrets(text string) string {
-	lower := strings.ToLower(text)
-	for _, marker := range []string{"secret", "accesskey", "access key", "access_key", "credential", "authorization", "signature"} {
-		if i := strings.Index(lower, marker); i >= 0 {
-			return strings.TrimSpace(text[:i]) + " [redacted]"
-		}
-	}
-	return text
-}
-
-// ---------------------------------------------------------------------------
 
 // startBackups builds and starts the archive's backup, returning nil when none is
 // configured — which omits the /healthz block entirely rather than rendering an empty
@@ -356,36 +102,37 @@ func startBackups(ctx context.Context, cfg config.Config, clock testutil.Clock, 
 		return nil
 	}
 
-	b := newArchiveBackup(cfg, up, clock, logger)
-	b.Start(ctx)
+	mgr := backup.NewManager(backup.Config{
+		DBPath:      cfg.Prices.DBPath,
+		BucketName:  bc.Bucket,
+		Env:         bc.Env,
+		ServiceName: config.BackupServiceName,
+		Schedule:    bc.Schedule,
+		// Passed as given. The library preserves 0 as midnight and clamps only
+		// out-of-range values, so the config layer's default is the only default.
+		ScheduleHour: bc.Hour,
+		// Injected, so the schedule is the same clock everything else in this service
+		// uses — and so a test can drive it without waiting a day.
+		Clock: clock.Now,
+	}, up, nil)
+
+	mgr.Start(ctx)
 	logger.Info("price archive backups enabled",
 		"bucket", bc.Bucket, "env", bc.Env, "service", config.BackupServiceName,
-		"schedule", b.schedule, "hour", bc.Hour, "db_path", cfg.Prices.DBPath)
-	return b
+		"schedule", effectiveSchedule(bc.Schedule), "hour", bc.Hour,
+		"db_path", cfg.Prices.DBPath, "next_run", mgr.NextRun())
+
+	return backupProvider{
+		mgr: mgr, bucket: bc.Bucket, env: bc.Env,
+		sched: effectiveSchedule(bc.Schedule), hour: bc.Hour,
+	}
 }
 
-// newArchiveBackup assembles the backup from config, an uploader and a clock. Split out
-// so the schedule and the snapshot are testable without credentials or a network.
-func newArchiveBackup(cfg config.Config, up uploader, clock testutil.Clock, logger *slog.Logger) *archiveBackup {
-	bc := cfg.Prices.Backup
-	schedule := bc.Schedule
-	if schedule == "" {
-		// Resolved here rather than left empty so /healthz reports what will actually
-		// happen instead of a blank.
-		schedule = "daily"
+// effectiveSchedule resolves the library's empty-means-daily rule, so /healthz reports
+// what will actually happen rather than a blank.
+func effectiveSchedule(s string) string {
+	if s == "" {
+		return "daily"
 	}
-	return &archiveBackup{
-		dbPath:   cfg.Prices.DBPath,
-		up:       up,
-		env:      bc.Env,
-		bucket:   bc.Bucket,
-		schedule: schedule,
-		hour:     bc.Hour,
-		clock:    clock,
-		log:      logger,
-		status: &backupStatus{
-			bucket: bc.Bucket, env: bc.Env, schedule: schedule, hour: bc.Hour,
-			now: func() time.Time { return clock.Now() },
-		},
-	}
+	return s
 }

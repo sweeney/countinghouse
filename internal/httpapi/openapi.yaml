@@ -1471,6 +1471,14 @@ components:
           type: integer
         failures:
           type: integer
+        next_run:
+          type: string
+          format: date-time
+          description: >-
+            When the next SCHEDULED backup is due. Omitted when nothing schedules one —
+            `schedule: off`, or an on-demand-only deployment. It answers the question the
+            timestamps cannot ("is a backup coming?"), which is what separates a fresh
+            start from a wedged scheduler.
 
     MetricsResponse:
       type: object

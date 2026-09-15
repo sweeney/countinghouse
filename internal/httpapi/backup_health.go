@@ -32,6 +32,12 @@ type BackupHealth struct {
 
 	Successes int `json:"successes"`
 	Failures  int `json:"failures"`
+
+	// NextRun is when the next scheduled backup is due, and zero when nothing schedules
+	// one. It answers the question the timestamps cannot — "is a backup coming?" — which
+	// is what separates a fresh start from a wedged scheduler, and it is why
+	// backupVerdict no longer has to infer that from silence.
+	NextRun time.Time `json:"next_run,omitempty"`
 }
 
 // BackupProvider supplies the backup health behind /healthz and /metrics.

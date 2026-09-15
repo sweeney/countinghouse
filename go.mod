@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
-	github.com/sweeney/identity/common v0.5.0
+	github.com/sweeney/identity/common v0.5.1-0.20260915170904-412e42b6f8a4
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.46.2
 )

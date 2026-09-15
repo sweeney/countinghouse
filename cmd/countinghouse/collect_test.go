@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 // ---------------------------------------------------------------------------
@@ -28,6 +31,24 @@ import (
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// countSlots opens a database file read-only and counts archived slots.
+//
+// Lived in snapshot_test.go until the local snapshot was deleted in favour of the
+// library's; kept here because the collect-mode tests still need to see what landed.
+func countSlots(t *testing.T, path string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", path+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	defer db.Close() //nolint:errcheck
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM unit_price").Scan(&n); err != nil {
+		t.Fatalf("count in %s: %v", path, err)
+	}
+	return n
 }
 
 // fakeOctopus serves a recorded unit-rates page, so a collect run can be exercised

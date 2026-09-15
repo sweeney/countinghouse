@@ -539,17 +539,20 @@ which is the layout `identity/common/backup` restores from.
 - The snapshot is staged under `/tmp` (mode 0600) and deleted after upload. The systemd
   unit sets `PrivateTmp=true`, so that copy of the archive is the service's alone — worth
   preserving if the hardening is ever revisited.
-- **Why this does not use `common/backup`'s scheduler.** The original reason — that
-  `Manager` copied a WAL-mode database with `os.ReadFile`, yielding on a fresh archive a
-  file with no schema in it at all — **is fixed upstream**: `common/v0.4.0` switched to
-  `VACUUM INTO`, and this repo is on v0.5.0. What remains is smaller: `Manager` reports
-  through a fire-and-forget callback so a consumer cannot ask it what happened (which
-  `/healthz` needs) and it calls `time.Now` directly, so its schedule cannot be tested
-  from a consumer. Tracked as sweeney/identity#45. (A third reason was listed here and
-  was wrong: `ScheduleHour == 0` being read as unset was a v0.3.0 bug, already fixed by
-  v0.5.0.) The local `VACUUM INTO` stays as belt-and-braces so the
-  guarantee does not depend on which version of `common` is pinned, and object keys are
-  byte-identical to `common/backup`'s layout so its restore tooling still finds them.
+- **It uses `common/backup`'s scheduler.** It did not, for a while: `Manager` could not be
+  asked what it had done and could not be tested against a clock, so this service grew its
+  own snapshot, schedule, status bookkeeping and credential redactor — about 230 lines.
+  All four gaps are closed upstream (sweeney/identity#45), so all four local versions are
+  gone and what remains is an adapter from config to the `/healthz` block. `last_error`
+  arrives already redacted by the library, whose redactor is key-aware where the local one
+  truncated bluntly at the first marker word.
+- **Historically this did not use the scheduler, and the stated reason was wrong twice.**
+  First: that `Manager` copied a WAL-mode database with `os.ReadFile` — true of v0.3.0, and
+  fixed in v0.4.0 by `VACUUM INTO`, which this repo did not notice because it sat two
+  versions behind. Then: that `ScheduleHour == 0` was read as unset — also a v0.3.0 bug,
+  also already fixed. Both claims were written from reading an older copy of the library
+  rather than the version the build resolves. Recorded because the fix each time was a
+  comment, not code, and the habit that prevents it is `go list -m -u all`.
 - `deploy/bootstrap.sh` creates `/etc/countinghouse/r2-secret` (0640, `root:countinghouse`)
   empty. The R2 token itself is minted in the Cloudflare dashboard; scope it to this bucket
   alone.
@@ -563,7 +566,8 @@ so a zeroed block never reads as a broken backup:
   "schedule": "daily", "hour": 3,
   "last_attempt": "…", "last_success": "…",
   "last_key": "production/backups/countinghouse/2026/09/12/countinghouse-….sqlite3",
-  "successes": 9, "failures": 0
+  "successes": 9, "failures": 0,
+  "next_run": "…"
 }
 ```
 
