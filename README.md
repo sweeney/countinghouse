@@ -544,9 +544,10 @@ which is the layout `identity/common/backup` restores from.
   file with no schema in it at all — **is fixed upstream**: `common/v0.4.0` switched to
   `VACUUM INTO`, and this repo is on v0.5.0. What remains is smaller: `Manager` reports
   through a fire-and-forget callback so a consumer cannot ask it what happened (which
-  `/healthz` needs), it calls `time.Now` directly so its schedule cannot be tested from a
-  consumer, and it reads `ScheduleHour == 0` as unset and silently runs at 03:00. Tracked
-  as sweeney/identity#45. The local `VACUUM INTO` stays as belt-and-braces so the
+  `/healthz` needs) and it calls `time.Now` directly, so its schedule cannot be tested
+  from a consumer. Tracked as sweeney/identity#45. (A third reason was listed here and
+  was wrong: `ScheduleHour == 0` being read as unset was a v0.3.0 bug, already fixed by
+  v0.5.0.) The local `VACUUM INTO` stays as belt-and-braces so the
   guarantee does not depend on which version of `common` is pinned, and object keys are
   byte-identical to `common/backup`'s layout so its restore tooling still finds them.
 - `deploy/bootstrap.sh` creates `/etc/countinghouse/r2-secret` (0640, `root:countinghouse`)

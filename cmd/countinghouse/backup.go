@@ -46,12 +46,15 @@ import (
 //
 //   - `Manager` reports outcomes through a fire-and-forget callback and keeps `lastRun`
 //     private, so a consumer cannot ask it what happened. /healthz needs exactly that.
-//   - `Manager` calls time.Now directly, so its schedule cannot be tested from a
-//     consumer — which is why daily/weekly/monthly and the next-run arithmetic are
-//     verified here against an injected clock instead of by waiting a day.
-//   - `NewManager` treats `ScheduleHour == 0` as unset and silently runs at 03:00, so an
-//     operator who writes `hour: 0` meaning midnight gets neither that nor a complaint.
-//     This is the absent-vs-zero discipline the rest of the branch applies.
+//   - `Manager` calls time.Now directly (backup.go:189, :199, :305, and time.After at
+//     :326), so its schedule cannot be tested from a consumer — which is why
+//     daily/weekly/monthly and the next-run arithmetic are verified here against an
+//     injected clock instead of by waiting a day.
+// A third reason used to be listed here and was WRONG: that NewManager treats
+// `ScheduleHour == 0` as unset. That was true of v0.3.0, which this repo was pinned to
+// when the local loop was written, and it was fixed before v0.5.0 — which preserves 0
+// and has a test saying so. Removed rather than left, because a justification that has
+// stopped being true is how a reader concludes the whole comment is stale.
 //
 // snapshotDB below is therefore now belt-and-braces rather than load-bearing: it does
 // the same `VACUUM INTO` the library does, and keeping it means the guarantee does not
