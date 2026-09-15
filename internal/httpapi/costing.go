@@ -8,6 +8,7 @@ import (
 
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/energy"
+	"github.com/sweeney/countinghouse/internal/prices"
 )
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,16 @@ type tariffPlan struct {
 	// across tariff segments so a window spanning a switchover charges each side's
 	// daily rate for its own days.
 	standing float64
+
+	// standingSource says where that figure came from: "archive" when it is the
+	// supplier's own inc-VAT daily charge, "config" when it is the configured
+	// ex-VAT rate grossed up by the configured VAT rate.
+	//
+	// Reported on the wire because the two differ in what can go wrong with them.
+	// The archived figure is what the supplier bills; the configured one is right
+	// only for as long as somebody keeps vat_rate current, which is precisely what
+	// a statutory rate change stops being true — see the VAT runbook in README.
+	standingSource string
 
 	// flat is the single flat tariff covering the whole window; valid only when
 	// scalar is true.
@@ -110,7 +121,25 @@ func (s *Server) planFor(ctx context.Context, from, to time.Time) (tariffPlan, e
 		}, nil
 	}
 
-	plan := tariffPlan{standing: energy.StandingChargeAcross(segments)}
+	plan := tariffPlan{
+		standing:       energy.StandingChargeAcross(segments),
+		standingSource: standingSourceConfig,
+	}
+
+	// Prefer the supplier's own archived standing charge. It is the figure they
+	// actually bill, so a VAT change arrives in it rather than having to be applied
+	// from configuration — the same reason energy is priced from the archive's
+	// inc-VAT column and never grossed up here.
+	//
+	// Falls back silently to the configured rate, which is what every instance did
+	// before standing charges were archived: a deployment with no archive, or a
+	// window the archive does not fully cover, is not a reason to refuse a bill.
+	if code, ok := singleTariffCode(segments); ok {
+		if charged, ok := s.archivedStandingCharge(ctx, code, from, to); ok {
+			plan.standing = charged
+			plan.standingSource = standingSourceArchive
+		}
+	}
 
 	priced := make([]energy.PricedSegment, 0, len(segments))
 	var halfHourly bool
@@ -234,4 +263,51 @@ func (s *Server) costDevices(r *http.Request, win energy.Window, plan tariffPlan
 // influxFailed writes the 502 the cost handlers share for a failed query.
 func influxFailed(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
+}
+
+// Where a bill's standing charge came from.
+const (
+	standingSourceArchive = "archive"
+	standingSourceConfig  = "config"
+)
+
+// singleTariffCode returns the tariff code when EVERY segment shares one.
+//
+// A window spanning a genuine switchover has two suppliers' standing charges to
+// reconcile and two codes to look them up under; that is more than this is worth,
+// and config already handles it correctly by segment. A VAT-only split — the case
+// this exists for — leaves the code unchanged and so qualifies.
+func singleTariffCode(segments []config.Segment) (string, bool) {
+	code := ""
+	for _, seg := range segments {
+		if !seg.Tariff.IsHalfHourly() {
+			return "", false
+		}
+		if code == "" {
+			code = seg.Tariff.TariffCode
+		} else if code != seg.Tariff.TariffCode {
+			return "", false
+		}
+	}
+	return code, code != ""
+}
+
+// archivedStandingCharge returns the supplier's own standing charge for the
+// window, and whether the archive could answer for all of it.
+//
+// Partial coverage returns false rather than a partial total: a total missing a
+// few days looks like a correct but cheap bill, which is the failure the whole
+// pricing layer is built to avoid.
+func (s *Server) archivedStandingCharge(ctx context.Context, code string, from, to time.Time) (float64, bool) {
+	reader, ok := s.PriceReader.(StandingChargeReader)
+	if !ok {
+		return 0, false
+	}
+	charges, err := reader.StandingCharges(ctx, code, from.UTC(), to.UTC())
+	if err != nil || len(charges) == 0 {
+		// A read failure falls back to config rather than failing the bill. The
+		// archive is an improvement on the configured figure, not a dependency of it.
+		return 0, false
+	}
+	return prices.NewSchedule(charges).ChargeOver(from.UTC(), to.UTC())
 }

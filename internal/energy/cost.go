@@ -78,13 +78,23 @@ type Reconciliation struct {
 // Bill is the assembled /bill response for one window: per-device breakdown,
 // money totals (VAT-inclusive £), and meter reconciliation.
 type Bill struct {
-	Window         string         `json:"window"`
-	Currency       string         `json:"currency"`
-	Devices        []DeviceCost   `json:"devices"`
-	EnergyCost     float64        `json:"energy_cost"`
-	StandingCharge float64        `json:"standing_charge"`
-	Total          float64        `json:"total"`
-	Reconciliation Reconciliation `json:"reconciliation"`
+	Window         string       `json:"window"`
+	Currency       string       `json:"currency"`
+	Devices        []DeviceCost `json:"devices"`
+	EnergyCost     float64      `json:"energy_cost"`
+	StandingCharge float64      `json:"standing_charge"`
+
+	// StandingChargeSource is "archive" when the standing charge is the supplier's
+	// own VAT-inclusive daily figure, "config" when it is the configured ex-VAT rate
+	// grossed up by the configured VAT rate.
+	//
+	// On the wire because the two have different failure modes. The archived figure
+	// is what the supplier bills. The configured one is right only while somebody
+	// keeps vat_rate current — which a statutory rate change is precisely the event
+	// that stops being true.
+	StandingChargeSource string         `json:"standing_charge_source,omitempty"`
+	Total                float64        `json:"total"`
+	Reconciliation       Reconciliation `json:"reconciliation"`
 
 	// Attribution is how the energy costs above were derived — see the constants.
 	Attribution string `json:"attribution"`
@@ -108,8 +118,9 @@ type Bill struct {
 // a bill and pricing energy are different jobs, and a half-hourly tariff is what
 // made keeping them in one function untenable.
 type BillPricing struct {
-	StandingCharge float64
-	Attribution    string
+	StandingCharge       float64
+	StandingChargeSource string
+	Attribution          string
 }
 
 // DeviceCostFor returns the VAT-inclusive £ cost of kwh at tariff t:
@@ -213,14 +224,15 @@ func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, meterPr
 	}
 
 	return Bill{
-		Window:         window.Label,
-		Currency:       "GBP",
-		Devices:        devices,
-		EnergyCost:     energyCost,
-		StandingCharge: standing,
-		Total:          energyCost + standing,
-		Reconciliation: rec,
-		Attribution:    pricing.Attribution,
+		Window:               window.Label,
+		Currency:             "GBP",
+		Devices:              devices,
+		EnergyCost:           energyCost,
+		StandingCharge:       standing,
+		StandingChargeSource: pricing.StandingChargeSource,
+		Total:                energyCost + standing,
+		Reconciliation:       rec,
+		Attribution:          pricing.Attribution,
 		// Priced energy only: dividing by kWh that carried no price would quietly
 		// understate the rate actually paid.
 		EffectiveRate: EffectiveRate(energyCost, monitoredKWh-unpriced),

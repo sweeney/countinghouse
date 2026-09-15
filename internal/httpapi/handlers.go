@@ -716,8 +716,9 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 	// no device causes it, so splitting it would invent a number that reads like a
 	// measurement (decision D2).
 	bill := energy.AssembleBill(win, billable, meterKWh, meterPresent, energy.BillPricing{
-		StandingCharge: plan.standing,
-		Attribution:    plan.attribution(),
+		StandingCharge:       plan.standing,
+		StandingChargeSource: plan.standingSource,
+		Attribution:          plan.attribution(),
 	})
 	writeJSON(w, http.StatusOK, roundBill(bill))
 }

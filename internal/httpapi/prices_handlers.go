@@ -27,6 +27,16 @@ type PriceReader interface {
 	KnownTo(ctx context.Context, tariffCode string) (time.Time, error)
 }
 
+// StandingChargeReader is the optional half of a PriceReader that can also serve
+// archived standing charges.
+//
+// Optional and detected by type assertion, so an instance without one — or a test
+// double that has not been taught about them — falls back to the configured rate,
+// which is exactly what every instance did before these were archived.
+type StandingChargeReader interface {
+	StandingCharges(ctx context.Context, tariffCode string, from, to time.Time) ([]prices.DailyCharge, error)
+}
+
 const (
 	// maxUpcomingHours bounds /prices/upcoming. The supplier publishes at most
 	// about a day and a half ahead, so anything beyond two days is a
@@ -597,7 +607,6 @@ func (s *Server) resolveWindow(w http.ResponseWriter, r *http.Request) (energy.W
 	if spec == "" {
 		spec = energy.WindowToday
 	}
-
 	var from, to time.Time
 	var err error
 	if raw := q.Get("from"); raw != "" {

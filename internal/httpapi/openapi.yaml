@@ -1427,6 +1427,17 @@ components:
             VAT-inclusive GBP for the window, apportioned across tariff segments and
             pro rata for a partial day. Charged once here and NEVER split across
             devices — no device causes it.
+        standing_charge_source:
+          type: string
+          enum: [archive, config]
+          description: >-
+            Where that figure came from. `archive` is the supplier's own
+            VAT-inclusive daily charge, so a VAT change arrives in it rather than
+            having to be applied — the same basis as energy. `config` is the
+            configured ex-VAT rate grossed up by the configured vat_rate, which is
+            correct only while that rate is kept current; it is the fallback when no
+            standing charge is archived for the whole window, or when the window
+            spans a genuine tariff change.
         total:
           type: number
           description: >-
