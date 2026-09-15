@@ -87,12 +87,13 @@ func TestOpenAppliesMigrationsAndIsReRunnable(t *testing.T) {
 	// common/db re-runs every migration file on every boot, so the migrations must be
 	// idempotent. Reopening must neither fail nor lose data.
 	//
-	// This second Open is the tripwire for sweeney/identity#44, and it is worth not
-	// deleting. That bug only bites on a re-run — `ADD COLUMN` cannot be made idempotent,
-	// so it errors with `duplicate column name` and drops into a retry that splits the
-	// file on `;` without regard for comments. The upstream issue observes that a suite
-	// which only ever opens a fresh database exercises the first boot alone and cannot
-	// catch it. This test is why we would.
+	// This second Open is worth not deleting, and what it guards has changed. It used to
+	// be the tripwire for sweeney/identity#44 (a `duplicate column name` retry that split
+	// the file on `;` without regard for comments). identity#47 replaced migration replay
+	// with a ledger, so that bug is gone — and this assertion now covers the LEDGER'S
+	// upgrade path instead: a database created before the ledger existed must gain one,
+	// keep its rows, and short-circuit on the next boot. Every other test in the package
+	// opens a fresh database and therefore only ever exercises the creation path.
 	s2, err := Open(path)
 	if err != nil {
 		t.Fatalf("second Open (migrations must be idempotent): %v", err)

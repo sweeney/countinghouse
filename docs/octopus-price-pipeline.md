@@ -137,21 +137,23 @@ operator needs in order to correct config and most of what a per-slot `vat_rate`
 would have bought — so this largely answers deferred **D4**. The residual exposure is the
 standing charge, which really does use the config rate.
 
-> **If D4 is ever built, read this first.** A `vat_rate` column means
-> `ALTER TABLE unit_price ADD COLUMN`, and that is the one statement that trips
-> [sweeney/identity#44](https://github.com/sweeney/identity/issues/44): `common/db` re-runs
-> every migration on every boot, `ADD COLUMN` cannot be made idempotent, and the
-> `duplicate column name` retry splits the file on `;` with no awareness of comments — so a
-> semicolon anywhere in the migration's prose breaks the **second** boot, not the first,
-> with an error naming a word from your own comment.
+> **A hazard here was removed upstream.** Until `common/v0.6.0` this paragraph warned that
+> building D4 — a `vat_rate` column, therefore `ALTER TABLE ... ADD COLUMN` — would trip
+> [identity#44](https://github.com/sweeney/identity/issues/44): migrations were replayed on
+> every boot, `ADD COLUMN` could not be made idempotent, and the resulting
+> `duplicate column name` retry split the file on `;` with no awareness of comments, so a
+> semicolon in a migration's prose broke the *second* boot. Our 001 already contains such a
+> semicolon.
 >
-> Our migration comments are deliberately prose-heavy and 001 already contains one such
-> semicolon (harmlessly, since it has no `ADD COLUMN`). The bug is present in the pinned
-> `common@v0.5.0`. Two things protect us: keep semicolons out of a migration's comments,
-> and `TestOpenAppliesMigrationsAndIsReRunnable` — which opens the archive, writes,
-> closes and opens it **again**. That second open is the whole point: the upstream issue
-> notes that a suite which only ever opens a fresh database exercises only the first boot
-> and cannot catch this. Ours does not.
+> [identity#47](https://github.com/sweeney/identity/pull/47) replaced replay with a
+> migrations ledger, so nothing is re-executed and the splitting retry is gone. D4 can now
+> add a column without that trap. Verified against a copy of the live 35,086-slot archive,
+> which predates the ledger: it upgrades cleanly and survives a second boot.
+>
+> `TestOpenAppliesMigrationsAndIsReRunnable` still earns its place — it is now the guard
+> that the LEDGER'S upgrade path works on a pre-ledger database, which the rest of the
+> suite cannot see because every other test opens a fresh one. And the ledger records a
+> checksum, so an edited migration warns on the next boot rather than drifting silently.
 
 The expected rate is resolved **per slot**, from the agreement covering that slot's
 `valid_from`, and an instant no agreement covers yields *no opinion* rather than a rate of
