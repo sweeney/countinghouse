@@ -183,6 +183,15 @@ What follows from it:
   like. It must not alert, and it must not void `complete_to` — both did, so a correct
   archive paged every morning and reported `degraded` for most of every day with the
   reason "no complete day of prices held" while holding two years of prices.
+
+  **Observed, not predicted.** The collector ran the pre-fix build for two days
+  (2026-09-13 → 09-15) against the live feed. It logged `today's prices are incomplete`
+  at `ERROR` **37 times** — hourly, which is the throttle working as intended on a
+  condition that never clears — and `tomorrow's prices are still incomplete past the
+  publication deadline` **twice**, at 23:00 on the 13th and 23:00 on the 14th. Two
+  nights, two pages, nothing wrong. Over the same period every completed day held its
+  full 48 slots and the publications landed at 15:54 and 15:55. On the fixed build, in
+  the identical state (today 46/48, before the publication), the collector is silent.
 - An **interior** hole is a real fault at any size: the supplier published a slot that
   never reached us.
 - A tail gap much **larger** than two means the publication barely landed, and past the
