@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -402,6 +403,29 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 	// just received rather than what we are still waiting for, so they are NOT
 	// subject to the "worst condition wins" rule below — an incomplete day must
 	// not swallow the news that a stored price was revised.
+	// A whole batch implying ONE consistent VAT rate that is not the configured
+	// one is a different animal from a stray slot: it is a rate change, and it is
+	// the operator's cue to edit config. Raised before the rejection alert because
+	// it explains a class of warning rather than reporting a loss.
+	if drift, ok := vatDrift(res.Warnings, c.vatRate); ok {
+		c.alert(ctx, notify.Event{
+			Kind: notify.KindAgreementDrift, Severity: notify.SeverityError,
+			Summary: fmt.Sprintf(
+				"the supplier is charging VAT at %.2f%%, but configuration says %.2f%%",
+				drift.Implied*100, drift.Configured*100),
+			DedupKey: c.tariff.Code,
+			Detail: map[string]any{
+				"tariff_code":         c.tariff.Code,
+				"implied_vat_rate":    drift.Implied,
+				"configured_vat_rate": drift.Configured,
+				"slots":               drift.Slots,
+				"what_to_do": "set vat_rate on the agreement block covering these dates; " +
+					"prices and standing charges are still being archived correctly meanwhile, " +
+					"because both are stored as the supplier's own inc-VAT figures",
+			},
+		})
+	}
+
 	if n := len(res.Rejected); n > 0 {
 		c.alert(ctx, notify.Event{
 			Kind: notify.KindValidationRejected, Severity: notify.SeverityWarn,
@@ -789,4 +813,53 @@ func rejectionReasons(rejections []prices.Rejection) string {
 		parts = append(parts, fmt.Sprintf("%s=%d", reason, counts[prices.RejectReason(reason)]))
 	}
 	return strings.Join(parts, " ")
+}
+
+// vatDriftMinSlots is how many slots must agree before a VAT mismatch is called
+// a rate change rather than a data blip.
+//
+// One mismatching slot is noise — a rounding artefact, or a single malformed row.
+// A consistent implied rate across several is the supplier applying a different
+// rate from the one configured, which is a statutory event somebody has to act
+// on. Six is a quarter of a publication's worth of half hours: high enough that
+// no plausible per-slot glitch reaches it, low enough that a standing-charge
+// batch (which is a handful of rows at most) still can.
+const vatDriftMinSlots = 6
+
+// vatDriftEpsilon is how close two implied rates must be to count as the same
+// rate. Generous, because the inputs are pence rounded by the supplier: at a
+// standing charge of 56.19p a single rounded penny moves the implied rate by
+// more than a thousandth.
+const vatDriftEpsilon = 5e-4
+
+// vatDrift reports a systematic disagreement between the supplier's VAT and ours.
+type vatDriftFinding struct {
+	Implied    float64
+	Configured float64
+	Slots      int
+}
+
+// vatDrift looks for a consistent implied VAT rate across the batch's mismatch
+// warnings.
+//
+// Consistency is the whole test. Slots disagreeing with configuration in
+// DIFFERENT directions are a data problem and stay per-slot warnings; slots all
+// implying the same new rate are a tax change, and that is worth waking somebody
+// for — once, with the number to put in config.
+func vatDrift(warnings []prices.Warning, configured float64) (vatDriftFinding, bool) {
+	var implied []float64
+	for _, w := range warnings {
+		if w.Kind == prices.WarnVATMismatch && w.ImpliedVATRate != nil {
+			implied = append(implied, *w.ImpliedVATRate)
+		}
+	}
+	if len(implied) < vatDriftMinSlots {
+		return vatDriftFinding{}, false
+	}
+	for _, v := range implied {
+		if math.Abs(v-implied[0]) > vatDriftEpsilon {
+			return vatDriftFinding{}, false // not one rate; a data problem, not a tax change
+		}
+	}
+	return vatDriftFinding{Implied: implied[0], Configured: configured, Slots: len(implied)}, true
 }

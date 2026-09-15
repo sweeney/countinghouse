@@ -125,6 +125,16 @@ type Warning struct {
 	Slot   Slot
 	Kind   WarningKind
 	Detail string
+
+	// ImpliedVATRate is set on WarnVATMismatch: the rate the supplier's own two
+	// columns imply (inc/exc − 1), which is what configuration should say.
+	//
+	// Carried as a FIELD rather than left in Detail because a caller has to ACT on
+	// it — the collector raises agreement_drift when a whole batch implies one
+	// consistent rate — and recovering a number by parsing prose is how a log line
+	// becomes an accidental API. Nil when exc is zero, where the ratio is undefined
+	// rather than zero.
+	ImpliedVATRate *float64
 }
 
 // ValidationResult is the whole verdict on one batch.
@@ -360,10 +370,14 @@ func checkVAT(s Slot, opts ValidateOptions) (Warning, bool) {
 		s.IncVATPence, s.ExcVATPence, rate, want, diff, opts.VATEpsilonPence)
 	// The implied rate is the actionable number: it says what the supplier is
 	// actually charging, and therefore what config should say.
+	w := Warning{Slot: s, Kind: WarnVATMismatch}
 	if s.ExcVATPence != 0 {
-		detail += fmt.Sprintf("; the supplier's figures imply VAT of %.4f", s.IncVATPence/s.ExcVATPence-1)
+		implied := s.IncVATPence/s.ExcVATPence - 1
+		w.ImpliedVATRate = &implied
+		detail += fmt.Sprintf("; the supplier's figures imply VAT of %.4f", implied)
 	}
-	return Warning{Slot: s, Kind: WarnVATMismatch, Detail: detail}, true
+	w.Detail = detail
+	return w, true
 }
 
 // expectedVAT resolves the rate to check against, and whether there is one at all.
