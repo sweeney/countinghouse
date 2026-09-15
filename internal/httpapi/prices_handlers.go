@@ -269,10 +269,11 @@ func (s *Server) handleUpcomingPrices(w http.ResponseWriter, r *http.Request) {
 
 	sum := curve.Summary()
 	summary := map[string]any{
-		"slots": sum.Slots,
-		"min":   round.To(sum.Min, priceDP),
-		"max":   round.To(sum.Max, priceDP),
-		"mean":  round.To(sum.Mean, priceDP),
+		"slots":  sum.Slots,
+		"min":    round.To(sum.Min, priceDP),
+		"max":    round.To(sum.Max, priceDP),
+		"mean":   round.To(sum.Mean, priceDP),
+		"median": round.To(sum.Median, priceDP),
 	}
 	// `current` is what a dashboard shows largest, so it must be the slot covering
 	// now — not the window's first slot, which they happen to coincide with only
@@ -466,19 +467,51 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 	}
 	sum := curve.Summary()
 
-	writeJSONCachedWindow(w, r, code, win, curve.Fingerprint(), map[string]any{
-		"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
-		"tariff_code": code, "half_hourly": true,
-		"unit": "p/kWh", "vat_included": true,
-		"summary": map[string]any{
-			"slots": sum.Slots,
-			"min":   round.To(sum.Min, priceDP),
-			"max":   round.To(sum.Max, priceDP),
-			"mean":  round.To(sum.Mean, priceDP),
-		},
-		"slots":    slots,
-		"complete": curve.Complete(),
-	})
+	summary := map[string]any{
+		"slots":  sum.Slots,
+		"min":    round.To(sum.Min, priceDP),
+		"max":    round.To(sum.Max, priceDP),
+		"mean":   round.To(sum.Mean, priceDP),
+		"median": round.To(sum.Median, priceDP),
+	}
+	// `current` is what a live dashboard shows largest, and PriceCurveSummary — the
+	// schema this response shares with /prices/upcoming — has always documented it.
+	// It was populated on one of the two, so the spec promised a field this endpoint
+	// did not send. Absent, never zero, when no held slot covers now: a historical
+	// window has no "now" in it, and zero is a real price.
+	now := s.clock().Now()
+	for _, sl := range priced {
+		if sl.Covers(now) {
+			summary["current"] = round.To(sl.IncVATPence, priceDP)
+			break
+		}
+	}
+
+	// known_to is how a polling consumer SEES the daily publication: when the horizon
+	// moves, there is more curve to draw. Carried here and not only on
+	// /prices/upcoming because that route is forward-only, so a dashboard drawing any
+	// retrospective context had to call both just to learn one number.
+	knownTo, err := s.PriceReader.KnownTo(r.Context(), code)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "could not read the price archive: "+err.Error())
+		return
+	}
+
+	// The horizon joins the cache tag deliberately. A publication can extend it
+	// without touching the slots of a PAST window, and a tag keyed only on this
+	// window's content would then answer 304 while the field being polled for had
+	// moved — the same failure the content fingerprint was introduced to fix.
+	writeJSONCachedWindow(w, r, code, win,
+		curve.Fingerprint()+"|"+knownTo.UTC().Format(time.RFC3339),
+		map[string]any{
+			"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
+			"tariff_code": code, "half_hourly": true,
+			"unit": "p/kWh", "vat_included": true,
+			"known_to": knownToJSON(knownTo, loc),
+			"summary":  summary,
+			"slots":    slots,
+			"complete": curve.Complete(),
+		})
 }
 
 // handlePriceStats serves GET /prices/stats: per-local-day aggregates.
@@ -520,19 +553,25 @@ func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
 	for _, d := range stats {
 		days = append(days, map[string]any{
 			"day": d.Day, "slots": d.Slots,
-			// BOTH bases, explicitly named. These were ex-VAT while the four sibling
-			// price routes are inc-VAT, and the difference was documented rather than
-			// removed — three places describing a surprise instead of one place
-			// preventing it. The unsuffixed keys keep the previous ex-VAT meaning so
-			// existing consumers are unaffected.
-			"min":            round.To(d.MinExcVATPence, priceDP),
-			"max":            round.To(d.MaxExcVATPence, priceDP),
-			"mean":           round.To(d.MeanExcVATPence, priceDP),
-			"spread":         round.To(d.SpreadExcVATPence, priceDP),
-			"min_inc_vat":    round.To(d.MinIncVATPence, priceDP),
-			"max_inc_vat":    round.To(d.MaxIncVATPence, priceDP),
-			"mean_inc_vat":   round.To(d.MeanIncVATPence, priceDP),
-			"spread_inc_vat": round.To(d.SpreadIncVATPence, priceDP),
+			// The unsuffixed keys are INC VAT, as on every sibling price route. They
+			// were ex-VAT, and the difference was documented in three places rather
+			// than removed — three places describing a surprise instead of one
+			// preventing it. Nothing consumes these routes yet, so the moment to make
+			// the common name mean the common thing is now: a dashboard plotting a
+			// daily mean against a live price was otherwise out by the VAT rate with
+			// nothing on the wire to say so.
+			//
+			// The ex-VAT figures keep an explicit suffix, because they are still the
+			// right basis for comparing days against each other and the supplier
+			// publishes ex-VAT as the primary value.
+			"min":            round.To(d.MinIncVATPence, priceDP),
+			"max":            round.To(d.MaxIncVATPence, priceDP),
+			"mean":           round.To(d.MeanIncVATPence, priceDP),
+			"spread":         round.To(d.SpreadIncVATPence, priceDP),
+			"min_exc_vat":    round.To(d.MinExcVATPence, priceDP),
+			"max_exc_vat":    round.To(d.MaxExcVATPence, priceDP),
+			"mean_exc_vat":   round.To(d.MeanExcVATPence, priceDP),
+			"spread_exc_vat": round.To(d.SpreadExcVATPence, priceDP),
 			// Half hours at or below zero: free energy, or being paid to take it.
 			"plunge_slots": d.PlungeSlots,
 		})
@@ -541,11 +580,10 @@ func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
 	writeJSONCachedWindow(w, r, code, win, curve.Fingerprint(), map[string]any{
 		"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
 		"tariff_code": code,
-		// Ex-VAT here, unlike the curve endpoints: these are analytical figures
-		// compared against each other over time rather than a price on a screen,
-		// and the supplier publishes ex-VAT as the primary value. Stated either way
-		// so nobody has to guess.
-		"unit": "p/kWh", "vat_included": false,
+		// Inc-VAT, matching every sibling price route. Stated either way so nobody
+		// has to guess, and the ex-VAT figures are carried per day under explicit
+		// _exc_vat keys.
+		"unit": "p/kWh", "vat_included": true,
 		"days": days,
 	})
 }
@@ -583,6 +621,20 @@ func (s *Server) resolveWindow(w http.ResponseWriter, r *http.Request) (energy.W
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return energy.Window{}, false
+	}
+
+	// Prices differ from consumption in the one way that matters here: today's are
+	// published in full before today begins. Period-TO-DATE is right for energy —
+	// nobody has consumed this evening's electricity yet — and wrong for a curve,
+	// where it hands a dashboard half a chart at lunchtime and reports it complete.
+	// So `today` means the whole LOCAL day on these routes.
+	//
+	// Week and month stay to-date deliberately: the supplier publishes about a day
+	// and a half ahead, so extending those would return a window that is mostly
+	// holes and never `complete`. The asymmetry tracks a real one in the data.
+	if spec == energy.WindowToday {
+		_, endOfDay := prices.LocalDayWindow(s.clock().Now(), s.loc())
+		win.Stop = endOfDay
 	}
 	return win, true
 }

@@ -596,7 +596,8 @@ GET /prices/upcoming?hours=12
 ```json
 { "tariff_code": "E-1R-AGILE-24-10-01-A",
   "unit": "p/kWh", "vat_included": true,
-  "summary": { "slots": 24, "current": 45.85, "min": -2.62, "mean": 24.48, "max": 50.22 },
+  "summary": { "slots": 24, "current": 45.85, "min": -2.62, "mean": 24.48,
+               "median": 28.42, "max": 50.22 },
   "slots": [
     { "valid_from": "…T11:00:00+01:00", "price": -2.62, "rank": 1,
       "percentile": 0, "band": "plunge" } ],
@@ -617,12 +618,14 @@ whether now is a good time.
 - **Median, not mean, and not percentiles.** A percentile split always labels a fixed
   share of the window as peak, which on a flat day is false. And the mean is dragged
   about by plunge clusters: on a real published day with ten negative slots the mean
-  fell to 24.48p against a median of 28.42p, which banded **25 of 48 slots as peak**
-  and diluted the signal to nothing. The median shrugs that off — and plunge days are
+  fell to 23.38p against a median of 28.42p, which would have banded **28 of 48 slots
+  as peak** — more than half the day — diluting the signal to nothing. The median shrugs that off — and plunge days are
   exactly the days these endpoints exist for, so the statistic has to survive them.
 - **`rank` 1 is the cheapest**, because the question is "when should I run this".
 - **`percentile`** is served too, so a consumer that dislikes our thresholds can band
-  it differently without refetching.
+  it differently without refetching — and `summary.median` carries the centre our own
+  bands are measured from, so that invitation is actually actionable. Offering the
+  choice while withholding the figure it turns on is not an offer.
 
 ```
 GET /prices/cheapest?duration=3h&before=2026-09-12T07:00:00Z
@@ -636,10 +639,9 @@ hours rounds **up**. No window of that length returns **404**, which is a well-f
 question with no answer rather than a bad request.
 
 `/prices/stats` reports per-**local**-day figures — the only framing in which a 23- or
-25-hour day makes sense — and is **ex-VAT**, unlike the curve endpoints, because these
-are analytical values compared against each other rather than a price on a screen.
-`vat_included` states it either way. `spread` is max − min: the single number saying
-whether shifting load that day was worth the bother.
+25-hour day makes sense. `spread` is max − min: the single number saying whether
+shifting load that day was worth the bother. Figures are **VAT-inclusive**, as on every
+sibling price route, with ex-VAT values alongside under `*_exc_vat` keys.
 
 All four carry an **ETag** and a short `Cache-Control`, so a dashboard polling every
 few seconds gets a 304 rather than re-downloading 48 slots. The tag hashes the
@@ -781,6 +783,23 @@ below — is served normally, because the archive holds the supplier's own inc-V
 and a tax change simply arrives in them. A **flat** tariff across a VAT change is still
 refused: `flat_price` is one inc-VAT number derived from the config rate, and it
 genuinely differs either side.
+
+`/prices/stats` emits **both VAT bases**: the unsuffixed keys are inc-VAT, matching the
+other price routes, and `*_exc_vat` siblings carry the analytical figures.
+
+`/prices` carries **`known_to`** (the archive horizon, independent of the window asked
+for) and **`summary.current`** (the price of the slot covering now, absent when none
+does). Both exist so a live dashboard can draw retrospective context *and* watch for the
+daily publication from one call — `/prices/upcoming` is forward-only, so a chart showing
+the last few hours previously needed both routes to learn one number. `known_to` is part
+of the ETag, so a publication that extends the horizon without touching a past window's
+slots still invalidates it.
+
+On the price routes `window=today` means the **whole local day**, not the elapsed part
+as on the consumption routes. Today's prices are published in full before today begins,
+so a to-date curve would hand a dashboard half a chart and report it `complete`. `week`
+and `month` stay period-to-date, since the supplier publishes only about a day and a
+half ahead.
 
 `/prices/stats` emits **both VAT bases**: the unsuffixed keys stay ex-VAT and
 `*_inc_vat` siblings match the other price routes.

@@ -81,6 +81,13 @@ type Summary struct {
 	Min   float64
 	Max   float64
 	Mean  float64
+
+	// Median is the centre BandOf measures against, and it is reported for exactly
+	// that reason: a consumer is invited to derive its own banding from the summary
+	// if it dislikes ours, which it cannot do without the figure the bands are
+	// actually drawn from. Mean is the obvious candidate and the wrong one — a
+	// cluster of plunge slots drags it well below the middle of the day.
+	Median float64
 }
 
 // Priced returns the slots that carry a price, oldest first.
@@ -112,8 +119,12 @@ func (c Curve) Summary() Summary {
 		total += sl.IncVATPence
 	}
 	s.Mean = total / float64(len(c.Slots))
+	s.Median = c.median()
 	return s
 }
+
+// Median exposes the banding centre to callers outside this package.
+func (c Curve) Median() float64 { return c.median() }
 
 // BandOf classifies one slot against its window.
 func (c Curve) BandOf(s Slot) Band {

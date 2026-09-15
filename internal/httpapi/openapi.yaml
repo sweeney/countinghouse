@@ -337,6 +337,13 @@ paths:
         only fetching what is next. Returns 503 when the instance has no price
         archive configured, and `half_hourly: false` with a `flat_price` when the
         tariff covering the window is flat-rate rather than half-hourly.
+
+
+        `window=today` means the WHOLE local day here, unlike the consumption
+        routes where it is period-to-date: today's prices are published in full
+        before today begins, so stopping at `now` would hand a dashboard half a
+        chart. `week` and `month` stay period-to-date, because the supplier
+        publishes only about a day and a half ahead.
       operationId: getPrices
       parameters:
         - { $ref: "#/components/parameters/IfNoneMatch" }
@@ -460,9 +467,9 @@ paths:
         Daily min, max, mean, spread and plunge-slot count, grouped by LOCAL
         calendar day — the only framing in which a 23- or 25-hour day makes sense.
         `spread` is the number that says whether shifting load that day was worth
-        the bother. Unlike the curve endpoints these figures are EX-VAT, because
-        they are analytical values compared against each other rather than a price
-        on a screen; `vat_included` states it either way.
+        the bother. Figures are VAT-INCLUSIVE like every sibling price route, with
+        ex-VAT values alongside under _exc_vat keys. Note `window=today` covers the
+        WHOLE local day on the price routes, not the elapsed part.
       operationId: getPriceStats
       parameters:
         - { $ref: "#/components/parameters/IfNoneMatch" }
@@ -1005,11 +1012,14 @@ components:
           type: string
           enum: [plunge, cheap, normal, peak]
           description: >
-            Classification against the window's mean. `plunge` is any price at or
-            below zero, kept separate because free energy is categorically
-            different from merely cheap. The others sit +/-15% from the mean, which
-            is deliberately NOT a percentile split — a tercile would label a third
-            of a flat day a peak, which is false.
+            Classification against the window's MEDIAN, which `summary.median`
+            reports so the bands can be reproduced or replaced. `plunge` is any
+            price at or below zero, kept separate because free energy is
+            categorically different from merely cheap. The others sit +/-15% from
+            the median, which is deliberately NOT a percentile split — a tercile
+            would label a third of a flat day a peak, which is false. The centre is
+            the median rather than the mean because a cluster of plunge slots drags
+            a mean well below the middle of the day.
       required: [valid_from, price, rank, band]
 
     PriceCurveSummary:
@@ -1042,6 +1052,17 @@ components:
         from:        { type: string, format: date-time }
         to:          { type: string, format: date-time }
         tariff_code: { type: string }
+        known_to:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            End of the newest slot held for this tariff — how far prices run at all,
+            independently of the window asked for. This is how a polling consumer sees
+            the daily publication: when it moves, there is more curve to draw. It is
+            part of the ETag, so a publication that extends the horizon without
+            touching this window's slots still invalidates the cached response.
+            NULL when the archive holds nothing for the tariff.
         half_hourly:
           type: boolean
           description: >
@@ -1124,21 +1145,23 @@ components:
         mean:   { type: number }
         spread:
           type: number
-        min_inc_vat:
+          description: max − min. Whether shifting load that day was worth the bother.
+        min_exc_vat:
           type: number
           description: >-
-            The same four figures INC VAT. Both bases are emitted because the unsuffixed
-            keys are ex-VAT while the sibling price routes are inc-VAT throughout — a
-            difference that was documented in three places rather than removed. The
-            inc-VAT extremes are computed independently, not grossed up, because VAT on a
-            negative price makes it more negative.
-        max_inc_vat:
+            The same four figures EX VAT. The unsuffixed keys are inc-VAT, matching
+            every sibling price route, so a daily mean can be plotted against a live
+            price without a silent 5% error; the ex-VAT figures keep an explicit
+            suffix because they remain the right basis for comparing days against
+            each other, and are what the supplier publishes as primary. Both sets are
+            computed independently rather than grossed up, because VAT on a negative
+            price makes it more negative.
+        max_exc_vat:
           type: number
-        mean_inc_vat:
+        mean_exc_vat:
           type: number
-        spread_inc_vat:
+        spread_exc_vat:
           type: number
-          description: max − min. Whether shifting load that day was worth the bother.
         plunge_slots:
           type: integer
           description: Half hours priced at or below zero.
@@ -1153,7 +1176,9 @@ components:
         unit:        { type: string, example: p/kWh }
         vat_included:
           type: boolean
-          description: False here — these are analytical ex-VAT figures, unlike the curve endpoints.
+          description: >-
+            True — the unsuffixed per-day figures are inc-VAT, as on every sibling
+            price route. The ex-VAT figures are carried under explicit _exc_vat keys.
         days:
           type: array
           items: { $ref: "#/components/schemas/PriceDayStats" }
@@ -1180,11 +1205,16 @@ components:
           type: string
           format: date-time
           description: >-
-            End of the newest FULLY POPULATED local day — "we can bill this far".
-            This is the field to alert on: when it is at or behind now, today
-            cannot be priced in full. It stops at the first incomplete day rather
-            than taking the newest complete one, because a complete tomorrow
-            behind an incomplete today would not make today priceable.
+            How far prices run with no gaps — "we can bill this far". It stops at the
+            first INTERIOR hole, and not at the supplier's routine two-slot tail on the
+            furthest published day, because everything before that tail is billable.
+            This is the field to alert on.
+
+
+            In normal operation it therefore EQUALS `known_to`. That is the signal, not
+            a redundancy: the two diverge exactly when a slot the supplier published
+            never reached us, so `complete_to < known_to` means a real hole rather than
+            a horizon.
         last_attempt:
           type: string
           format: date-time
