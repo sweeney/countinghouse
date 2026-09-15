@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/energy"
 	"github.com/sweeney/countinghouse/internal/prices"
 	"github.com/sweeney/countinghouse/internal/round"
@@ -84,7 +85,40 @@ func (s *Server) spansAgreementBoundary(from, to time.Time) bool {
 		// existing refusal path is the right one.
 		return false
 	}
-	return len(segs) > 1
+	// More than one segment is NOT by itself a reason to refuse. What matters is
+	// whether the segments describe the same curve — see curveIdentity.
+	for _, seg := range segs[1:] {
+		if curveIdentity(seg.Tariff) != curveIdentity(segs[0].Tariff) {
+			return true
+		}
+	}
+	return false
+}
+
+// curveIdentity is what a price response is ABOUT: the thing that must hold
+// constant across a window for one response to describe it honestly.
+//
+// Counting segments was the obvious proxy and the wrong one, because an agreement
+// can be split for reasons that leave the curve untouched. The temporary zero rate
+// of VAT on domestic electricity in Great Britain — 0% for supplies from 1 October
+// 2026 to 31 March 2027 — is expressed as dated blocks differing ONLY in vat_rate,
+// under one unchanged tariff code. The tax changed; the tariff did not. Refusing
+// those windows would have blacked out every month-spanning price request for the
+// six months of the zero rate, and again for six months after it ended.
+//
+// It is safe for a half-hourly curve specifically because the served prices are the
+// supplier's own inc-VAT figures out of the archive, not grossed up from the config
+// rate — so a VAT change needs no reconciliation here; it simply arrives in the
+// prices.
+//
+// A FLAT tariff is the exception, and stays refused: flat_price is a single inc-VAT
+// number derived from the config rate, so a VAT change genuinely yields two answers
+// and one field cannot carry both.
+func curveIdentity(t config.Tariff) string {
+	if t.IsHalfHourly() {
+		return "hh:" + t.TariffCode
+	}
+	return fmt.Sprintf("flat:%.6f", t.UnitRate*t.Multiplier())
 }
 
 // refuseIfSpansBoundary writes a 400 when the window straddles an agreement change,

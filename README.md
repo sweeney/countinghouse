@@ -775,6 +775,13 @@ what `/bill` — which does segment, because a cost can be summed across tariffs
 curve cannot — would then contradict. They also cap the window: 31 days for `/prices`
 (a row per half hour) and 366 for `/prices/stats` (a row per day).
 
+What counts as "a tariff change" is the **curve identity**, not the number of agreement
+blocks. An agreement split that leaves the tariff code unchanged — see the VAT runbook
+below — is served normally, because the archive holds the supplier's own inc-VAT prices
+and a tax change simply arrives in them. A **flat** tariff across a VAT change is still
+refused: `flat_price` is one inc-VAT number derived from the config rate, and it
+genuinely differs either side.
+
 `/prices/stats` emits **both VAT bases**: the unsuffixed keys stay ex-VAT and
 `*_inc_vat` siblings match the other price routes.
 

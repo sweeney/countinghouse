@@ -351,7 +351,19 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PriceCurveResponse" }
-        "400": { $ref: "#/components/responses/BadRequest" }
+        "400":
+          description: >
+            Malformed window, a window longer than 31 days, or a window spanning a
+            genuine tariff change. An agreement split that leaves the tariff code
+            unchanged — such as the temporary zero rate of VAT on domestic electricity
+            in Great Britain, 1 Oct 2026 to 31 Mar 2027 — is NOT a tariff change and is
+            served normally: the prices served are the supplier's own inc-VAT figures
+            from the archive, so a tax change arrives in them rather than needing to be
+            applied. A flat-rate tariff across a VAT change is still refused, because
+            `flat_price` is a single config-derived number that differs either side.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
         "503":
           description: No price archive configured, or no tariff covers the window
           content:
