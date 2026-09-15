@@ -191,7 +191,7 @@ func TestBuildSeriesUPSClipsFirstBucketToWindowStart(t *testing.T) {
 		time.Minute, 1000)
 
 	resp, err := BuildSeries(context.Background(), &influx.FakeQuerier{QueryFunc: sim.Answer},
-		"statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+		"statehouse", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestUPSSeriesTotalAgreesWithDeviceEnergyOnUnevenSampling(t *testing.T) {
 	q := &influx.FakeQuerier{QueryFunc: sim.Answer}
 
 	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
-		GroupByDevice, false, false, devices, testTariff(), nil, loc)
+		GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -326,7 +326,7 @@ func TestUPSTotalOutageBucketReadsZeroAndUndercutsTheScalar(t *testing.T) {
 	q := &influx.FakeQuerier{QueryFunc: sim.Answer}
 
 	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
-		GroupByDevice, false, false, devices, testTariff(), nil, loc)
+		GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -395,7 +395,7 @@ func TestSeriesTotalAgreesWithDeviceEnergyOffGridWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeviceWindowKWh: %v", err)
 	}
-	resp, err := BuildSeries(ctx, q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+	resp, err := BuildSeries(ctx, q, "statehouse", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestSeriesTotalFallsAsTheWindowStartMovesLater(t *testing.T) {
 			Label: WindowCustom,
 		}
 		q := &influx.FakeQuerier{QueryFunc: sim.Answer}
-		resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testTariff(), nil, loc)
+		resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
 		if err != nil {
 			t.Fatalf("BuildSeries: %v", err)
 		}

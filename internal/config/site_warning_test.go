@@ -20,20 +20,20 @@ func writeConfig(t *testing.T, body string) string {
 // cannot say which property it serves, which is the question the block exists to
 // answer.
 func TestNamespaceWithoutASiteIDIsWarnedAbout(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
+	cfg, err := Load(writeConfig(t, "site:\n  floorplan_namespace: floorplan_home\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
 	if len(cfg.Warnings()) == 0 {
-		t.Error("a devices_namespace with no site id must warn")
+		t.Error("a namespace pointer with no site id must warn")
 	}
 }
 
 // The deployed shape must stay silent, or the warning is noise and gets ignored —
-// which is the failure mode of every warning that cries wolf. "No site block at all"
-// is no longer among the silent cases: it names no namespace, so it refuses to load.
+// which is the failure mode of every warning that cries wolf. An id alone is now the
+// correct shape, because the namespaces live in `sites`.
 func TestCorrectlyConfiguredSitesAreSilent(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
+	cfg, err := Load(writeConfig(t, "site:\n  id: home\n"))
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
@@ -43,10 +43,11 @@ func TestCorrectlyConfiguredSitesAreSilent(t *testing.T) {
 }
 
 // The bare-id form is what statehouse has deployed, so the dual-form decoder must keep
-// accepting it — that is a property of UnmarshalYAML and is asserted here directly,
-// because the scalar spelling cannot express a namespace and so can never survive Load.
-// Back-compat in the parser is not the same as being a usable config: the refusal is
-// pinned in namespace_required_test.go.
+// accepting it — a property of UnmarshalYAML, asserted here directly.
+//
+// It is now not merely parseable but SUFFICIENT, since an id is the only thing an
+// instance must declare for itself and the namespaces come from `sites`. That
+// inversion is pinned in namespace_required_test.go.
 func TestScalarSiteFormStillParses(t *testing.T) {
 	var cfg Config
 	if err := yaml.Unmarshal([]byte("site: home\n"), &cfg); err != nil {
@@ -55,7 +56,7 @@ func TestScalarSiteFormStillParses(t *testing.T) {
 	if cfg.Site.ID != "home" {
 		t.Errorf("Site.ID = %q, want home", cfg.Site.ID)
 	}
-	if cfg.Site.DevicesNamespace != "" {
-		t.Errorf("the scalar form names no namespace, got %q", cfg.Site.DevicesNamespace)
+	if cfg.Site.FloorplanNamespace != "" {
+		t.Errorf("the scalar form names no namespace, got %q", cfg.Site.FloorplanNamespace)
 	}
 }

@@ -19,6 +19,7 @@ type Config struct {
 	Identity     IdentityConfig     `yaml:"identity"`
 	RemoteConfig RemoteConfigConfig `yaml:"remote_config"`
 	House        HouseConfig        `yaml:"house"`
+	Prices       PricesConfig       `yaml:"prices"`
 
 	// warnings are config states that are legal but probably not what the operator
 	// meant. Collected during Load, before defaults are filled in, because filling
@@ -49,7 +50,23 @@ type SiteConfig struct {
 	// was deleted from the config service, and defaulting to a document that does not
 	// exist buys a silent empty snapshot rather than a diagnostic. Load refuses a
 	// config that leaves it unset.
-	DevicesNamespace string `yaml:"devices_namespace"`
+
+	// EnergyAgreementsNamespace names this site's dated-tariff namespace (conventionally
+	// "energy_agreements"). It sits here, beside the other two per-property
+	// pointers, because a tariff is a property of the SITE — a second property is
+	// generally on a different tariff, in a different region, at different rates.
+	//
+	// When EMPTY the legacy `energy_tariffs` document is used instead, which is
+	// what makes the migration opt-in: a deployment can take this binary with no
+	// config change and behave exactly as before.
+	//
+	// The two are never merged. Two tariff documents disagreeing about what a kWh
+	// cost has no safe resolution, so exactly one is authoritative and both
+	// /healthz and GET /tariffs report which. When this IS set the namespace is
+	// required: per the cold-start rule, naming one that has never been fetched
+	// aborts startup rather than silently falling back to the legacy rate, because
+	// falling back would price a half-hourly tariff at a flat number.
+	EnergyAgreementsNamespace string `yaml:"energy_agreements_namespace"`
 
 	// FloorplanNamespace is the config namespace holding this site's floor and room
 	// records — the same document greenhouse reads, published by /floors and /rooms
@@ -78,7 +95,6 @@ type SiteConfig struct {
 //	site: home
 //	site:
 //	  id: home
-//	  devices_namespace: devices_home
 func (s *SiteConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	var id string
 	if err := unmarshal(&id); err == nil {
@@ -125,6 +141,52 @@ type RemoteConfigConfig struct {
 	BaseURL string `yaml:"base_url"`
 }
 
+// PricesConfig locates the half-hourly price archive.
+//
+// This is local bootstrap config rather than remote for an unavoidable reason: it
+// is where the service keeps the data it needs in order to answer anything, so it
+// cannot itself be fetched.
+type PricesConfig struct {
+	// DBPath is the SQLite file holding the archive. Empty DISABLES the collector
+	// entirely, which is correct for a deployment whose agreements are all
+	// flat-rate — it has no half-hourly prices to keep.
+	//
+	// It is not optional once any agreement is half-hourly: see
+	// CheckArchiveRequired, which refuses that combination at startup rather than
+	// letting the service look healthy while being unable to price anything after
+	// the switchover.
+	//
+	// The parent directory must exist and be writable by the service user. The
+	// file is created mode 0600, along with the -wal and -shm files SQLite keeps
+	// beside it.
+	DBPath string `yaml:"db_path"`
+
+	// OctopusBaseURL is the supplier API root, defaulted by Default() and
+	// overridable so a local or staging deployment can be pointed at a stand-in.
+	//
+	// The default lives in Default() rather than inside the octopus client, which
+	// deliberately refuses to construct without a base URL — so a misconfigured
+	// test cannot quietly reach the live API. The default belongs at the edge,
+	// where it is visible in one place.
+	OctopusBaseURL string `yaml:"octopus_base_url"`
+
+	// Backup sends the archive to Cloudflare R2. Empty means backups are off,
+	// which is correct for development and for any deployment with no archive; a
+	// PARTIAL block is refused at startup rather than run as "off". The archive is
+	// rebuildable from the supplier today, and the whole reason to keep it is the
+	// day that stops being true — so this is the clause that makes keeping it mean
+	// something.
+	Backup BackupConfig `yaml:"backup"`
+}
+
+// DefaultOctopusBaseURL is the supplier's public API root. The price and standing
+// charge endpoints beneath it need no authentication.
+const DefaultOctopusBaseURL = "https://api.octopus.energy/v1"
+
+// Enabled reports whether a price archive is configured, and therefore whether
+// the collector should run.
+func (p PricesConfig) Enabled() bool { return p.DBPath != "" }
+
 // HouseConfig holds house-wide settings.
 type HouseConfig struct {
 	// Timezone names a tz database location (e.g. "Europe/London") used to
@@ -160,6 +222,15 @@ func Default() Config {
 			Bucket: "statehouse",
 		},
 		House: HouseConfig{Timezone: "Europe/London"},
+		Prices: PricesConfig{
+			OctopusBaseURL: DefaultOctopusBaseURL,
+			// Only the hour is defaulted. Every other backup field left unset means
+			// "backups off", and filling any of them in would turn a deployment that
+			// never asked for backups into one that half-asks. The hour is different:
+			// 0 is a legitimate midnight, so it cannot be distinguished from unset
+			// later and has to be settled here.
+			Backup: BackupConfig{Hour: DefaultBackupHour},
+		},
 	}
 }
 
@@ -180,100 +251,38 @@ func Load(path string) (Config, error) {
 		}
 		cfg.Influx.Token = string(trimTrailingNewline(tok))
 	}
+	if cfg.Prices.Backup.SecretAccessKey == "" && cfg.Prices.Backup.SecretAccessKeyFile != "" {
+		sec, err := os.ReadFile(cfg.Prices.Backup.SecretAccessKeyFile)
+		if err != nil {
+			// The path is named; the contents never are, here or anywhere else.
+			return cfg, fmt.Errorf("read r2 secret from %s: %w", cfg.Prices.Backup.SecretAccessKeyFile, err)
+		}
+		cfg.Prices.Backup.SecretAccessKey = string(trimTrailingNewline(sec))
+		if cfg.Prices.Backup.SecretAccessKey == "" {
+			return cfg, fmt.Errorf("r2 secret file %s is empty: an empty secret fails every "+
+				"upload with an auth error rather than at startup", cfg.Prices.Backup.SecretAccessKeyFile)
+		}
+	}
+	if err := cfg.Prices.Backup.Validate(cfg.Prices.DBPath); err != nil {
+		return cfg, err
+	}
 	if cfg.House.Timezone != "" {
 		if _, err := time.LoadLocation(cfg.House.Timezone); err != nil {
 			return cfg, fmt.Errorf("parse house.timezone %q: %w", cfg.House.Timezone, err)
 		}
 	}
 	cfg.warnings = siteWarnings(cfg.Site)
-	// Devices first: it is the namespace that decides whether any answer is right at
-	// all, so an operator fixing one key at a time is sent to that one before the
-	// namespace that only decides what things are called.
-	if err := requireDevicesNamespace(cfg.Site); err != nil {
-		return cfg, err
-	}
-	if err := requireFloorplanNamespace(cfg.Site); err != nil {
-		return cfg, err
-	}
+
+	// No namespace requirement here any more, and deliberately not in the
+	// base_url=="" branch either — that is the one case where NOTHING is fetched,
+	// so neither pointer is ever read and requiring them would refuse a config
+	// over values it then ignores. (An earlier version of this did exactly that.)
+	//
+	// The requirement lives in ResolveSiteNamespaces instead, which runs precisely
+	// when there IS a config service and therefore when the pointers matter. An
+	// instance with no config service serves empty snapshots by explicit choice,
+	// and says so loudly at startup.
 	return cfg, nil
-}
-
-// requireDevicesNamespace refuses a config that does not name the namespace its devices
-// live in.
-//
-// This was a warning while `statehouse_devices` still existed and the fallback worked.
-// That namespace was deleted from the config service, so the default now names a
-// document that returns 404, and every layer below handles it correctly into silence:
-// the fetch fails, Refresh is fail-open and keeps the last-known snapshot, at startup
-// there is no last-known snapshot, and every endpoint then reports zero devices. For a
-// billing service that is a wrong answer wearing the shape of a right one.
-//
-// The namespace is deliberately NOT derived from the id. A namespace is a document that
-// either exists or does not, so guessing `devices_<id>` would turn a typo in `id` back
-// into a successful fetch of nothing — precisely the failure this refusal exists to
-// remove. Two facts, stated twice, checked against each other.
-func requireDevicesNamespace(s SiteConfig) error {
-	if s.DevicesNamespace != "" {
-		return nil
-	}
-	subject, id := "this instance", s.ID
-	if s.ID != "" {
-		subject = fmt.Sprintf("site %q", s.ID)
-	} else {
-		id = "<this site's id from the sites namespace>"
-	}
-	// Terse on purpose: this is read by someone whose service is down. The reasoning
-	// lives in this function's doc comment and in README.md; the error says what is
-	// missing and what to write.
-	// No trailing newline: staticcheck ST1005, and the logger quotes the value anyway.
-	return fmt.Errorf(
-		"%s names no devices_namespace, so it would fetch nothing and serve zero devices. Add:"+
-			"\n\nsite:\n  id: %s\n  devices_namespace: <the namespace published for this site>",
-		subject, id)
-}
-
-// requireFloorplanNamespace refuses a config that does not name the namespace its floor
-// and room records live in.
-//
-// The argument is the one requireDevicesNamespace makes, applied to a quieter failure.
-// An unnamed floorplan is not an error at any layer: the fetch never happens, /floors
-// and /rooms still list every floor and room holding a metered device, grouped series
-// still carry keys, and every kWh and cost is exactly right. What is lost is only the
-// names — so the endpoints answer with ids where labels belong and null where storey
-// order belongs, which is indistinguishable from a floorplan namespace that publishes
-// nothing. Nothing anywhere reports the difference between "not configured" and
-// "configured and empty", and the omission surfaces as a chart legend reading
-// "floor1.room-c" to a human, days later, if anyone looks.
-//
-// So it is declared or it is refused. Like the devices namespace it is NOT derived from
-// the site id: guessing `floorplan_<id>` would turn a typo into a successful fetch of
-// nothing, which is the failure this refusal removes rather than relocates.
-func requireFloorplanNamespace(s SiteConfig) error {
-	if s.FloorplanNamespace != "" {
-		return nil
-	}
-	subject, id := "this instance", s.ID
-	if s.ID != "" {
-		subject = fmt.Sprintf("site %q", s.ID)
-	} else {
-		id = "<this site's id from the sites namespace>"
-	}
-	// Terse for the same reason as requireDevicesNamespace: the why is in the doc
-	// comment above, the fix is in the message.
-	return fmt.Errorf(
-		"%s names no floorplan_namespace, so /floors, /rooms and grouped series would "+
-			"serve ids where names belong. Add (it is the namespace greenhouse reads):"+
-			"\n\nsite:\n  id: %s\n  devices_namespace: %s\n  floorplan_namespace: <the namespace published for this site>",
-		subject, id, orPlaceholder(s.DevicesNamespace, "<this site's devices namespace>"))
-}
-
-// orPlaceholder returns v, or placeholder when v is empty — so a refusal can echo the
-// keys the operator already set instead of blanking them out of the block it prints.
-func orPlaceholder(v, placeholder string) string {
-	if v != "" {
-		return v
-	}
-	return placeholder
 }
 
 // siteWarnings reports a half-filled site block that is legal and works.
@@ -284,10 +293,22 @@ func orPlaceholder(v, placeholder string) string {
 // other half — an id with no namespace — is no longer a warning but an error, since
 // there is nothing left for it to fall back to.
 func siteWarnings(s SiteConfig) []string {
-	if s.ID == "" && s.DevicesNamespace != "" {
-		return []string{fmt.Sprintf(
-			"devices_namespace %q is set but the site has no id, so this instance "+
-				"cannot report which property it serves", s.DevicesNamespace)}
+	if s.ID != "" {
+		return nil
+	}
+	// The remaining local pointers are fallbacks. Setting one without an id is
+	// still the mirror case: it would fetch the right documents while being unable
+	// to say which property they describe.
+	for _, c := range []struct{ field, value string }{
+		{"floorplan_namespace", s.FloorplanNamespace},
+		{"energy_agreements_namespace", s.EnergyAgreementsNamespace},
+	} {
+		if c.value != "" {
+			return []string{fmt.Sprintf(
+				"%s %q is set but the site has no id, so this instance cannot report "+
+					"which property it serves — and without an id the sites namespace "+
+					"cannot be resolved at all", c.field, c.value)}
+		}
 	}
 	return nil
 }

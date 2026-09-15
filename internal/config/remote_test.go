@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // staticTokenSource satisfies TokenSource for tests.
@@ -89,7 +90,7 @@ func TestFetcher_RefreshPopulatesSnapshots(t *testing.T) {
 		t.Errorf("primary: got %q, want 0xaabbccddeeff0011 (normalised)", wm.Primary)
 	}
 
-	tariff, ok := f.Tariffs().Electricity()
+	tariff, ok := f.Tariffs().TariffFor(time.Now())
 	if !ok {
 		t.Fatal("electricity tariff missing after refresh")
 	}
@@ -179,7 +180,7 @@ func TestFetcher_401InvalidatesAndKeepsSnapshot(t *testing.T) {
 	if _, ok := f.Devices()["fridge"]; !ok {
 		t.Error("fridge snapshot was wiped after a 401 (should fail-open)")
 	}
-	if _, ok := f.Tariffs().Electricity(); !ok {
+	if _, ok := f.Tariffs().TariffFor(time.Now()); !ok {
 		t.Error("tariff snapshot was wiped after a 401 (should fail-open)")
 	}
 	if f.Statuses()["devices_home"].OK {

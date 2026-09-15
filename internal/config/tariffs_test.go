@@ -2,6 +2,7 @@ package config
 
 import (
 	"math"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -41,18 +42,21 @@ func TestEnergyTariffs_Electricity(t *testing.T) {
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("tariff = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestEnergyTariffs_TariffFor_IgnoresDate(t *testing.T) {
+func TestEnergyTariffs_TariffFor_NoHistoryAppliesAlways(t *testing.T) {
 	elec := Tariff{UnitRate: 0.2089, DailyStandingCharge: 0.5294, Unit: "kWh", VATRate: 0.05}
 	et := EnergyTariffs{Tariffs: map[string]Tariff{"electricity": elec}}
 
-	// v1: regardless of the time supplied, TariffFor returns the current tariff.
+	// With no Periods configured there is only one rate, and it applies at every
+	// instant. This is the legacy shape every existing deployment is on; adding
+	// effective-date history must not change it. See tariffs_history_test.go for
+	// the dated behaviour.
 	times := []time.Time{
 		time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC),
@@ -63,7 +67,7 @@ func TestEnergyTariffs_TariffFor_IgnoresDate(t *testing.T) {
 		if !ok {
 			t.Fatalf("TariffFor(%v) ok = false, want true", when)
 		}
-		if got != elec {
+		if !reflect.DeepEqual(got, elec) {
 			t.Fatalf("TariffFor(%v) = %+v, want %+v", when, got, elec)
 		}
 	}

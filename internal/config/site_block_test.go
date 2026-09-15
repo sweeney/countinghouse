@@ -6,16 +6,20 @@ import (
 	"testing"
 )
 
-// The devices namespace is named by config rather than hardcoded, so a site can have
+// The devices namespace is named by CONFIG rather than hardcoded, so a site can have
 // its own. Publishing a per-site namespace does nothing while every service fetches a
 // fixed name — which is exactly what happened.
-func TestSiteBlockNamesTheDevicesNamespace(t *testing.T) {
+//
+// It is now named in the shared `sites` document rather than in each service's local
+// config, which is the same lesson one layer further out: `sites` already published
+// it per site, and countinghouse redeclaring it locally meant a rename there did
+// nothing here.
+func TestSitesNamesTheDevicesNamespace(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "config.yaml")
-	body := "site:\n  id: home\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+	// Local config names only which property this instance serves.
+	if err := os.WriteFile(p, []byte("site:\n  id: home\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
 	cfg, err := Load(p)
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -23,8 +27,16 @@ func TestSiteBlockNamesTheDevicesNamespace(t *testing.T) {
 	if cfg.Site.ID != "home" {
 		t.Errorf("Site.ID = %q, want home", cfg.Site.ID)
 	}
-	if cfg.Site.DevicesNamespace != "devices_home" {
-		t.Errorf("Site.DevicesNamespace = %q, want devices_home", cfg.Site.DevicesNamespace)
+
+	sites := Sites{Sites: []SiteRecord{{
+		ID: "home", DevicesNamespace: "devices_home", FloorplanNamespace: "floorplan_home",
+	}}}
+	resolved, _, err := ResolveSiteNamespaces(cfg.Site, sites)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resolved.Devices != "devices_home" {
+		t.Errorf("resolved devices namespace = %q, want devices_home", resolved.Devices)
 	}
 }
 

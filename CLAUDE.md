@@ -7,10 +7,19 @@ Sibling/reference service: `../statehouse` (mirror its conventions).
 
 ## Core invariants (don't violate without discussion)
 
-- **Read-side only.** No MQTT, no device ingest, no real-time state. Query Influx + apply tariffs.
+- **Read-side with respect to the home.** No MQTT, no device ingest, no real-time state.
+  Query Influx + apply tariffs. **One exception, and only one:** the external price archive —
+  idempotent writes of immutable, externally-sourced facts (Octopus half-hourly spot prices)
+  to a store that holds nothing else. Countinghouse still never ingests device telemetry.
+  See `docs/octopus-price-data-model.md` §1–§1a for why this lives here rather than in a
+  separate service.
 - **Stateless w.r.t. accumulation.** Derive answers on query; never maintain running energy
   totals in memory/disk. The durable truth is the device-side counters in Influx, so the
   service must survive restart with zero data loss. Any cache must be rebuildable from Influx.
+  **The price archive is not a cache** and this clause does not cover it: it is rebuildable
+  from Octopus, not from Influx, and the reason we keep it is the day that stops being true.
+  It is primary durable state, which is exactly why it gets an enforced key, a restatement
+  log and a backup — not a retention policy.
 - **Two query paths by device class:** plug classes → `increase(energy_kwh)` (reset-safe);
   `ups_sensor` → `integral(power_w)`. See AGENT_BRIEF §3.
 

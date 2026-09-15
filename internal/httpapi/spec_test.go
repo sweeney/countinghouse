@@ -25,24 +25,78 @@ func specPaths(t *testing.T, body []byte) map[string]struct{} {
 	return out
 }
 
-// registeredPaths mirrors the routes registered in newMux.
-// Keep this in sync with newMux — the path coverage test will catch drift.
-var registeredPaths = []string{
-	"/healthz",
-	"/openapi.json",
-	"/devices",
-	"/floors",
-	"/rooms",
-	"/devices/{id}/energy",
-	"/devices/{id}/cost",
-	"/devices/{id}/series",
-	"/devices/{id}/events",
-	"/devices/{id}/intervals",
-	"/events",
-	"/series",
-	"/bill",
-	"/tariffs",
-	"/metrics",
+// registeredPaths returns the route patterns newMux actually registers, read from
+// the source of server.go.
+//
+// It used to be a hand-maintained slice whose comment claimed "the path coverage
+// test will catch drift" — which it could not, because the test compared that
+// slice against the spec and never against the mux. A route added to newMux and to
+// neither passed both checks silently, which is how four /prices routes reached a
+// green build undocumented.
+//
+// Reading the source is unusual but it is the only way to get this right: net/http
+// offers no way to enumerate a ServeMux's patterns, so the alternative is a second
+// hand-maintained list that can drift exactly as the first one did.
+// registeredPaths is every path the server actually serves, read from the DECLARED
+// route table.
+//
+// Two earlier versions of this got it wrong in the same way. The first compared a
+// hand-maintained slice against the spec and never against the mux, which is how four
+// /prices routes reached a green build undocumented. The second parsed server.go with a
+// regex, which could only see routes registered in THAT file — so a route in
+// prices_handlers.go was invisible and the comparison passed while drifting.
+//
+// Reading the table removes the class: newMux registers from it, this reads from it, and
+// a route absent from it does not exist at runtime either. There is no longer a second
+// source that can disagree.
+func registeredPaths(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	seen := map[string]bool{}
+	for _, rt := range append(append([]route{}, publicRoutes...), dataRoutes...) {
+		// Patterns are "GET /x" for data routes and "/x" for public ones; the spec keys
+		// on the path alone.
+		p := rt.pattern
+		if i := strings.IndexByte(p, ' '); i >= 0 {
+			p = p[i+1:]
+		}
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("the route table is empty; newMux would serve nothing")
+	}
+	return out
+}
+
+// Every declared route must be REACHABLE, not merely declared. A table entry with a nil
+// handler, or a pattern net/http rejects, would otherwise be caught only at runtime — and
+// the table is now the single source the spec test trusts.
+func TestEveryDeclaredRouteIsReachable(t *testing.T) {
+	s := setup(t)
+	mux := newMux(s)
+	for _, rt := range append(append([]route{}, publicRoutes...), dataRoutes...) {
+		t.Run(rt.pattern, func(t *testing.T) {
+			if rt.handler == nil {
+				t.Fatal("nil handler in the route table")
+			}
+			if rt.handler(s) == nil {
+				t.Fatal("the route table produced a nil handler")
+			}
+			method, path := http.MethodGet, rt.pattern
+			if i := strings.IndexByte(path, ' '); i >= 0 {
+				method, path = path[:i], path[i+1:]
+			}
+			// Substitute something for a path parameter so the request actually routes.
+			path = strings.ReplaceAll(path, "{id}", "winefridge")
+			_, pattern := mux.Handler(httptest.NewRequest(method, path, nil))
+			if pattern == "" {
+				t.Errorf("%s %s is declared but the mux does not route it", method, path)
+			}
+		})
+	}
 }
 
 func TestOpenAPIJSON_PublicNoAuth(t *testing.T) {
@@ -123,8 +177,9 @@ func TestOpenAPIJSON_PathCoverage(t *testing.T) {
 
 	specSet := specPaths(t, w.Body.Bytes())
 
-	wantSet := make(map[string]struct{}, len(registeredPaths))
-	for _, p := range registeredPaths {
+	routes := registeredPaths(t)
+	wantSet := make(map[string]struct{}, len(routes))
+	for _, p := range routes {
 		wantSet[p] = struct{}{}
 	}
 

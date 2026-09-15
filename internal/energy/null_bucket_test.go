@@ -88,7 +88,7 @@ func TestNullPowerBucketsMakeADeviceStaleRatherThanZero(t *testing.T) {
 	)
 
 	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
-		GroupByHouse, false, false, devices, testTariff(), nil, loc)
+		GroupByHouse, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestARealZeroReadingIsNotStale(t *testing.T) {
 	)
 
 	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
-		GroupByHouse, false, false, devices, testTariff(), nil, loc)
+		GroupByHouse, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestASingleNullBucketDoesNotMakeADeviceStale(t *testing.T) {
 	}}
 
 	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
-		GroupByDevice, false, false, devices, testTariff(), nil, loc)
+		GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestNullCounterBucketDoesNotResetTheRunningTotal(t *testing.T) {
 	}}
 
 	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
-		GroupByDevice, false, false, devices, testTariff(), nil, loc)
+		GroupByDevice, false, false, devices, testPricer(), nil, loc)
 	if err != nil {
 		t.Fatalf("BuildSeries: %v", err)
 	}
