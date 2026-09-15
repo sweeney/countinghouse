@@ -667,6 +667,16 @@ func (c *Collector) sweepIfDue(ctx context.Context) {
 		return
 	}
 
+	// Standing charges ride the sweep: once a day is ample for a figure that moves
+	// about once a year, and it means a fresh deployment holds them within a day
+	// rather than only after the next annual change.
+	if sc, err := c.SyncStandingCharges(ctx); err != nil {
+		c.log.WarnContext(ctx, "collector: standing-charge sync failed", "error", err)
+	} else if sc.Inserted > 0 || sc.Restated > 0 {
+		c.log.InfoContext(ctx, "collector: standing charges updated",
+			"inserted", sc.Inserted, "restated", sc.Restated, "unchanged", sc.Unchanged)
+	}
+
 	res, err := c.CatchUp(ctx, sweepDays)
 	c.mu.Lock()
 	c.lastSweep = c.clock.Now()
@@ -862,4 +872,101 @@ func vatDrift(warnings []prices.Warning, configured float64) (vatDriftFinding, b
 		}
 	}
 	return vatDriftFinding{Implied: implied[0], Configured: configured, Slots: len(implied)}, true
+}
+
+// StandingChargeFetcher is the optional half of a RateFetcher that can also read
+// standing charges, and StandingChargeArchive the optional half of a Store that
+// can keep them.
+//
+// Optional, and detected by type assertion, for two reasons. It keeps every
+// existing test double valid without a no-op method apiece; and it models the
+// real deployment state honestly — an instance without a standing-charge archive
+// falls back to the configured rate, which is exactly what every instance did
+// before this existed.
+type StandingChargeFetcher interface {
+	StandingCharges(ctx context.Context, tariff octopus.TariffCode) ([]octopus.Rate, error)
+}
+
+// StandingChargeArchive keeps the supplier's daily standing charges.
+type StandingChargeArchive interface {
+	PutStandingCharges(ctx context.Context, charges []prices.DailyCharge) (prices.PutResult, error)
+}
+
+// SyncStandingCharges fetches and archives the tariff's standing charges.
+//
+// Run on the daily sweep rather than on every poll, because a standing charge
+// changes roughly annually while unit prices change every half hour. Polling it
+// at the unit-price cadence would be ~288 requests a day to learn nothing.
+//
+// Archiving these is what demotes configuration's vat_rate from a billing input
+// to a checkable expectation: the standing charge was the last number in a bill
+// still grossed up from config, and therefore the last one a stale config could
+// silently get wrong. See docs/octopus-price-data-model.md.
+func (c *Collector) SyncStandingCharges(ctx context.Context) (prices.PutResult, error) {
+	fetcher, ok := c.fetcher.(StandingChargeFetcher)
+	if !ok {
+		return prices.PutResult{}, nil
+	}
+	archive, ok := c.store.(StandingChargeArchive)
+	if !ok {
+		return prices.PutResult{}, nil
+	}
+
+	rates, err := fetcher.StandingCharges(ctx, c.tariff)
+	if err != nil {
+		return prices.PutResult{}, fmt.Errorf("collector: fetch standing charges: %w", err)
+	}
+	if len(rates) == 0 {
+		return prices.PutResult{}, nil
+	}
+
+	charges := prices.DailyChargesFromRates(c.tariff.Code, rates, c.clock.Now())
+	v := prices.ValidateStandingCharges(charges, prices.ValidateOptions{
+		TariffCode:      c.tariff.Code,
+		VATRate:         c.vatRate,
+		ExpectVATRateAt: c.vatRateAt,
+	})
+
+	if n := len(v.Rejected); n > 0 {
+		c.alert(ctx, notify.Event{
+			Kind: notify.KindValidationRejected, Severity: notify.SeverityWarn,
+			Summary:  fmt.Sprintf("%d standing charges failed validation and were not stored", n),
+			DedupKey: c.tariff.Code + ":standing",
+			Detail:   map[string]any{"tariff_code": c.tariff.Code, "count": n},
+		})
+	}
+	if drift, ok := vatDrift(v.Warnings, c.vatRate); ok {
+		c.alert(ctx, notify.Event{
+			Kind: notify.KindAgreementDrift, Severity: notify.SeverityError,
+			Summary: fmt.Sprintf(
+				"the supplier's standing charge implies VAT at %.2f%%, but configuration says %.2f%%",
+				drift.Implied*100, drift.Configured*100),
+			DedupKey: c.tariff.Code + ":standing",
+			Detail: map[string]any{
+				"tariff_code":         c.tariff.Code,
+				"implied_vat_rate":    drift.Implied,
+				"configured_vat_rate": drift.Configured,
+			},
+		})
+	}
+	if len(v.Accepted) == 0 {
+		return prices.PutResult{}, nil
+	}
+
+	stored, err := archive.PutStandingCharges(ctx, v.Accepted)
+	if err != nil {
+		return prices.PutResult{}, fmt.Errorf("collector: store standing charges: %w", err)
+	}
+	// A revised standing charge moves every bill it ever touched, so it is worth
+	// more noise than a revised half hour, not less.
+	if stored.Restated > 0 {
+		c.alert(ctx, notify.Event{
+			Kind: notify.KindRestatement, Severity: notify.SeverityError,
+			Summary: fmt.Sprintf("%d standing charges were revised after we had already stored them",
+				stored.Restated),
+			DedupKey: c.tariff.Code + ":standing",
+			Detail:   map[string]any{"tariff_code": c.tariff.Code, "restated": stored.Restated},
+		})
+	}
+	return stored, nil
 }

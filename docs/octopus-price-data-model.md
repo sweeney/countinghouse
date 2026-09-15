@@ -234,6 +234,21 @@ STANDING_CHARGE (tariff_code, payment_method, valid_from) -> exc_p, inc_p, valid
                  "what a day cost on that tariff"         — a handful of rows
 ```
 
+All three are now built. `STANDING_CHARGE` was the last to land, and the reason it
+stopped being optional is worth recording: while the standing charge was computed from
+`daily_standing_charge × (1 + vat_rate)` in config, it was the **only number left in a
+bill grossed up from configuration** — on a service that already prices energy from the
+supplier's own inc-VAT column. That asymmetry is invisible until a statutory VAT change,
+at which point the one figure derived from config is the one figure silently wrong. The
+temporary zero rate on domestic electricity in Great Britain (1 Oct 2026 – 31 Mar 2027)
+is what made it concrete. See the runbook in README.
+
+It lives in its own table rather than under a `kind` column on `unit_price`, because the
+two hold different UNITS — pence per day against pence per kWh — and a single table
+makes it possible to sum them with a query that forgot to filter. The Go types are
+separate for the same reason and convert explicitly; the storage path is shared, so the
+bitemporal machinery has one implementation to be right.
+
 Pricing any window is then one algorithm, for every tariff we have ever been on:
 
 ```

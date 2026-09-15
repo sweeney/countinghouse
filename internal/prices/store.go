@@ -117,7 +117,7 @@ func (s *SQLiteStore) Put(ctx context.Context, slots []Slot) (PutResult, error) 
 	defer tx.Rollback() //nolint:errcheck // no-op once committed
 
 	for _, sl := range slots {
-		outcome, err := putOne(ctx, tx, sl)
+		outcome, err := putOne(ctx, tx, unitPriceRelation, sl)
 		if err != nil {
 			return PutResult{}, err
 		}
@@ -154,21 +154,32 @@ const (
 // meant to be rare enough to act on.
 const priceEpsilon = 1e-9
 
-func putOne(ctx context.Context, tx *sql.Tx, sl Slot) (outcome, error) {
+// relation names the pair of tables one archived fact lives in. Unit prices and
+// standing charges are stored identically — same bitemporal key, same two money
+// columns — and differ only in UNIT, which the Go types keep apart. Sharing the
+// write path means the restatement machinery has one implementation to be right.
+type relation struct{ table, restatement string }
+
+var (
+	unitPriceRelation      = relation{"unit_price", "unit_price_restatement"}
+	standingChargeRelation = relation{"standing_charge", "standing_charge_restatement"}
+)
+
+func putOne(ctx context.Context, tx *sql.Tx, rel relation, sl Slot) (outcome, error) {
 	var (
 		oldExc, oldInc float64
 		oldRetrieved   string
 	)
 	err := tx.QueryRowContext(ctx, `
 		SELECT exc_vat_pence, inc_vat_pence, retrieved_at
-		  FROM unit_price
+		  FROM `+rel.table+`
 		 WHERE tariff_code = ? AND payment_method = ? AND valid_from = ?`,
 		sl.TariffCode, sl.PaymentMethod, sl.ValidFrom.Format(timeLayout),
 	).Scan(&oldExc, &oldInc, &oldRetrieved)
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		if err := insert(ctx, tx, sl); err != nil {
+		if err := insert(ctx, tx, rel, sl); err != nil {
 			return 0, err
 		}
 		return outcomeInserted, nil
@@ -187,7 +198,7 @@ func putOne(ctx context.Context, tx *sql.Tx, sl Slot) (outcome, error) {
 			return 0, fmt.Errorf("prices: unparseable stored retrieved_at %q: %w", oldRetrieved, perr)
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO unit_price_restatement (
+			INSERT INTO `+rel.restatement+` (
 				tariff_code, payment_method, valid_from,
 				old_exc_vat_pence, old_inc_vat_pence,
 				new_exc_vat_pence, new_inc_vat_pence,
@@ -204,7 +215,7 @@ func putOne(ctx context.Context, tx *sql.Tx, sl Slot) (outcome, error) {
 	// The newest value wins either way; retrieved_at advances even when the value
 	// is unchanged, so it always reads as "last confirmed".
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE unit_price
+		UPDATE `+rel.table+`
 		   SET valid_to = ?, exc_vat_pence = ?, inc_vat_pence = ?, retrieved_at = ?
 		 WHERE tariff_code = ? AND payment_method = ? AND valid_from = ?`,
 		nullableTime(sl.ValidTo), sl.ExcVATPence, sl.IncVATPence,
@@ -220,9 +231,9 @@ func putOne(ctx context.Context, tx *sql.Tx, sl Slot) (outcome, error) {
 	return outcomeRestated, nil
 }
 
-func insert(ctx context.Context, tx *sql.Tx, sl Slot) error {
+func insert(ctx context.Context, tx *sql.Tx, rel relation, sl Slot) error {
 	_, err := tx.ExecContext(ctx, `
-		INSERT INTO unit_price (
+		INSERT INTO `+rel.table+` (
 			tariff_code, payment_method, valid_from, valid_to,
 			exc_vat_pence, inc_vat_pence, retrieved_at)
 		VALUES (?,?,?,?,?,?,?)`,
@@ -411,4 +422,116 @@ func nullableTime(t *time.Time) any {
 		return nil
 	}
 	return t.UTC().Format(timeLayout)
+}
+
+// PutStandingCharges upserts standing charges idempotently, recording any
+// restatement, exactly as Put does for unit prices.
+//
+// Worth the same care despite being far rarer: a standing charge applies to every
+// day of every bill, so one revised row moves every total it has ever touched.
+func (s *SQLiteStore) PutStandingCharges(ctx context.Context, charges []DailyCharge) (PutResult, error) {
+	var res PutResult
+	if len(charges) == 0 {
+		return res, nil
+	}
+
+	rows := make([]Slot, 0, len(charges))
+	for _, c := range charges {
+		r := c.row()
+		r.ValidFrom = r.ValidFrom.UTC()
+		if r.ValidTo != nil {
+			t := r.ValidTo.UTC()
+			r.ValidTo = &t
+		}
+		rows = append(rows, r)
+	}
+
+	seen := make(map[Key]struct{}, len(rows))
+	for _, r := range rows {
+		if _, dup := seen[r.Key()]; dup {
+			return PutResult{}, fmt.Errorf("prices: standing-charge batch contains duplicate key %s/%s/%s",
+				r.TariffCode, r.PaymentMethod, r.ValidFrom.Format(timeLayout))
+		}
+		seen[r.Key()] = struct{}{}
+		if err := checkFinite(r); err != nil {
+			return PutResult{}, err
+		}
+	}
+
+	tx, err := s.db.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return PutResult{}, fmt.Errorf("prices: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once committed
+
+	for _, r := range rows {
+		outcome, err := putOne(ctx, tx, standingChargeRelation, r)
+		if err != nil {
+			return PutResult{}, err
+		}
+		switch outcome {
+		case outcomeInserted:
+			res.Inserted++
+		case outcomeUnchanged:
+			res.Unchanged++
+		case outcomeRestated:
+			res.Restated++
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return PutResult{}, fmt.Errorf("prices: commit: %w", err)
+	}
+	return res, nil
+}
+
+// StandingCharges returns the charges for a tariff OVERLAPPING [from, to),
+// oldest first.
+//
+// Overlap rather than containment, for the same reason Range uses it and more
+// often: the current standing charge is open-ended and typically started long
+// before any window being billed, so a containment query would return nothing at
+// all for the common case.
+func (s *SQLiteStore) StandingCharges(ctx context.Context, tariffCode string, from, to time.Time) ([]DailyCharge, error) {
+	if !to.After(from) {
+		return nil, fmt.Errorf("prices: standing-charge range stop (%s) must be after start (%s)",
+			to.Format(time.RFC3339), from.Format(time.RFC3339))
+	}
+
+	rows, err := s.db.DB().QueryContext(ctx, `
+		SELECT tariff_code, payment_method, valid_from, valid_to,
+		       exc_vat_pence, inc_vat_pence, retrieved_at
+		  FROM standing_charge
+		 WHERE tariff_code = ?
+		   AND valid_from < ?
+		   AND (valid_to IS NULL OR valid_to > ?)
+		 ORDER BY valid_from ASC, payment_method ASC`,
+		tariffCode, to.UTC().Format(timeLayout), from.UTC().Format(timeLayout))
+	if err != nil {
+		return nil, fmt.Errorf("prices: standing-charge query: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []DailyCharge
+	for rows.Next() {
+		r, err := scanSlot(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, dailyChargeFromRow(r))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("prices: standing-charge rows: %w", err)
+	}
+	return out, nil
+}
+
+// ScheduleFor returns the standing charges covering [from, to) as a Schedule,
+// ready to charge a window against.
+func (s *SQLiteStore) ScheduleFor(ctx context.Context, tariffCode string, from, to time.Time) (Schedule, error) {
+	cs, err := s.StandingCharges(ctx, tariffCode, from, to)
+	if err != nil {
+		return Schedule{}, err
+	}
+	return NewSchedule(cs), nil
 }

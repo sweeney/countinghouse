@@ -419,6 +419,82 @@ Rules, all enforced when the namespace is applied:
   is kept and `/healthz` degrades. Per *boot needs truth, running keeps the last
   truth*, a namespace that has never been fetched still aborts startup.
 
+#### Runbook: the temporary zero rate of VAT, 1 Oct 2026 – 31 Mar 2027
+
+[HMRC](https://www.gov.uk/government/publications/temporary-zero-rate-of-vat-for-domestic-electricity-in-great-britain/temporary-zero-rate-of-vat-in-great-britain-for-domestic-electricity)
+zero-rates qualifying supplies of **domestic electricity in Great Britain** for supplies
+made from **1 October 2026 to 31 March 2027**. All other domestic fuel stays at 5%
+UK-wide — irrelevant here, since countinghouse bills electricity only, but it is why the
+rate lives on the agreement rather than on the service.
+
+**What to do:** split the electricity agreement into three dated blocks that differ
+**only** in `vat_rate`, keeping the same `id`. Both boundaries are **local midnight**,
+and both fall inside BST, so each is `23:00Z` the day before — a document written in UTC
+midnights zero-rates two half hours of 30 September and un-zero-rates two of 31 March.
+
+```jsonc
+"electricity": [
+  { "from": "2026-01-01T00:00:00Z", "to": "2026-09-30T23:00:00Z",
+    "name": "Agile", "type": "variable", "id": "E-1R-AGILE-24-10-01-A",
+    "vat_rate": 0.05, "daily_standing_charge": 0.59 },
+  { "from": "2026-09-30T23:00:00Z", "to": "2027-03-31T23:00:00Z",
+    "name": "Agile (VAT zero-rated)", "type": "variable", "id": "E-1R-AGILE-24-10-01-A",
+    "vat_rate": 0,    "daily_standing_charge": 0.59 },
+  { "from": "2027-03-31T23:00:00Z",
+    "name": "Agile", "type": "variable", "id": "E-1R-AGILE-24-10-01-A",
+    "vat_rate": 0.05, "daily_standing_charge": 0.59 }
+]
+```
+
+**Author the third block now, not in March.** The return to 5% is the half of this
+change nobody is watching for, and its failure mode is a bill under-charging VAT rather
+than a loud one.
+
+**What happens if you forget.** Nothing is lost, and — since standing charges are
+archived too — nothing is wrong. The archive keeps filling: the VAT check is Gate B, so
+every slot is stored and flagged `vat_mismatch`. Both energy and the standing charge are
+billed from the supplier's own inc-VAT figures, so the statutory change arrives in the
+data rather than having to be applied from here. `vat_rate` is now purely an
+**expectation**: when it disagrees with the supplier consistently across a batch, the
+collector raises an `agreement_drift` alert naming the rate the supplier is actually
+charging — which is the number to paste into the document.
+
+The one case that still depends on config is a window with **no archived standing
+charge** (a fresh deployment, before the first daily sweep). `/bill` says which it used
+in `standing_charge_source`.
+
+**What does not need doing.** `/prices` and `/prices/stats` serve windows spanning these
+boundaries normally: the split leaves the tariff code unchanged, so there is still one
+curve. Only a genuine tariff change, or a **flat**-rate tariff across a VAT change,
+refuses with a 400.
+
+### The standing-charge archive
+
+The supplier's daily standing charge is archived alongside unit prices, in its own
+`standing_charge` table with the same bitemporal key and the same restatement log. A
+separate table rather than a `kind` column, because the two hold different **units** —
+pence per **day** here, pence per kWh there — and one table makes it possible to sum
+them with a query that forgot to filter. The Go types are separate for the same reason;
+the storage path is shared, so the bitemporal machinery has one implementation.
+
+Fetched on the **daily sweep**, not on every poll: a standing charge moves about once a
+year while unit prices move every half hour, so polling it at the unit-price cadence
+would be ~288 requests a day to learn nothing.
+
+**Why it exists.** Before this, `/bill` computed the standing charge as
+`days × daily_standing_charge × (1 + vat_rate)` — entirely from config. That made it the
+**last number in a bill still grossed up from configuration**, and therefore the last one
+a stale `vat_rate` could silently get wrong, on a service that already prices energy from
+the supplier's own inc-VAT column. Archiving it makes both sides of a bill come from the
+same place, and demotes `vat_rate` to a checkable expectation everywhere.
+
+`/bill` reports `standing_charge_source`: `archive` when it used the supplier's figure,
+`config` when it fell back. It falls back — whole, never partly — when no archived charge
+covers the entire window, when the window spans a genuine tariff change (two codes, two
+charges to reconcile; config already segments that correctly), or when the read fails.
+A partial total would look like a correct but cheap bill, which is the failure the whole
+pricing layer exists to avoid.
+
 ### The price archive
 
 A half-hourly (`variable`) agreement has no unit rate in config — its prices live in a local
