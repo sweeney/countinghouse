@@ -651,8 +651,15 @@ func (c *Collector) sweepIfDue(ctx context.Context) {
 		c.log.WarnContext(ctx, "collector: daily sweep failed", "error", err)
 		return
 	}
+	// `unchanged` is reported too, and it is the number that matters most here: without
+	// it the line reads "restated=0 inserted=0", which looks like the sweep did nothing
+	// when it in fact re-read and rewrote several hundred rows. That difference stayed
+	// invisible until the archive was inspected by hand the morning after the first run.
 	c.log.InfoContext(ctx, "collector: daily sweep complete",
-		"days", sweepDays, "restated", res.Stored.Restated, "inserted", res.Stored.Inserted)
+		"days", sweepDays,
+		"unchanged", res.Stored.Unchanged,
+		"restated", res.Stored.Restated,
+		"inserted", res.Stored.Inserted)
 }
 
 func (c *Collector) DueIn() time.Duration {

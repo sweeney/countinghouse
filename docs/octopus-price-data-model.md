@@ -273,6 +273,24 @@ Octopus publishes a slot once and normally never changes it. *Normally* is not a
 If a slot is restated and we overwrite in place, the bill we issued last month becomes
 unreproducible and nothing records that it changed.
 
+> **`retrieved_at` means LAST CONFIRMED, not first seen — and a re-read moves it.**
+> Observed 2026-09-16, the morning after the daily sweep first ran: the sweep reported
+> `restated=0 inserted=0` and had nonetheless rewritten 716 rows' `retrieved_at` to its own
+> timestamp. `store.go` says so deliberately ("retrieved_at advances even when the value is
+> unchanged, so it always reads as *last confirmed*"), and for `Restatement` that is the
+> right choice: with `DetectedAt` it bounds when a revision happened, and the tighter the
+> previous confirmation the tighter the bound.
+>
+> The cost is that the archive can no longer answer *when did we first see this price?* for
+> any day the sweep has touched. That question was not hypothetical — the publication
+> schedule in `octopus-price-pipeline.md` §0 (one publication daily at ~15:55) was measured
+> from exactly these timestamps, on days that had not yet been swept. A nightly sweep erases
+> that evidence for the trailing fortnight.
+>
+> Both facts are wanted, so they need two columns: an immutable `first_seen_at` alongside
+> the mutable `retrieved_at`. Not yet built — it is an `ALTER TABLE ... ADD COLUMN`, which
+> identity#47 has only just made safe, and it would be that path's first real user.
+
 So `retrieved_at` is part of the record, and the store is append-only:
 
 ```json
