@@ -41,9 +41,9 @@ Sibling/reference service: `../statehouse` (mirror its conventions).
 ## Config & auth (see AGENT_BRIEF §4, §6)
 
 - Config is remote at `config.swee.net` (`GET /api/v1/config/{namespace}`), not local files.
-  Namespaces: the site's devices namespace (named by `site.devices_namespace` in local
-  config — `devices_home` here; the old shared `statehouse_devices` was deleted upstream
-  and there is no default, so a config naming none refuses to start), `energy_tariffs`
+  Namespaces: the site's devices namespace (named by the shared `sites` entry, not by
+  local config — `devices_home` here; the old shared `statehouse_devices` was deleted
+  upstream and there is no default, so a site naming none refuses to start), `energy_tariffs`
   (countinghouse defines it), and the floorplan namespace (`site.floorplan_namespace` —
   `floorplan_home` here) shared with greenhouse, behind `/floors`, `/rooms` and grouped
   series labels. Both site namespaces are REQUIRED — a config naming either none refuses

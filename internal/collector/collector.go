@@ -303,7 +303,13 @@ func (c *Collector) Sync(ctx context.Context) (SyncResult, error) {
 		c.setKnownTo(held)
 	}
 
-	c.assess(ctx, now, &res)
+	// A sync that stored prices and then could not READ the archive is not a
+	// success. Reporting one cleared LastError and left CompleteTo stale, so
+	// /healthz answered ok for an archive it cannot read — the same failure
+	// dayCompleteness was fixed for, dropped one frame up.
+	if err := c.assess(ctx, now, &res); err != nil {
+		return res, c.fail(err)
+	}
 	c.markSuccess(now, res)
 	return res, nil
 }
@@ -398,7 +404,10 @@ func (c *Collector) fetchRange(ctx context.Context, from, to time.Time) (SyncRes
 // raised per sync, because the worst of them subsumes the others: being told
 // "tomorrow is two slots short" while today is entirely unpriced would bury the
 // thing that actually matters.
-func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) {
+// It returns an error ONLY for a state that makes the verdict meaningless — an
+// unreadable archive. Everything else it handles by alerting, because those are
+// findings about the data rather than failures of the sync.
+func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) error {
 	// Data-quality events come first and unconditionally. They describe what we
 	// just received rather than what we are still waiting for, so they are NOT
 	// subject to the "worst condition wins" rule below — an incomplete day must
@@ -472,7 +481,7 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 				"error":       err.Error(),
 			},
 		})
-		return
+		return fmt.Errorf("collector: read archive for completeness: %w", err)
 	}
 	c.resolve(notify.KindArchiveUnreadable, c.tariff.Code)
 
@@ -494,7 +503,7 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 				"expected":    today.Expected,
 			},
 		})
-		return
+		return nil
 	}
 	// A routine tail gap on today is the normal state for most of the day: the
 	// supplier's horizon ends at 23:00 local, so until the ~16:00 publication moves it,
@@ -520,7 +529,7 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 				"missing": len(today.Missing),
 			},
 		})
-		return
+		return nil
 	}
 	// Note what changed here: with a routine tail gap we now fall THROUGH to the
 	// tomorrow branch instead of returning. Previously an incomplete today short-
@@ -562,7 +571,7 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 	case inWatch:
 		res.KeepPolling = true
 	}
-
+	return nil
 }
 
 // dayCompleteness reads a day out of the archive and checks it.

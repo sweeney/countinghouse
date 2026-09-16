@@ -35,12 +35,12 @@ const (
 	// are open-ended. Alignment is still checked; only the length is waived.
 	AnyDuration = time.Duration(-1)
 
-	// NOT YET PASSED BY ANY PRODUCTION CALLER, deliberately. AnyDuration exists for the
-	// STANDING_CHARGE relation in docs/octopus-price-data-model.md §3, whose intervals
-	// run for months rather than half hours — and that relation is specified and not yet
-	// built. Kept rather than deleted because the waiver is the whole reason the length
-	// check is a parameter, and rediscovering that is worse than reading this sentence.
-	// It becomes live the moment standing charges are archived.
+	// Still passed by no production caller, but no longer because the relation it was
+	// waiting for is unbuilt: STANDING_CHARGE now exists and validates through
+	// ValidateStandingCharges, which has no length check to waive at all — a daily
+	// charge is not a slot, so it is checked by its own gates rather than by this one
+	// with an exemption. Kept because the waiver is why the length check is a parameter,
+	// and because a second non-half-hourly shape in unit_price would need it.
 
 	// DefaultVATEpsilonPence is the tolerance on |inc − exc × (1 + vat)|.
 	//

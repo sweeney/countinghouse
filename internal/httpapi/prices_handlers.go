@@ -507,12 +507,22 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The horizon joins the cache tag deliberately. A publication can extend it
-	// without touching the slots of a PAST window, and a tag keyed only on this
-	// window's content would then answer 304 while the field being polled for had
-	// moved — the same failure the content fingerprint was introduced to fix.
+	// Three things join the cache tag, and each is here because a response field
+	// moves faster than the one before it.
+	//
+	// The horizon, because a publication extends it without touching the slots of a
+	// PAST window. The CURRENT SLOT, because summary.current changes every half hour
+	// while `window=today` pins the window bounds and the fingerprint for the whole
+	// day — so a consumer polling with If-None-Match was told "unchanged" while the
+	// live price underneath it moved, which is the exact failure this semantic tag
+	// was introduced to fix and which adding `current` quietly reintroduced.
+	//
+	// Truncated to the slot grid rather than using `now` raw: the tag must be stable
+	// WITHIN a half hour or the caching buys nothing.
 	writeJSONCachedWindow(w, r, code, win,
-		curve.Fingerprint()+"|"+knownTo.UTC().Format(time.RFC3339),
+		curve.Fingerprint()+
+			"|"+knownTo.UTC().Format(time.RFC3339)+
+			"|"+now.UTC().Truncate(prices.SlotLength).Format(time.RFC3339),
 		map[string]any{
 			"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
 			"tariff_code": code, "half_hourly": true,
@@ -744,11 +754,35 @@ func writeJSONCached(w http.ResponseWriter, r *http.Request, status int, body an
 	// and a stale curve is worse than a re-fetch. The ETag does the real work.
 	w.Header().Set("Cache-Control", "private, max-age=30")
 
-	if match := r.Header.Get("If-None-Match"); match != "" && strings.Contains(match, etag) {
+	if ifNoneMatch(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write(encoded) //nolint:errcheck
+}
+
+// ifNoneMatch reports whether the header satisfies a STRONG comparison against
+// our tag, per RFC 9110 §8.8.3.2.
+//
+// This was strings.Contains, which is wrong in both directions: it accepted the
+// weak form W/"<ours>" — which a strong comparison must refuse — and it accepted
+// any tag merely containing ours as a substring. Neither is reachable from a
+// browser, but the caching is also for service consumers, and a validator that
+// says "unchanged" when it should not is the failure mode this whole path exists
+// to avoid.
+func ifNoneMatch(header, etag string) bool {
+	if header == "" {
+		return false
+	}
+	if strings.TrimSpace(header) == "*" {
+		return true
+	}
+	for _, candidate := range strings.Split(header, ",") {
+		if strings.TrimSpace(candidate) == etag {
+			return true
+		}
+	}
+	return false
 }

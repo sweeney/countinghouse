@@ -251,13 +251,10 @@ func (c *Client) UnitRates(ctx context.Context, tariff TariffCode, from, to time
 
 // StandingCharges returns the tariff's daily standing charges, oldest first.
 //
-// NOT YET CALLED, deliberately. The daily charge is read from config today, and this is
-// the fetcher for the STANDING_CHARGE relation in
-// docs/octopus-price-data-model.md §3 — specified, tested against a recorded fixture,
-// and not yet wired. Said explicitly because an uncalled exported method otherwise reads
-// as load-bearing to the next person, and because deleting it would mean rediscovering
-// the endpoint's shape later.
-// These change rarely — one row per change, the newest open-ended.
+// Called on the collector's daily sweep, through the StandingChargeFetcher interface
+// that *Client satisfies structurally. Daily rather than at the unit-price cadence: a
+// standing charge moves about once a year, so polling it every five minutes would be
+// ~288 requests a day to learn nothing.
 func (c *Client) StandingCharges(ctx context.Context, tariff TariffCode) ([]Rate, error) {
 	return c.rates(ctx, tariff, "standing-charges", time.Time{}, time.Time{}, 0)
 }

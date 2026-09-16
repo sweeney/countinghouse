@@ -91,6 +91,12 @@ type Schedule struct {
 // NewSchedule builds a schedule, sorting defensively: the archive returns rows
 // in order, but a caller assembling them by hand is not obliged to.
 func NewSchedule(charges []DailyCharge) Schedule {
+	// Same reasoning as Curve's dropAmbiguous, and the same resolution: at() scans
+	// backwards and returns the LAST covering charge, so two charges starting at the
+	// same instant at different prices would silently resolve to whichever sorted
+	// last. A standing charge we cannot name is one ChargeOver must refuse rather
+	// than guess, which it already does for any gap.
+	charges = dropAmbiguousCharges(charges)
 	cs := make([]DailyCharge, len(charges))
 	copy(cs, charges)
 	for i := 1; i < len(cs); i++ {
@@ -238,3 +244,21 @@ func checkStandingVAT(c DailyCharge, opts ValidateOptions) (Warning, bool) {
 }
 
 func isNotFinite(v float64) bool { return math.IsNaN(v) || math.IsInf(v, 0) }
+
+// dropAmbiguousCharges removes standing charges that start at the same instant
+// with different prices — the payment-method collapse, on the daily relation.
+func dropAmbiguousCharges(charges []DailyCharge) []DailyCharge {
+	rows := make([]Slot, len(charges))
+	for i, c := range charges {
+		rows[i] = c.row()
+	}
+	kept := dropAmbiguous(rows)
+	if len(kept) == len(charges) {
+		return charges
+	}
+	out := make([]DailyCharge, 0, len(kept))
+	for _, r := range kept {
+		out = append(out, dailyChargeFromRow(r))
+	}
+	return out
+}

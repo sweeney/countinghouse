@@ -269,8 +269,6 @@ The devices namespace is named by config, so a site reads its own:
 ```yaml
 site:
   id: home
-  devices_namespace: devices_home
-  floorplan_namespace: floorplan_home
 ```
 
 **`floorplan_namespace` is required too**, for a quieter version of the same reason.
@@ -315,17 +313,19 @@ check is skipped, and empty snapshots are served — an operator who names no co
 service has said they expect that (local dev). `/healthz` reports both site namespaces,
 so you can see which property's devices and floorplan an instance believes it serves.
 
-**`devices_namespace` is required, and the service refuses to start without it.** It
-briefly defaulted to `statehouse_devices`, the shared namespace every service read
-before devices were split per site. That namespace has been deleted from the config
-service, so the default came to name a document that returns 404 — and every layer below
-handles that correctly into silence: the fetch fails, the refresh is fail-open and keeps
-the last-known snapshot, at startup there is no last-known snapshot, and every endpoint
-then reports zero devices. For a billing service that is a wrong answer in the shape of a
-right one, so an unnamed namespace is now a refusal to boot rather than a warning.
+**The devices namespace is not a local key at all.** It comes from the shared `sites`
+namespace, or the instance does not start. It briefly defaulted to `statehouse_devices`,
+the shared namespace every service read before devices were split per site; that document
+has been deleted, so the default came to name a 404 — and every layer below handles that
+correctly into silence: the fetch fails, the refresh is fail-open and keeps the
+last-known snapshot, at startup there is no last-known snapshot, and every endpoint then
+reports zero devices. For a billing service that is a wrong answer in the shape of a
+right one. Declaring it locally *as well* is how it would drift — rename it in `sites`
+and every other service follows while this one keeps reading the old document — so the
+pointer has exactly one home.
 
-Both keys are given explicitly. `devices_namespace` is deliberately *not* derived from
-`id`: a namespace is a document that either exists or does not, and guessing its name
+`id` is the only site key normally set here. The devices namespace is deliberately
+*not* derived from it either: a namespace is a document that either exists or does not, and guessing its name
 from the site id would turn a typo in `id` into a silent fetch of nothing rather than a
 startup complaint. The mirror case — a namespace with no `id` — stays a warning, because
 that instance serves correct numbers and only loses the ability to say which property it
@@ -348,11 +348,11 @@ house:   { timezone: "Europe/London" }
 
 - **Influx** read token must be scoped (read-only) to the bucket statehouse writes.
 - **`identity.client_id`/`client_secret`** are used only to fetch the remote config namespaces
-  (the devices namespace named by `site.devices_namespace`, and `energy_tariffs`) via
+  (the devices namespace named by the `sites` entry, and the tariff namespace) via
   `client_credentials`. Fetches are fail-open and reload on `SIGHUP`.
 - **`/healthz.remote_config`** is keyed by the namespace actually read, so the devices
-  entry is named by `site.devices_namespace` — `devices_home` for this site. There is no
-  default: a config naming no namespace does not start. A monitor keyed on a literal
+  entry is named by the `sites` entry for this instance — `devices_home` here. There is
+  no default: a site whose `sites` entry names no devices namespace does not start. A monitor keyed on a literal
   namespace therefore stops matching when a site migrates, and in most check expressions
   a missing key reads as healthy rather than as an error — so alert on the top-level
   `status` field, which degrades regardless of the key.

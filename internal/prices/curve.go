@@ -2,6 +2,7 @@ package prices
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -33,8 +34,16 @@ type Curve struct {
 	// construction, so copying a Curve by value (which the Pricer interface requires)
 	// shares them rather than duplicating the work.
 	//
-	// Absent on a Curve built as a literal, and every accessor falls back to the linear
-	// path in that case — so this is an optimisation, not a precondition.
+	// Absent on a Curve built as a literal. median, RankOf and PercentileOf then fall
+	// back to the linear path, so for those this is an optimisation rather than a
+	// precondition.
+	//
+	// RateAt is the exception and it matters: once byStart is built, a miss returns
+	// "unknown" instead of scanning. That assumes every slot starts on the half-hour
+	// grid and lasts one slot — true of everything NewCurve is given today, because
+	// curveFor is only called for half-hourly segments and Gate A refuses unaligned
+	// starts and off-length durations. A longer row reaching a Curve this way would
+	// price as unknown rather than being found by Covers.
 	sortedInc []float64     // every slot's inc-VAT pence, ascending
 	byStart   map[int64]int // slot start (unix seconds) → index into Slots
 	med       float64
@@ -440,6 +449,7 @@ func (c Curve) DailyStats(loc *time.Location) []DayStats {
 // when the derived fields are absent — so this is an optimisation rather than a
 // precondition. Serving paths go through here.
 func NewCurve(from, to time.Time, slots []Slot) Curve {
+	slots = dropAmbiguous(slots)
 	c := Curve{From: from, To: to, Slots: slots}
 
 	c.byStart = make(map[int64]int, len(slots))
@@ -461,8 +471,15 @@ func NewCurve(from, to time.Time, slots []Slot) Curve {
 	return c
 }
 
-// Fingerprint is a compact digest of what the curve CONTAINS: every slot's start and
-// its inc-VAT price, in order.
+// Fingerprint is a string of what the curve CONTAINS: every slot's start and its
+// inc-VAT price, in order.
+//
+// Not compact — it is the full uncompressed concatenation, roughly 52 KB for a 31-day
+// window, built and discarded on every request including the ones that end in a 304.
+// The caller hashes it anyway, so writing straight into the digest would avoid the
+// allocation; left as a string for now because the cost is bounded by the same window
+// caps that bound the response, and the clarity at the call site is worth more than the
+// allocation at this size.
 //
 // For HTTP caching. Hashing a rendered response body is the obvious approach and is
 // wrong here, because three of the four price responses carry a timestamp that moves on
@@ -526,4 +543,62 @@ func (c Curve) rateAtSlow(t time.Time) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// dropAmbiguous removes intervals that carry more than one price.
+//
+// The archive's key is (tariff_code, payment_method, valid_from), and it is that
+// wide because a variable tariff publishes the SAME half hour once per payment
+// method at different prices. Every reader here is keyed on the interval alone —
+// byStart, RateAt, the rank population, Schedule.at — so two rows for one interval
+// used to collapse to whichever sorted last, priced silently at it, and appeared
+// twice in the slot list with rank and median computed over a duplicated
+// population.
+//
+// Picking one is not available: which payment method the account is on is a
+// configuration fact this package does not have. Refusing the rows on write is
+// worse — it would make the composite key pointless, and two separate Put calls
+// could reach the same state anyway.
+//
+// So an interval with two prices is an interval whose price we do not know, which
+// Pricer's (float64, bool) already expresses. Dropping it here means RateAt misses
+// it, Complete() reports the gap, and the energy in it surfaces as unpriced_kwh —
+// visible, and never a confident wrong number. Identical rows are not ambiguous;
+// only a genuine disagreement is.
+//
+// Not reachable while the house is on Agile, which publishes payment_method null.
+// The archive is explicitly designed to outlive the current tariff.
+func dropAmbiguous(slots []Slot) []Slot {
+	byStart := make(map[int64][]int, len(slots))
+	for i, sl := range slots {
+		k := sl.ValidFrom.UTC().Unix()
+		byStart[k] = append(byStart[k], i)
+	}
+
+	drop := make(map[int]bool)
+	for _, idx := range byStart {
+		if len(idx) < 2 {
+			continue
+		}
+		first := slots[idx[0]].IncVATPence
+		for _, i := range idx[1:] {
+			if math.Abs(slots[i].IncVATPence-first) > priceEpsilon {
+				for _, j := range idx {
+					drop[j] = true
+				}
+				break
+			}
+		}
+	}
+	if len(drop) == 0 {
+		return slots
+	}
+
+	out := make([]Slot, 0, len(slots)-len(drop))
+	for i, sl := range slots {
+		if !drop[i] {
+			out = append(out, sl)
+		}
+	}
+	return out
 }

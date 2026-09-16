@@ -45,11 +45,10 @@ type SiteConfig struct {
 	// ID matches an entry in the `sites` namespace.
 	ID string `yaml:"id"`
 
-	// DevicesNamespace is the config namespace holding this site's devices. It is
-	// required: there is no shared namespace to fall back to since statehouse_devices
-	// was deleted from the config service, and defaulting to a document that does not
-	// exist buys a silent empty snapshot rather than a diagnostic. Load refuses a
-	// config that leaves it unset.
+	// The devices namespace is deliberately NOT settable here. It is the pointer
+	// that decides whether any answer is right, and a stale local copy would bill
+	// another property's devices while the service looked entirely healthy — so it
+	// comes from the shared `sites` namespace or the instance does not start.
 
 	// EnergyAgreementsNamespace names this site's dated-tariff namespace (conventionally
 	// "energy_agreements"). It sits here, beside the other two per-property

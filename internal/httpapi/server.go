@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"runtime"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -402,6 +403,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		h.Backup = s.Backups.BackupHealth()
 	}
 
+	// /healthz is UNAUTHENTICATED (see publicRoutes), so it carries a verdict and
+	// not the evidence behind it.
+	//
+	// last_error had grown to reflect up to 2 KB of verbatim upstream response body
+	// through APIError.Error(), plus the request URL and the local archive path; the
+	// backup block named the R2 bucket and the full object key. No credential leaks
+	// today, and there was precedent in remote_config.*.error — but that is arbitrary
+	// third-party bytes and infrastructure identifiers on an endpoint built to be
+	// polled by anything, resting on an upstream redactor this repo cannot enforce.
+	//
+	// The full strings stay on /metrics, which is behind the auth middleware, and in
+	// the logs. What survives here is enough to alert on and useless to an attacker.
+	h.Prices, h.Backup = redactHealth(h.Prices, h.Backup)
+
 	// Derive the aggregated verdict so a monitor watching the top-level status
 	// (the obvious thing to alert on) sees an outage. Influx is the hard
 	// dependency: without it no data route can answer, so an unreachable Influx
@@ -462,4 +477,57 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
+}
+
+// errorClass reduces an error string to something safe to publish: what failed,
+// not what the failure said.
+//
+// A class is what a monitor actually alerts on — "the collector is failing" — and
+// it is the part that carries no upstream bytes, no paths and no identifiers.
+func errorClass(err string) string {
+	if err == "" {
+		return ""
+	}
+	switch {
+	case strings.Contains(err, "open archive"), strings.Contains(err, "read archive"),
+		strings.Contains(err, "prices: "):
+		return "archive error"
+	case strings.Contains(err, "context deadline exceeded"), strings.Contains(err, "timeout"):
+		return "upstream timeout"
+	case strings.Contains(err, "429"):
+		return "upstream rate limited"
+	case strings.Contains(err, "403"), strings.Contains(err, "401"):
+		return "upstream rejected our request"
+	case strings.Contains(err, "5"+"00"), strings.Contains(err, "502"),
+		strings.Contains(err, "503"):
+		return "upstream unavailable"
+	default:
+		return "error"
+	}
+}
+
+// redactHealth returns COPIES with the evidence stripped.
+//
+// Copies rather than in-place edits, because mutating would silently depend on
+// every provider building a fresh value on each call — true of both today, and an
+// invisible contract to break later. It also made the function non-idempotent:
+// applied twice, a class was reclassified into the useless default.
+func redactHealth(prices []PriceHealth, backup *BackupHealth) ([]PriceHealth, *BackupHealth) {
+	out := make([]PriceHealth, len(prices))
+	copy(out, prices)
+	for i := range out {
+		out[i].LastError = errorClass(out[i].LastError)
+	}
+
+	if backup == nil {
+		return out, nil
+	}
+	// Keep the schedule and the timestamps — those are the operational signal — and
+	// drop what names our infrastructure.
+	b := *backup
+	b.LastError = errorClass(b.LastError)
+	b.Bucket = ""
+	b.LastKey = ""
+	b.Env = ""
+	return out, &b
 }

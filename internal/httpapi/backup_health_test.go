@@ -76,14 +76,24 @@ func TestHealthReportsASuccessfulBackup(t *testing.T) {
 	if !ok {
 		t.Fatalf("no backup block: %v", m)
 	}
-	if b["bucket"] != "countinghouse-sqlite" {
-		t.Errorf("bucket = %v", b["bucket"])
+	// The operational signal survives: when it last ran, on what schedule, and
+	// whether it worked.
+	if b["schedule"] != "daily" {
+		t.Errorf("schedule = %v, want daily", b["schedule"])
 	}
-	if b["last_key"] == nil {
-		t.Error("a successful backup must report the key it wrote, so it can be found")
+	if b["last_success"] == nil {
+		t.Error("a successful backup must say when it succeeded")
 	}
 	if m["status"] != "ok" {
 		t.Errorf("status = %v, want ok", m["status"])
+	}
+	// But the infrastructure identifiers do not. This endpoint is unauthenticated,
+	// and the key naming where our backups live is of no use to a monitor and of
+	// obvious use to anyone else. Both are still on /metrics, behind auth.
+	for _, k := range []string{"bucket", "last_key", "env"} {
+		if v, present := b[k]; present && v != "" {
+			t.Errorf("/healthz still discloses %s = %v", k, v)
+		}
 	}
 }
 

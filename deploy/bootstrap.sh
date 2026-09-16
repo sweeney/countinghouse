@@ -49,12 +49,6 @@ if [ -z "$SITE_ID" ]; then
 fi
 [ -n "$SITE_ID" ] || { echo "site id is required" >&2; exit 1; }
 
-DEVICES_NS="${CH_DEVICES_NAMESPACE:-}"
-if [ -z "$DEVICES_NS" ]; then
-    printf 'devices namespace for this site (e.g. devices_home): '
-    read -r DEVICES_NS
-fi
-[ -n "$DEVICES_NS" ] || { echo "devices_namespace is required — the service will not start without it" >&2; exit 1; }
 
 echo "=== Service user ==="
 if ! id "$SERVICE" >/dev/null 2>&1; then
@@ -104,14 +98,17 @@ else
 cat > /etc/$SERVICE/config.yaml <<CONFIG
 # The property this instance serves, supplied at install time.
 #
-# devices_namespace is required — the service refuses to start without it. There is
-# no shared namespace to fall back to any more, so a config naming none would fetch
-# nothing and serve zero devices: every bill and every series answering zero rather
-# than erroring. It is spelled out rather than derived from the id so a typo is a
-# complaint at startup instead of a successful fetch of nothing.
+# `id` is the only site key needed here. The namespace pointers — devices,
+# floorplan, energy agreements — come from the shared `sites` namespace in the
+# config service, which other services read too. devices_namespace has no local
+# fallback and is not settable here at all: it is the pointer that decides whether
+# any answer is right, and a stale local copy would bill ANOTHER PROPERTY'S devices
+# while the service looked entirely healthy.
+#
+# So the id must have an entry in `sites` naming its devices namespace, or the
+# service refuses to start.
 site:
   id: "$SITE_ID"
-  devices_namespace: "$DEVICES_NS"
 
 http:
   listen: ":$PORT"
@@ -136,7 +133,8 @@ house:
 CONFIG
 chown root:$SERVICE /etc/$SERVICE/config.yaml; chmod 640 /etc/$SERVICE/config.yaml
 echo "  wrote /etc/$SERVICE/config.yaml (listen :$PORT)"
-echo "  NOTE: name site.devices_namespace before starting — the service will refuse otherwise"
+echo "  NOTE: $SITE_ID needs an entry in the \`sites\` namespace at config.swee.net naming"
+echo "        its devices_namespace, or the service will refuse to start."
 fi
 
 echo "=== Price archive backup (R2) ==="

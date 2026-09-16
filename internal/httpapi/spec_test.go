@@ -25,18 +25,6 @@ func specPaths(t *testing.T, body []byte) map[string]struct{} {
 	return out
 }
 
-// registeredPaths returns the route patterns newMux actually registers, read from
-// the source of server.go.
-//
-// It used to be a hand-maintained slice whose comment claimed "the path coverage
-// test will catch drift" — which it could not, because the test compared that
-// slice against the spec and never against the mux. A route added to newMux and to
-// neither passed both checks silently, which is how four /prices routes reached a
-// green build undocumented.
-//
-// Reading the source is unusual but it is the only way to get this right: net/http
-// offers no way to enumerate a ServeMux's patterns, so the alternative is a second
-// hand-maintained list that can drift exactly as the first one did.
 // registeredPaths is every path the server actually serves, read from the DECLARED
 // route table.
 //
