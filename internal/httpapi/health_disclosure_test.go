@@ -102,8 +102,9 @@ func TestMetricsKeepsTheFullErrorDetail(t *testing.T) {
 func TestHealthzStillDegradesOnACollectorFailure(t *testing.T) {
 	s, _ := dataSetup(t)
 	s.Prices = leakyPrices{h: []PriceHealth{{
-		TariffCode:  pxTariff,
-		LastError:   "octopus: 429 Too Many Requests from https://api.octopus.energy/v1/...",
+		TariffCode: pxTariff,
+		// The real shape APIError.Error() renders, not an invented one.
+		LastError:   "octopus: Too Many Requests (429) for https://api.octopus.energy/v1/x: throttled",
 		LastAttempt: time.Now(),
 	}}}
 	m := decode(t, doGET(t, s, "/healthz"))

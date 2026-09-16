@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -488,23 +489,42 @@ func errorClass(err string) string {
 	if err == "" {
 		return ""
 	}
+	// The HTTP status comes from the STRUCTURED part of APIError.Error()
+	// ("octopus: %s (%d) for %s: %s"), not from anywhere in the string.
+	//
+	// Matching bare digits was wrong in a way that matters here: this runs over up
+	// to 2 KB of upstream RESPONSE BODY, so a body containing "429" or a count of
+	// 4290 let the remote end choose what /healthz said had happened. It could never
+	// leak — every branch returns a fixed string — but a health endpoint reporting
+	// the wrong cause is the failure this service is careful about everywhere else.
+	if m := apiStatusRE.FindStringSubmatch(err); m != nil {
+		switch code := m[1]; {
+		case code == "429":
+			return "upstream rate limited"
+		case code == "401", code == "403":
+			return "upstream rejected our request"
+		case code[0] == '5':
+			return "upstream unavailable"
+		default:
+			return "upstream error"
+		}
+	}
+
 	switch {
 	case strings.Contains(err, "open archive"), strings.Contains(err, "read archive"),
 		strings.Contains(err, "prices: "):
 		return "archive error"
-	case strings.Contains(err, "context deadline exceeded"), strings.Contains(err, "timeout"):
+	case strings.Contains(err, "context deadline exceeded"),
+		strings.Contains(err, "Client.Timeout"), strings.Contains(err, "i/o timeout"):
 		return "upstream timeout"
-	case strings.Contains(err, "429"):
-		return "upstream rate limited"
-	case strings.Contains(err, "403"), strings.Contains(err, "401"):
-		return "upstream rejected our request"
-	case strings.Contains(err, "5"+"00"), strings.Contains(err, "502"),
-		strings.Contains(err, "503"):
-		return "upstream unavailable"
 	default:
 		return "error"
 	}
 }
+
+// apiStatusRE matches the parenthesised status code APIError renders, anchored to
+// the "octopus: <status> (<code>)" prefix so a body cannot forge one.
+var apiStatusRE = regexp.MustCompile(`^octopus: [^(]*\((\d{3})\)`)
 
 // redactHealth returns COPIES with the evidence stripped.
 //

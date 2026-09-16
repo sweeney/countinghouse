@@ -449,14 +449,32 @@ func (c Curve) DailyStats(loc *time.Location) []DayStats {
 // when the derived fields are absent — so this is an optimisation rather than a
 // precondition. Serving paths go through here.
 func NewCurve(from, to time.Time, slots []Slot) Curve {
-	slots = dropAmbiguous(slots)
 	c := Curve{From: from, To: to, Slots: slots}
 
+	// Ambiguity is detected inside the index build rather than in a pass of its own:
+	// a separate pass meant a second map the size of byStart, which cost ~1.9x the
+	// construction time and twice the memory on a path that runs for every /prices
+	// request — to find something that does not occur while the house is on a tariff
+	// publishing one payment method. See dropAmbiguous for why they are dropped.
 	c.byStart = make(map[int64]int, len(slots))
 	inc := make([]float64, 0, len(slots))
+	var ambiguous map[int64]bool
 	for i, sl := range slots {
-		c.byStart[sl.ValidFrom.UTC().Unix()] = i
+		k := sl.ValidFrom.UTC().Unix()
+		if j, seen := c.byStart[k]; seen &&
+			math.Abs(sl.IncVATPence-slots[j].IncVATPence) > priceEpsilon {
+			if ambiguous == nil {
+				ambiguous = make(map[int64]bool, 2)
+			}
+			ambiguous[k] = true
+		}
+		c.byStart[k] = i
 		inc = append(inc, sl.IncVATPence)
+	}
+	if ambiguous != nil {
+		// Rare enough to be worth re-entering cleanly rather than unpicking the
+		// half-built index. The second pass finds nothing to drop and terminates.
+		return NewCurve(from, to, dropAmbiguous(slots, ambiguous))
 	}
 	sort.Float64s(inc)
 	c.sortedInc = inc
@@ -545,7 +563,8 @@ func (c Curve) rateAtSlow(t time.Time) (float64, bool) {
 	return 0, false
 }
 
-// dropAmbiguous removes intervals that carry more than one price.
+// dropAmbiguous removes every slot whose interval was found to carry more than one
+// price. NewCurve detects them; this drops them.
 //
 // The archive's key is (tariff_code, payment_method, valid_from), and it is that
 // wide because a variable tariff publishes the SAME half hour once per payment
@@ -568,35 +587,10 @@ func (c Curve) rateAtSlow(t time.Time) (float64, bool) {
 //
 // Not reachable while the house is on Agile, which publishes payment_method null.
 // The archive is explicitly designed to outlive the current tariff.
-func dropAmbiguous(slots []Slot) []Slot {
-	byStart := make(map[int64][]int, len(slots))
-	for i, sl := range slots {
-		k := sl.ValidFrom.UTC().Unix()
-		byStart[k] = append(byStart[k], i)
-	}
-
-	drop := make(map[int]bool)
-	for _, idx := range byStart {
-		if len(idx) < 2 {
-			continue
-		}
-		first := slots[idx[0]].IncVATPence
-		for _, i := range idx[1:] {
-			if math.Abs(slots[i].IncVATPence-first) > priceEpsilon {
-				for _, j := range idx {
-					drop[j] = true
-				}
-				break
-			}
-		}
-	}
-	if len(drop) == 0 {
-		return slots
-	}
-
-	out := make([]Slot, 0, len(slots)-len(drop))
-	for i, sl := range slots {
-		if !drop[i] {
+func dropAmbiguous(slots []Slot, ambiguous map[int64]bool) []Slot {
+	out := make([]Slot, 0, len(slots))
+	for _, sl := range slots {
+		if !ambiguous[sl.ValidFrom.UTC().Unix()] {
 			out = append(out, sl)
 		}
 	}

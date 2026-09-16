@@ -252,7 +252,9 @@ func dropAmbiguousCharges(charges []DailyCharge) []DailyCharge {
 	for i, c := range charges {
 		rows[i] = c.row()
 	}
-	kept := dropAmbiguous(rows)
+	// NewCurve does the detection; a schedule is small enough that reusing it is
+	// simpler than a second implementation of the same rule.
+	kept := NewCurve(time.Time{}, time.Time{}, rows).Slots
 	if len(kept) == len(charges) {
 		return charges
 	}

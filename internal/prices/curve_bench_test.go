@@ -57,3 +57,30 @@ func BenchmarkCurveRateAt(b *testing.B) {
 		}
 	}
 }
+
+// NewCurve itself, because dropAmbiguous added a map build and a pass over every
+// slot to the construction path — which runs on every /prices request, including
+// the ones that end in a 304. Worth knowing the cost at the window caps the routes
+// actually permit: a month is 1,488 half hours, a year 17,520.
+func BenchmarkNewCurve(b *testing.B) {
+	for _, n := range []int{48, 1488, 17520} {
+		b.Run(fmt.Sprintf("%d-slots", n), func(b *testing.B) {
+			start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			slots := make([]Slot, n)
+			for i := range slots {
+				f := start.Add(time.Duration(i) * SlotLength)
+				to := f.Add(SlotLength)
+				p := 20 + float64((i*7)%40)
+				slots[i] = Slot{
+					TariffCode: "E-1R-AGILE-24-10-01-A", ValidFrom: f, ValidTo: &to,
+					ExcVATPence: p, IncVATPence: p * 1.05, RetrievedAt: start,
+				}
+			}
+			stop := start.Add(time.Duration(n) * SlotLength)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = NewCurve(start, stop, slots)
+			}
+		})
+	}
+}
