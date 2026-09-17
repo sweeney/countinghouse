@@ -837,11 +837,19 @@ func classify(err error) string {
 //
 // Clearing matters: without it /healthz would stay red after the problem had
 // gone, and an indicator that does not recover stops being read.
+//
+// BOTH error fields, and the class is the one that bites: priceVerdict degrades on
+// either, and /healthz publishes only the class — so clearing the text alone left
+// the public endpoint red until a restart after the first transient 429. Whatever
+// fail() sets, this clears. The counters are the opposite: Failures keeps rising,
+// because a failure count against a clean current state is how a flapping upstream
+// is spotted.
 func (c *Collector) markSuccess(now time.Time, res SyncResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.status.LastSuccess = now
 	c.status.LastError = ""
+	c.status.LastErrorClass = ""
 	c.status.Inserted += res.Stored.Inserted
 	c.status.Restated += res.Stored.Restated
 	c.status.Rejected += len(res.Rejected)

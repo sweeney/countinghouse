@@ -274,6 +274,15 @@ function duration(ms) {
 // Deriving `hasTomorrow` from the slots we got back (below) is therefore honest
 // rather than a guess: known_to says where the curve stops, so a short answer is
 // distinguishable from a hole in the archive.
+// The token lives in localStorage, which is right for THIS and wrong in general.
+//
+// This is a fixed screen on a private network, left running, with nobody to retype a
+// credential into it — so a token that survives a reload is the whole point, and the
+// blast radius is one device inside the house. Do not copy the pattern into anything
+// reachable from outside it: localStorage is readable by any script that reaches the
+// page, so one XSS and the token walks. A page with real users wants the broker in
+// `consumer-demos/auth.js` instead, which mints short-lived tokens and keeps none of
+// this. Nothing here is a default — the base URL and token start empty.
 const STORE = { base: "eps_base", token: "eps_token" };
 const cfg = {
   base: localStorage.getItem(STORE.base) || window.CH_BASE || "http://localhost:8585",
