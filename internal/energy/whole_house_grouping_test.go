@@ -30,7 +30,7 @@ func wholeHouseSetup(immersion config.DeviceConfig) ([]Series, map[string][]floa
 	energy := map[string][]float64{"immersion": {2}, "fridge": {1}, "electricity_meter": {5}}
 	power := map[string][]float64{}
 
-	return AssembleSeries(wholeHouseBuckets(), nil, devices, energy, power, testTariff(), GroupByRoom, nil), energy
+	return AssembleSeries(wholeHouseBuckets(), nil, devices, energy, power, testPricer(), GroupByRoom, nil), energy
 }
 
 // TestWholeHouseDeviceGetsItsOwnKey pins the decision: legacy `location: house` and a

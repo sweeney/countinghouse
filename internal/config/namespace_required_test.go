@@ -24,10 +24,15 @@ import (
 //
 // So not naming the namespace is now a refusal to start. A host that cannot work
 // says so at startup instead of booting empty.
-func TestLoadRefusesASiteThatNamesNoDevicesNamespace(t *testing.T) {
-	_, err := Load(writeConfig(t, "site:\n  id: cottage\n"))
+// The refusal MOVED when the pointers became facts in the shared `sites` namespace:
+// Load no longer sees them, so it can no longer be the one to refuse. Resolution is,
+// and it is strictly the better place — it refuses when NO source supplies the
+// namespace, where Load could only ever check one of them.
+func TestResolveRefusesASiteThatNamesNoDevicesNamespace(t *testing.T) {
+	sites := Sites{Sites: []SiteRecord{{ID: "cottage", FloorplanNamespace: "floorplan_cottage"}}}
+	_, _, err := ResolveSiteNamespaces(SiteConfig{ID: "cottage"}, sites)
 	if err == nil {
-		t.Fatal("a site naming no devices_namespace must refuse to load, not warn and continue")
+		t.Fatal("a site naming no devices_namespace must refuse to start, not warn and continue")
 	}
 	if !strings.Contains(err.Error(), "devices_namespace") {
 		t.Errorf("the error must name the missing key; got %q", err)
@@ -38,51 +43,92 @@ func TestLoadRefusesASiteThatNamesNoDevicesNamespace(t *testing.T) {
 	}
 }
 
-// A config with no site block at all is the same failure wearing a different hat: it
-// names no namespace either, and previously took the deleted default.
-func TestLoadRefusesAConfigWithNoSiteBlock(t *testing.T) {
-	_, err := Load(writeConfig(t, "http:\n  listen: \":8585\"\n"))
-	if err == nil {
-		t.Fatal("a config with no site block names no devices namespace, so it must refuse")
+// devices_namespace has NO local fallback, unlike floorplan and agreements. A stale
+// local copy of it would not degrade a label — it would bill ANOTHER PROPERTY'S
+// devices while the service looked entirely healthy. So a local value must not
+// rescue a site entry that omits it.
+func TestResolveHasNoLocalFallbackForDevices(t *testing.T) {
+	sites := Sites{Sites: []SiteRecord{{ID: "home", FloorplanNamespace: "floorplan_home"}}}
+	local := SiteConfig{ID: "home", FloorplanNamespace: "floorplan_home"}
+
+	if _, _, err := ResolveSiteNamespaces(local, sites); err == nil {
+		t.Fatal("resolution must refuse; there is no local devices_namespace to fall back to")
 	}
-	if !strings.Contains(err.Error(), "devices_namespace") {
+	// And it says so, rather than just reporting the value missing.
+	_, _, err := ResolveSiteNamespaces(local, sites)
+	if !strings.Contains(err.Error(), "sites") {
+		t.Errorf("the error should point at the sites namespace as the place to fix it; got %q", err)
+	}
+}
+
+// A config with no site block at all is the same failure wearing a different hat. It
+// now fails one step earlier and for a sharper reason: with no site id there is
+// nothing to look up in `sites`, so not one pointer can be resolved.
+func TestResolveRefusesAConfigWithNoSiteBlock(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "http:\n  listen: \":8585\"\n"))
+	if err != nil {
+		t.Fatalf("Load itself no longer refuses this; resolution does: %v", err)
+	}
+	_, _, err = ResolveSiteNamespaces(cfg.Site, Sites{Sites: []SiteRecord{{ID: "home"}}})
+	if err == nil {
+		t.Fatal("a config with no site block cannot resolve anything, so it must refuse")
+	}
+	if !strings.Contains(err.Error(), "site.id") {
 		t.Errorf("the error must name the missing key; got %q", err)
 	}
 }
 
-// The scalar form still parses — it is what statehouse has deployed — but parsing is
-// not the same as being usable. It names an id and no namespace, which is precisely
-// the shape this refusal exists to catch.
-func TestLoadRefusesTheScalarSiteForm(t *testing.T) {
-	_, err := Load(writeConfig(t, "site: home\n"))
-	if err == nil {
-		t.Fatal("the scalar form names no namespace, so it must refuse like any other id-only site")
+// The scalar form's status has INVERTED, which is worth pinning rather than quietly
+// dropping. It names an id and no namespaces — once the shape this refusal existed to
+// catch, and now exactly the right config, because the namespaces belong in `sites`
+// and the id is the only thing an instance must declare for itself.
+func TestScalarSiteFormIsNowSufficient(t *testing.T) {
+	cfg, err := Load(writeConfig(t, "site: home\n"))
+	if err != nil {
+		t.Fatalf("the scalar form must load: %v", err)
+	}
+	if cfg.Site.ID != "home" {
+		t.Fatalf("site id = %q, want home", cfg.Site.ID)
+	}
+	sites := Sites{Sites: []SiteRecord{{
+		ID: "home", DevicesNamespace: "devices_home", FloorplanNamespace: "floorplan_home",
+	}}}
+	got, warns, err := ResolveSiteNamespaces(cfg.Site, sites)
+	if err != nil {
+		t.Fatalf("an id plus a sites entry is a complete configuration: %v", err)
+	}
+	if len(warns) != 0 {
+		t.Errorf("nothing to warn about: %v", warns)
+	}
+	if got.Devices != "devices_home" || got.Floorplan != "floorplan_home" {
+		t.Errorf("resolved = %+v", got)
 	}
 }
 
 // The error is only useful if it says what to write. An operator reading it at 3am
 // should not have to find the README.
-func TestTheRefusalShowsTheBlockToAdd(t *testing.T) {
-	_, err := Load(writeConfig(t, "site:\n  id: cottage\n"))
+func TestTheRefusalSaysWhereToFixIt(t *testing.T) {
+	sites := Sites{Sites: []SiteRecord{{ID: "cottage", FloorplanNamespace: "f"}}}
+	_, _, err := ResolveSiteNamespaces(SiteConfig{ID: "cottage"}, sites)
 	if err == nil {
 		t.Fatal("expected a refusal")
 	}
 	msg := err.Error()
-	for _, want := range []string{"site:", "id:", "devices_namespace:"} {
+	for _, want := range []string{"devices_namespace", "sites", "cottage"} {
 		if !strings.Contains(msg, want) {
-			t.Errorf("the refusal must show the block to add, missing %q in:\n%s", want, msg)
+			t.Errorf("the refusal must say what to add and where, missing %q in:\n%s", want, msg)
 		}
 	}
 }
 
 // The deployed shape must keep working, or this is an outage rather than a guard.
 func TestLoadAcceptsAFullyNamedSite(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
+	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  floorplan_namespace: floorplan_home\n"))
 	if err != nil {
 		t.Fatalf("the deployed config must keep loading: %v", err)
 	}
-	if cfg.Site.DevicesNamespace != "devices_home" {
-		t.Errorf("DevicesNamespace = %q, want devices_home", cfg.Site.DevicesNamespace)
+	if cfg.Site.ID != "home" {
+		t.Errorf("Site.ID = %q, want home", cfg.Site.ID)
 	}
 	if w := cfg.Warnings(); len(w) != 0 {
 		t.Errorf("a fully named site must be silent, got %v", w)
@@ -94,12 +140,12 @@ func TestLoadAcceptsAFullyNamedSite(t *testing.T) {
 // /healthz cannot say which property it serves. Refusing to start over that would take
 // down a working instance to fix a label.
 func TestNamespaceWithoutASiteIDRemainsOnlyAWarning(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
+	cfg, err := Load(writeConfig(t, "site:\n  floorplan_namespace: floorplan_home\n"))
 	if err != nil {
 		t.Fatalf("a working-but-unlabelled instance must still start: %v", err)
 	}
 	if len(cfg.Warnings()) == 0 {
-		t.Error("a devices_namespace with no site id must still warn")
+		t.Error("a namespace pointer with no site id must still warn")
 	}
 }
 
@@ -158,14 +204,17 @@ func TestFetcherIssuesNoRequestWhenTheNamespaceIsUnnamed(t *testing.T) {
 
 // Nothing anywhere may still spell the deleted namespace, in a default or a message.
 func TestTheDeletedNamespaceIsNotReferencedAsADefault(t *testing.T) {
-	cfg, err := Load(writeConfig(t, "site:\n  id: home\n  devices_namespace: devices_home\n  floorplan_namespace: floorplan_home\n"))
+	sites := Sites{Sites: []SiteRecord{{
+		ID: "home", DevicesNamespace: "devices_home", FloorplanNamespace: "floorplan_home",
+	}}}
+	resolved, _, err := ResolveSiteNamespaces(SiteConfig{ID: "home"}, sites)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Site.DevicesNamespace == "statehouse_devices" {
+	if resolved.Devices == "statehouse_devices" {
 		t.Error("statehouse_devices is deleted upstream; it must not be reachable as a value")
 	}
-	f := &Fetcher{DevicesNamespace: cfg.Site.DevicesNamespace}
+	f := &Fetcher{DevicesNamespace: resolved.Devices}
 	if f.devicesNamespace() == "statehouse_devices" {
 		t.Error("the fetcher must not resolve to the deleted namespace")
 	}

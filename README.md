@@ -37,14 +37,18 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /floors` | Floor catalog (id, name, order, elevation, device_count) — the vocabulary behind `floors=` and `group_by=floor`. |
 | `GET /rooms` | Room catalog (id, name, floor, category, area, device_count) — the vocabulary behind `rooms=` and `group_by=room`. |
 | `GET /devices/{id}/energy?window=&from=&to=` | Windowed kWh for one device (`source`: counter/integral). |
-| `GET /devices/{id}/cost?window=…` | Windowed kWh + VAT-inclusive cost at the effective tariff. |
+| `GET /devices/{id}/cost?window=…` | Windowed kWh + VAT-inclusive cost. `attribution` says how it was priced (`flat_rate` / `counter_slot`), `effective_rate` the GBP/kWh it works out to, `unpriced_kwh` any energy no rate was held for. |
 | `GET /devices/{id}/series?window=&interval=&shape=` | Single-device time-series (kWh / cost / avg W per bucket), for any energy-capable device **including the whole-house meter** (excluded from `/series?group_by=device`, but a request for one device cannot double-count). Reserved id `unmonitored` serves the rest-of-home series in the same shape — the *same* shape, so it omits the house-only `coverage`/`stale_monitored_*` signals even though deriving it needs the whole-house decomposition; `group_by=house` carries those beside the identical values (404 when no meter is configured). |
 | `GET /devices/{id}/events?window=` | State-transition events (for vertical-line overlays). |
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
 | `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter. `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
-| `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
-| `GET /tariffs` | Current tariffs keyed by fuel (electricity, gas). |
+| `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
+| `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered. |
+| `GET /prices` | Half-hourly price curve over a window, past or future. |
+| `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
+| `GET /prices/cheapest` | The cheapest contiguous window for a deferrable load. |
+| `GET /prices/stats` | Per-day min/max/mean/spread and plunge-slot counts. |
 | `GET /metrics` | Query counters, Influx latency, `drift_buckets_total` (negative meter−monitored drift beyond the 0.1 kWh quantum), uptime, goroutines. |
 
 **Windows:** `today`, `week` (starts Monday), `month` — all period-to-date — and `custom`
@@ -260,20 +264,34 @@ Countinghouse reads whichever the devices namespace carries. A namespace still d
 
 ## Sites
 
-The devices namespace is named by config, so a site reads its own:
+An instance declares which property it serves, and normally nothing else:
 
 ```yaml
 site:
   id: home
-  devices_namespace: devices_home
-  floorplan_namespace: floorplan_home
 ```
 
-**`floorplan_namespace` is required too**, for a quieter version of the same reason.
-Omitting it breaks nothing: `/floors` and `/rooms` still list every floor and room
-holding a metered device, and every kWh and cost is exactly right. Only the **names** are
-lost — so those endpoints answer with ids where labels belong and `null` where storey
-order belongs, which is precisely what a floorplan publishing nothing would produce.
+The namespace pointers come from the shared **`sites`** document, keyed by that id. They
+are deliberately not a local setting: rename a namespace in `sites` and every other service
+follows, while a local copy would quietly keep reading the old document. So `sites`
+**wins** over a local value that disagrees — and a warning names both, because an
+operator's edit being ignored without a word is its own kind of silent failure.
+
+`floorplan_namespace` and `energy_agreements_namespace` keep a local fallback, which is what
+makes the migration safe: a site whose `sites` entry is only partly filled in keeps working
+off its own config. **`devices_namespace` has none, and is not settable here at all.** It is
+the pointer that decides whether any answer is right — a stale local copy would not degrade
+a label, it would bill *another property's* devices while the service looked entirely
+healthy. It comes from `sites` or the instance does not start. Nor is it derived from `id`:
+a namespace is a document that either exists or does not, so guessing `devices_<id>` would
+turn a typo into a 404, a fail-open empty snapshot, and every endpoint honestly reporting
+zero devices.
+
+**Both site namespaces are required**, wherever they are supplied from. For the floorplan
+that is a quieter version of the same reason. Omitting it breaks nothing: `/floors` and
+`/rooms` still list every floor and room holding a metered device, and every kWh and cost is
+exactly right. Only the **names** are lost — so those endpoints answer with ids where labels
+belong and `null` where storey order belongs, which is precisely what a floorplan publishing nothing would produce.
 Nothing distinguishes "not configured" from "configured and empty", and the omission
 surfaces days later as a chart legend reading `floor1.room-c` to a human. So it is
 declared or the service refuses to start. (This is stricter than greenhouse, which treats
@@ -311,17 +329,19 @@ check is skipped, and empty snapshots are served — an operator who names no co
 service has said they expect that (local dev). `/healthz` reports both site namespaces,
 so you can see which property's devices and floorplan an instance believes it serves.
 
-**`devices_namespace` is required, and the service refuses to start without it.** It
-briefly defaulted to `statehouse_devices`, the shared namespace every service read
-before devices were split per site. That namespace has been deleted from the config
-service, so the default came to name a document that returns 404 — and every layer below
-handles that correctly into silence: the fetch fails, the refresh is fail-open and keeps
-the last-known snapshot, at startup there is no last-known snapshot, and every endpoint
-then reports zero devices. For a billing service that is a wrong answer in the shape of a
-right one, so an unnamed namespace is now a refusal to boot rather than a warning.
+**The devices namespace is not a local key at all.** It comes from the shared `sites`
+namespace, or the instance does not start. It briefly defaulted to `statehouse_devices`,
+the shared namespace every service read before devices were split per site; that document
+has been deleted, so the default came to name a 404 — and every layer below handles that
+correctly into silence: the fetch fails, the refresh is fail-open and keeps the
+last-known snapshot, at startup there is no last-known snapshot, and every endpoint then
+reports zero devices. For a billing service that is a wrong answer in the shape of a
+right one. Declaring it locally *as well* is how it would drift — rename it in `sites`
+and every other service follows while this one keeps reading the old document — so the
+pointer has exactly one home.
 
-Both keys are given explicitly. `devices_namespace` is deliberately *not* derived from
-`id`: a namespace is a document that either exists or does not, and guessing its name
+`id` is the only site key normally set here. The devices namespace is deliberately
+*not* derived from it either: a namespace is a document that either exists or does not, and guessing its name
 from the site id would turn a typo in `id` into a silent fetch of nothing rather than a
 startup complaint. The mirror case — a namespace with no `id` — stays a warning, because
 that instance serves correct numbers and only loses the ability to say which property it
@@ -344,14 +364,622 @@ house:   { timezone: "Europe/London" }
 
 - **Influx** read token must be scoped (read-only) to the bucket statehouse writes.
 - **`identity.client_id`/`client_secret`** are used only to fetch the remote config namespaces
-  (the devices namespace named by `site.devices_namespace`, and `energy_tariffs`) via
+  (the devices namespace named by the `sites` entry, and the tariff namespace) via
   `client_credentials`. Fetches are fail-open and reload on `SIGHUP`.
 - **`/healthz.remote_config`** is keyed by the namespace actually read, so the devices
-  entry is named by `site.devices_namespace` — `devices_home` for this site. There is no
-  default: a config naming no namespace does not start. A monitor keyed on a literal
+  entry is named by the `sites` entry for this instance — `devices_home` here. There is
+  no default: a site whose `sites` entry names no devices namespace does not start. A monitor keyed on a literal
   namespace therefore stops matching when a site migrates, and in most check expressions
   a missing key reads as healthy rather than as an error — so alert on the top-level
   `status` field, which degrades regardless of the key.
+
+### Tariffs: `energy_agreements`
+
+Tariffs are configured as **dated agreements** — one block per tariff you were on,
+with explicit bounds. Keyed by fuel; countinghouse bills `electricity` and reads,
+validates and ignores the rest. Rates are GBP ex-VAT, and VAT is applied by the cost
+layer.
+
+```json
+{ "agreements": { "electricity": [
+    { "from": "2025-09-23T00:00:00+01:00",
+      "to":   "2026-09-10T00:00:00+01:00",
+      "name": "Octopus 12M Fixed",
+      "type": "fixed",
+      "id":   "E-1R-OE-FIX-12M-25-09-09-A",
+      "unit": "kWh", "vat_rate": 0.05,
+      "unit_rate": 0.208948,
+      "daily_standing_charge": 0.529443 },
+
+    { "from": "2026-09-10T00:00:00+01:00",
+      "name": "Agile Octopus",
+      "type": "variable",
+      "id":   "E-1R-AGILE-24-10-01-A",
+      "unit": "kWh", "vat_rate": 0.05,
+      "daily_standing_charge": 0.591606 }
+] } }
+```
+
+**`fixed` carries its rate. `variable` deliberately does not.** A variable tariff's
+price changes every half hour, so there is no single number to put here — the curve
+lives in the price archive and consumers read it from the price endpoints. A
+representative rate in this document would be read as *the* price, and would be
+wrong. The standing charge stays here either way: it is flat per day on both types.
+
+`variable` is narrower than the industry's use of the word. A supplier's *standard
+variable rate* — one number that changes every few months — has no intra-agreement
+curve to look up, so it is configured as **successive `fixed` blocks**, one per rate.
+`variable` means specifically "priced per half hour from the archive".
+
+Rules, all enforced when the namespace is applied:
+
+- `from` is **inclusive**, `to` **exclusive**. `to` absent means the agreement is
+  current. The tariff in force at an instant is the agreement covering it.
+- **Gaps are allowed.** No agreement covering an instant is a real state — you were
+  not a customer — so the document may say so. But a window touching a gap is
+  **refused, not priced**: billing it at a neighbouring rate would be invisible and
+  wrong, and returning only the covered parts would silently under-bill.
+- **Overlaps are refused.** Two agreements covering one instant means two prices for
+  one kWh, and there is no defensible way to pick. Only the most recent agreement may
+  omit `to`.
+- A window spanning a boundary is billed as **one segment per agreement**, each with
+  its own rate, standing charge and VAT multiplier. Segments tile the window exactly,
+  so the apportioned standing charge adds up.
+- `name` is required — an unnamed agreement surfaces as its code, and a code where a
+  name belongs reads as data rather than as a missing label.
+- `id` is required on `variable` (it is the key prices are archived under, so without
+  it the block cannot be priced) and optional on `fixed`, but validated when present.
+- `fixed` requires `unit_rate`; `variable` must **not** set one.
+- Blocks may be authored in any order; they are sorted on load.
+- An invalid document is treated exactly like a failed fetch: the last-known snapshot
+  is kept and `/healthz` degrades. Per *boot needs truth, running keeps the last
+  truth*, a namespace that has never been fetched still aborts startup.
+
+#### Runbook: the temporary zero rate of VAT, 1 Oct 2026 – 31 Mar 2027
+
+[HMRC](https://www.gov.uk/government/publications/temporary-zero-rate-of-vat-for-domestic-electricity-in-great-britain/temporary-zero-rate-of-vat-in-great-britain-for-domestic-electricity)
+zero-rates qualifying supplies of **domestic electricity in Great Britain** for supplies
+made from **1 October 2026 to 31 March 2027**. All other domestic fuel stays at 5%
+UK-wide — irrelevant here, since countinghouse bills electricity only, but it is why the
+rate lives on the agreement rather than on the service.
+
+**What to do:** split the electricity agreement into three dated blocks that differ
+**only** in `vat_rate`, keeping the same `id`. Both boundaries are **local midnight**,
+and both fall inside BST, so each is `23:00Z` the day before — a document written in UTC
+midnights zero-rates two half hours of 30 September and un-zero-rates two of 31 March.
+
+```jsonc
+"electricity": [
+  { "from": "2026-01-01T00:00:00Z", "to": "2026-09-30T23:00:00Z",
+    "name": "Agile", "type": "variable", "id": "E-1R-AGILE-24-10-01-A",
+    "vat_rate": 0.05, "daily_standing_charge": 0.59 },
+  { "from": "2026-09-30T23:00:00Z", "to": "2027-03-31T23:00:00Z",
+    "name": "Agile (VAT zero-rated)", "type": "variable", "id": "E-1R-AGILE-24-10-01-A",
+    "vat_rate": 0,    "daily_standing_charge": 0.59 },
+  { "from": "2027-03-31T23:00:00Z",
+    "name": "Agile", "type": "variable", "id": "E-1R-AGILE-24-10-01-A",
+    "vat_rate": 0.05, "daily_standing_charge": 0.59 }
+]
+```
+
+**Author the third block now, not in March.** The return to 5% is the half of this
+change nobody is watching for, and its failure mode is a bill under-charging VAT rather
+than a loud one.
+
+**What happens if you forget.** Nothing is lost, and — since standing charges are
+archived too — nothing is wrong. The archive keeps filling: the VAT check is Gate B, so
+every slot is stored and flagged `vat_mismatch`. Both energy and the standing charge are
+billed from the supplier's own inc-VAT figures, so the statutory change arrives in the
+data rather than having to be applied from here. `vat_rate` is now purely an
+**expectation**: when it disagrees with the supplier consistently across a batch, the
+collector raises an `agreement_drift` alert naming the rate the supplier is actually
+charging — which is the number to paste into the document.
+
+The one case that still depends on config is a window with **no archived standing
+charge** (a fresh deployment, before the first daily sweep). `/bill` says which it used
+in `standing_charge_source`.
+
+**What does not need doing.** `/prices` and `/prices/stats` serve windows spanning these
+boundaries normally: the split leaves the tariff code unchanged, so there is still one
+curve. Only a genuine tariff change, or a **flat**-rate tariff across a VAT change,
+refuses with a 400.
+
+### The standing-charge archive
+
+The supplier's daily standing charge is archived alongside unit prices, in its own
+`standing_charge` table with the same bitemporal key and the same restatement log. A
+separate table rather than a `kind` column, because the two hold different **units** —
+pence per **day** here, pence per kWh there — and one table makes it possible to sum
+them with a query that forgot to filter. The Go types are separate for the same reason;
+the storage path is shared, so the bitemporal machinery has one implementation.
+
+Fetched on the **daily sweep**, not on every poll: a standing charge moves about once a
+year while unit prices move every half hour, so polling it at the unit-price cadence
+would be ~288 requests a day to learn nothing.
+
+**Why it exists.** Before this, `/bill` computed the standing charge as
+`days × daily_standing_charge × (1 + vat_rate)` — entirely from config. That made it the
+**last number in a bill still grossed up from configuration**, and therefore the last one
+a stale `vat_rate` could silently get wrong, on a service that already prices energy from
+the supplier's own inc-VAT column. Archiving it makes both sides of a bill come from the
+same place, and demotes `vat_rate` to a checkable expectation everywhere.
+
+`/bill` reports `standing_charge_source`: `archive` when it used the supplier's figure,
+`config` when it fell back. It falls back — whole, never partly — when no archived charge
+covers the entire window, when the window spans a genuine tariff change (two codes, two
+charges to reconcile; config already segments that correctly), or when the read fails.
+A partial total would look like a correct but cheap bill, which is the failure the whole
+pricing layer exists to avoid.
+
+### The price archive
+
+A half-hourly (`variable`) agreement has no unit rate in config — its prices live in a local
+SQLite archive that countinghouse fills from the supplier. This is the one thing the service
+writes; see `docs/octopus-price-data-model.md` for why it is SQLite rather than Influx.
+
+```yaml
+prices:
+  db_path: "/var/lib/countinghouse/prices.db"
+```
+
+- **Unset disables collection**, which is correct for a deployment whose agreements are all
+  flat-rate: there are no half-hourly prices to keep.
+- **Set it before any agreement becomes `variable`.** Startup refuses that combination rather
+  than booting successfully and then being unable to price anything after the switchover.
+- The parent directory must exist and be writable by the service user. The file and SQLite's
+  `-wal`/`-shm` companions are created mode 0600.
+- **Back it up** — `prices.backup`, below. It is rebuildable from the supplier today, and
+  the entire reason to keep it is the day that stops being true. Roughly 225 bytes a slot —
+  measured at 7.8 MB for two years of one tariff, so ~80 MB over twenty.
+
+#### Collecting without the rest of the service
+
+The supplier's rate endpoints need **no authentication** — they are public product data —
+so filling the archive needs no API key, no Influx, no remote config and no identity.
+`-collect` runs only the collector:
+
+```sh
+# Fill the archive and keep it current. Ctrl-C to stop.
+countinghouse -collect -prices-db ~/prices.db -tariff E-1R-AGILE-24-10-01-X -vat 0.05
+
+# One sync and exit, for a cron or a check.
+countinghouse -collect -once -prices-db ~/prices.db -tariff …
+
+# Backfill from a date first.
+countinghouse -collect -once -back-to 2025-01-01 -prices-db ~/prices.db -tariff …
+```
+
+It is the same collector, store, validation gates and migrations the service uses — not a
+second implementation that could drift from them and write a subtly different archive. It
+exists for three jobs: **start accumulating real prices now**, on any machine, before the
+service is deployed (several open questions here are measurements waiting on weeks of data
+rather than decisions waiting on thought); a one-shot **backfill**; and reproducing a
+collector problem against the live API without standing the service up around it.
+
+`-vat` is optional and only feeds the inc/exc consistency check — pricing never uses it.
+Omitting it means *do not check*, which is different from checking against 0%.
+
+Measured against the live API: 34,942 slots in one pass, 0 rejections, and a second run a
+clean no-op.
+
+No backfill step is needed: a first sync against an empty archive requests an unbounded range
+and so pulls the supplier's whole published history in one pass (measured: 34,894 slots in
+6.5 s). Afterwards each sync fetches only what is new, detected by a single ~350-byte probe.
+
+**The supplier's horizon stops two half hours short of the furthest day's end**, and for
+about sixteen hours of every day that furthest day is *today*. Measured over 729 archived
+days: every historical day is complete, and the only short one is always the newest.
+A tail gap that size is therefore healthy — it does not alert and does not void
+`complete_to`. An *interior* hole does, at any size. See
+`docs/octopus-price-pipeline.md`.
+
+`GET /healthz` and `GET /metrics` gain a `prices` block, one entry per collected tariff —
+omitted entirely when no collector runs. Two fields answer different questions, and the
+difference matters:
+
+| field | means | use |
+|---|---|---|
+| `known_to` | end of the newest slot held | "prices are arriving" |
+| `complete_to` | how far prices run with **no gaps** | **"we can bill this far"** |
+
+Alert on `complete_to`. It stops at the first *interior* hole and **not** at the supplier's
+routine two-slot tail on the furthest published day, because everything before that tail is
+billable. `complete_to` at or behind now means today cannot be priced in full, and degrades
+the top-level `status`.
+
+In normal operation `complete_to` therefore **equals** `known_to`. That is the signal rather
+than a redundancy: the two diverge exactly when a slot the supplier published never reached
+us, so `complete_to < known_to` means a real hole rather than a horizon. It was previously
+held back a day so the two would look distinct, which cost more than it bought — a field
+permanently behind its neighbour carries less information than one that matches until
+something is wrong.
+
+**A failing collector reports differently on the two endpoints.** `/metrics` is behind auth
+and carries `last_error` — the whole string, which for an upstream failure can include up to
+2 KB of somebody else's response body. `/healthz` is unauthenticated, so it carries
+`last_error_class` instead: fixed words the collector picks from the *typed* error, one of
+`upstream rate limited`, `upstream rejected our request`, `upstream unavailable`,
+`upstream timeout`, `upstream error`, `archive error`, or a bare `error` when nothing more
+specific is known.
+A monitor can route on those without the service ever republishing arbitrary third-party
+bytes, or the local archive path, on a public endpoint. Both fields clear on the next
+success, and either one present degrades the top-level `status`.
+
+### Backing up the archive
+
+> **Not configured yet, deliberately.** The service goes live without offsite backups
+> and they are added afterwards. That is defensible only because the archive is still
+> rebuildable from Octopus today — which is precisely the property this section says we
+> cannot rely on forever, so it is a debt with a due date rather than a decision. It
+> needs an R2 API token scoped to the `countinghouse-sqlite` bucket. Leave the whole
+> `prices.backup` block out until then: a **partial** block is refused at startup, on
+> the grounds that a backup quietly not happening is worse than no backup.
+>
+> The restore has also never been performed. A backup that has not been restored is a
+> hypothesis.
+
+
+The archive is the one thing countinghouse writes and the only state here that is not
+rebuildable from Influx, so it is the one thing that gets a backup rather than a
+retention policy. `prices.backup` sends it to Cloudflare R2 on a schedule, snapshotting with
+`VACUUM INTO` so a backup can run while the collector is writing.
+
+```yaml
+prices:
+  db_path: "/var/lib/countinghouse/prices.db"
+  backup:
+    env: "production"                 # the R2 key prefix: production | development
+    bucket: "countinghouse-sqlite"
+    account_id: "…"
+    access_key_id: "…"
+    secret_access_key_file: "/etc/countinghouse/r2-secret"
+    schedule: "daily"                 # daily | weekly (Sun) | monthly (1st) | off
+    hour: 3                           # UTC
+```
+
+Objects land at `{env}/backups/countinghouse/{YYYY}/{MM}/{DD}/countinghouse-{RFC3339}.sqlite3`,
+which is the layout `identity/common/backup` restores from.
+
+- **Omit the whole block to disable backups.** Correct for development and for any
+  deployment with no archive. **A partial block is refused at startup** — a backup that is
+  quietly not happening is worse than none, because you believe the archive is safe and
+  find out otherwise at the only moment it matters.
+- **`env` is required and is not defaulted.** It is the key prefix, and the restore tooling
+  matches the literals `production` and `development`. Defaulting it either way would file
+  one environment's backups under the other's prefix, where they exist and no restore looks
+  for them.
+- **The secret goes in a file.** `secret_access_key_file` is read only when the inline
+  `secret_access_key` is empty — the same pattern as `influx.token_file` — and a named file
+  that is missing or empty is a startup refusal rather than an auth error hours later. The
+  credential never appears in a log, an error or an HTTP response; errors bound for
+  `/healthz` are scrubbed of anything credential-shaped on the way out.
+- **One bucket per service**, so the R2 API token can be scoped to it: a leaked
+  countinghouse credential then cannot read or overwrite identity's backups.
+- **Bad credentials do not stop the service.** They cannot be detected until the first
+  upload, and an unreachable bucket should not take the cost API down with it. The failure
+  shows up on `/healthz` instead.
+- The snapshot is staged under `/tmp` (mode 0600) and deleted after upload. The systemd
+  unit sets `PrivateTmp=true`, so that copy of the archive is the service's alone — worth
+  preserving if the hardening is ever revisited.
+- **It uses `common/backup`'s scheduler.** It did not, for a while: `Manager` could not be
+  asked what it had done and could not be tested against a clock, so this service grew its
+  own snapshot, schedule, status bookkeeping and credential redactor — about 230 lines.
+  All four gaps are closed upstream (sweeney/identity#45), so all four local versions are
+  gone and what remains is an adapter from config to the health blocks. `last_error`
+  arrives already redacted by the library, whose redactor is key-aware where the local one
+  truncated bluntly at the first marker word — and it is still served on `/metrics` only,
+  because a redactor that removes credentials does not remove infrastructure.
+- **Historically this did not use the scheduler, and the stated reason was wrong twice.**
+  First: that `Manager` copied a WAL-mode database with `os.ReadFile` — true of v0.3.0, and
+  fixed in v0.4.0 by `VACUUM INTO`, which this repo did not notice because it sat two
+  versions behind. Then: that `ScheduleHour == 0` was read as unset — also a v0.3.0 bug,
+  also already fixed. Both claims were written from reading an older copy of the library
+  rather than the version the build resolves. Recorded because the fix each time was a
+  comment, not code, and the habit that prevents it is `go list -m -u all`.
+- `deploy/bootstrap.sh` creates `/etc/countinghouse/r2-secret` (0640, `root:countinghouse`)
+  empty. The R2 token itself is minted in the Cloudflare dashboard; scope it to this bucket
+  alone.
+
+`/healthz` and `/metrics` gain a `backup` block — omitted entirely when none is configured,
+so a zeroed block never reads as a broken backup. **The two endpoints do not serve the same
+block.** `/metrics` is behind auth and reports everything; `/healthz` is unauthenticated and
+reports whether the backup is working, not where it lands:
+
+```json
+// GET /healthz — no bucket, no env, no object key, no error text
+"backup": {
+  "schedule": "daily", "hour": 3,
+  "last_attempt": "…", "last_success": "…",
+  "successes": 9, "failures": 0,
+  "next_run": "…"
+}
+```
+
+```json
+// GET /metrics — the same block, plus what names our infrastructure
+"backup": {
+  "bucket": "countinghouse-sqlite", "env": "production",
+  "schedule": "daily", "hour": 3,
+  "last_attempt": "…", "last_success": "…",
+  "last_key": "production/backups/…/countinghouse-….sqlite3",
+  "last_error": "…",
+  "successes": 9, "failures": 0,
+  "next_run": "…"
+}
+```
+
+`last_attempt` moves on every run, `last_success` only on one that worked — so a lagging
+`last_success` means we are failing *now*. `last_key` is how the newest backup is found
+without listing the bucket, **and it is on `/metrics` only**: an anonymous caller has no use
+for an object key, and publishing one names the bucket, the prefix and the backup cadence to
+anyone who asks. `/healthz` keeps the timestamps and the counters, which is everything a
+monitor needs to alert. Same split for the failure: `/healthz` carries a fixed
+`last_error_class` (`"backup failed"`) where `/metrics` carries the message, because the R2
+endpoint host and the object key turn up in those strings.
+
+Three states **degrade** the top-level status (never make it `unavailable`: nothing served
+depends on last night's upload):
+
+- a failure since the last success — what is in the bucket no longer covers what would be lost;
+- attempted and **never** succeeded, which is what a typo'd credential leaves behind. Not
+  reported before the first run, or every restart would look like a fault;
+- **stale** — no successful backup in 48 hours, with no error to show for it. A wedged
+  scheduler produces silence rather than a failure, so a verdict keyed only on the error
+  would call it healthy. Not applied when `schedule: off`, where an old backup is what was
+  asked for.
+
+### The price endpoints
+
+Four read-only routes over the archive. All need a Bearer token like any data route,
+and **service tokens work**, because the consumers are other services.
+
+```
+GET /prices/upcoming?hours=12
+```
+
+```json
+{ "tariff_code": "E-1R-AGILE-24-10-01-A",
+  "unit": "p/kWh", "vat_included": true,
+  "summary": { "slots": 24, "current": 45.85, "min": -2.62, "mean": 24.48,
+               "median": 28.42, "max": 50.22 },
+  "slots": [
+    { "valid_from": "…T11:00:00+01:00", "price": -2.62, "rank": 1,
+      "percentile": 0, "band": "plunge" } ],
+  "cheapest": {
+    "30m": { "from": "…T11:00:00+01:00", "to": "…T11:30:00+01:00", "mean_price": -2.62 },
+    "3h":  { "from": "…T10:30:00+01:00", "to": "…T13:30:00+01:00", "mean_price": -2.49 } },
+  "missing": [], "complete": true }
+```
+
+The derivations are **served, not left to the caller**. Two dashboards inventing their
+own definition of "cheap" is how a house ends up with two screens disagreeing about
+whether now is a good time.
+
+- **`band`** is `plunge` / `cheap` / `normal` / `peak`. `plunge` is any price at or
+  below zero — free energy, or being paid to take it — kept separate because it is
+  categorically different from merely cheap, and it is the signal most worth seeing.
+  The rest sit ±15% from the window's **median**.
+- **Median, not mean, and not percentiles.** A percentile split always labels a fixed
+  share of the window as peak, which on a flat day is false. And the mean is dragged
+  about by plunge clusters: on a real published day with ten negative slots the mean
+  fell to 23.38p against a median of 28.42p, which would have banded **28 of 48 slots
+  as peak** — more than half the day — diluting the signal to nothing. The median
+  shrugs that off, and plunge days are exactly the days these endpoints exist for, so
+  the statistic has to survive them.
+- **`rank` 1 is the cheapest**, because the question is "when should I run this".
+- **`percentile`** is served too, so a consumer that dislikes our thresholds can band
+  it differently without refetching — and `summary.median` carries the centre our own
+  bands are measured from, so that invitation is actually actionable. Offering the
+  choice while withholding the figure it turns on is not an offer.
+
+```
+GET /prices/cheapest?duration=3h&before=2026-09-12T07:00:00Z
+```
+
+Two behaviours worth knowing. A run **never spans a gap** in the prices: a window
+whose prices we do not hold cannot honestly be called cheap. And `before` is a
+deadline for **finishing**, not starting — a load that overruns into expensive time
+was not scheduled, it was merely begun. A duration that is not a whole number of half
+hours rounds **up**. No window of that length returns **404**, which is a well-formed
+question with no answer rather than a bad request.
+
+`/prices/stats` reports per-**local**-day figures — the only framing in which a 23- or
+25-hour day makes sense. `spread` is max − min: the single number saying whether
+shifting load that day was worth the bother. Figures are **VAT-inclusive**, as on every
+sibling price route, with ex-VAT values alongside under `*_exc_vat` keys. They were the
+other way round, and a dashboard plotting a daily mean against a live price was then out
+by the VAT rate with nothing on the wire to say so — a trap that had been documented in
+three places rather than removed.
+
+All four carry an **ETag** and a short `Cache-Control`, so a dashboard polling every
+few seconds gets a 304 rather than re-downloading 48 slots. The tag hashes the
+rendered body, so it cannot claim "unchanged" when a band has shifted because the
+window slid forward.
+
+A **flat-rate** tariff has no curve. Those routes then answer `half_hourly: false`
+with a `flat_price` rather than an empty `slots` array — a different shape of answer,
+so nobody goes hunting a collector bug that does not exist. With no archive configured
+at all they answer **503**: the route exists and works elsewhere, so it is a
+deployment state rather than a missing endpoint.
+
+#### Migrating from `energy_tariffs`
+
+The legacy namespace still works untouched. It holds one current rate per fuel and no
+dates, which means **every instant resolves to the same rate** — so a historical
+window is priced at today's price, which is wrong whenever the rate has ever changed,
+and it cannot express a half-hourly tariff at all.
+
+Migration is opt-in via one local-config key:
+
+Add `energy_agreements_namespace` to this site's entry in the shared **`sites`** namespace,
+alongside the pointers that already live there:
+
+```json
+{ "sites": [ {
+    "id": "home",
+    "devices_namespace": "devices_home",
+    "floorplan_namespace": "floorplan_home",
+    "energy_agreements_namespace": "energy_agreements"
+} ] }
+```
+
+A tariff is a property of the site — a second property is generally on a different tariff, in
+a different region, at different rates — so it belongs with the other per-site pointers rather
+than in each service's local config.
+
+**Startup is two-phase** as a result: `sites` is read first to learn which namespaces this
+property uses, then those namespaces are fetched. That makes `sites` boot-critical in a way
+the others are not — until it has been read there is nothing to fail open *onto*, because we
+could not even name what is missing. A failure there aborts, consistent with the cold-start
+rule.
+
+Local `site:` keys remain as a **fallback** for `floorplan_namespace` and
+`energy_agreements_namespace`, covering a site whose `sites` entry is only partly filled in.
+Where both are set, **`sites` wins and a warning names both** — a stale local pointer silently
+overriding the correct remote one is exactly the drift this arrangement removes, but an
+operator's edit must not be ignored without a word.
+
+**`devices_namespace` has no local fallback and cannot be set locally at all.** It is the
+pointer that decides whether any answer is right: a stale copy would not degrade a label, it
+would bill *another property's devices* while the service looked entirely healthy. It comes
+from `sites` or the instance does not start.
+
+Pointers are resolved **once, at startup**. A later SIGHUP reports a change but does not adopt
+it: repointing a running service at another property's data would swap the device inventory
+underneath every in-flight answer, so that needs an explicit restart.
+
+Unset, the legacy document is authoritative. Set, the new one is — and the legacy
+document is not even fetched. **The two are never merged:** two documents disagreeing
+about what a kWh cost has no safe resolution, so exactly one answers and both
+`/healthz` and `GET /tariffs` report which. A named namespace that has never been
+fetched aborts startup rather than falling back, because falling back would price a
+variable tariff at a fixed number.
+
+`GET /tariffs` serves the **dated-block shape either way** — a legacy document is
+presented as a single agreement with neither bound — so a consumer handles one shape
+rather than two.
+
+### How spend is calculated
+
+A fixed tariff has one number, so cost is one multiplication. A half-hourly tariff has
+forty-eight a day, of **either sign**, and `unit_rate` in config is deliberately absent
+— the curve lives in the archive. So the cost path asks two questions in order: what
+prices the energy in this window, and at what resolution must the energy be measured to
+apply it?
+
+```
+  FIXED TARIFF                          HALF-HOURLY TARIFF
+  one increase() over the window        per-half-hour counter deltas
+           x one rate                   each x that half hour's own rate
+  ┌────────────────────────────┐        ┌──┬──┬──┬──┬──┬──┬──┬──┬──┬──┐
+  │        2.80 kWh            │        │.1│.1│.1│.1│.1│.1│.1│.1│.1│..│ kWh
+  └────────────────────────────┘        ├──┼──┼──┼──┼──┼──┼──┼──┼──┼──┤
+           x 20.89p                     │23│21│18│ 9│-2│-3│-2│ 4│17│..│ p
+  ───────────────────────────────       └──┴──┴──┴──┴──┴──┴──┴──┴──┴──┘
+  = £0.6150  (exact, one query)         = Σ  (exact, one 48-bucket query)
+  attribution: flat_rate                attribution: counter_slot
+```
+
+`attribution` is on the wire because the **method** is load-bearing for how closely a
+figure should be read:
+
+- **`flat_rate`** — one whole-window energy figure times one rate. Exact over any
+  window, and the path a flat deployment keeps taking, byte for byte. A month's bill
+  stays one query per device rather than 1488 buckets for the same answer.
+- **`counter_slot`** — each half hour's counter delta priced at that half hour's own
+  rate. Chosen over two alternatives and recorded in `docs/per-device-attribution.md`.
+  Per-device costs sum *exactly* to `energy_cost`, and *when* a device ran is preserved,
+  which is the entire point of the tariff. The cost is that plug counters tick in
+  0.1 kWh steps, so a single day's figure for a low-draw device carries a few percent of
+  quantisation noise — measured at +1.6% over a month for continuous loads against
+  −9.7% for deferrable ones, roughly 6:1 signal to noise, which is why the decision went
+  this way.
+
+A window spanning a **switchover** is billed one segment per agreement, each at its own
+rate and VAT multiplier, with the boundary half hour belonging to the *later* tariff.
+The standing charge is apportioned the same way — each side's daily rate for its own
+days, pro rata for a partial day — and is charged **once, on the bill, never split
+across devices**: no device causes a standing charge, so apportioning it would invent a
+number that reads like a measurement.
+
+Two fields exist because a cost on its own is not interpretable:
+
+- **`effective_rate`** — VAT-inclusive GBP/kWh actually paid, `cost ÷ priced kWh`. On the
+  bill it is the single number saying how well the house played the curve. It can be
+  **negative**: Agile prices go below zero, and consuming then is a credit, which the
+  whole pipeline carries through rather than clamping.
+- **`unpriced_kwh`** — energy in half hours no rate is held for. It is **not** folded
+  into `cost` and is absent when zero, so its presence always means the answer is
+  incomplete. Charging nothing for real energy is the silent failure this path exists to
+  prevent: a visible gap beats a plausible total.
+
+All four price routes carry an `ETag` and honour `If-None-Match`, answering `304` when
+nothing that determines the answer has moved — the tariff, the window truncated to the
+slot grid, and the prices themselves. Not `generated_at`, which changes every request:
+hashing the rendered body meant the 304 could never fire and a dashboard re-downloaded
+every slot on every poll.
+
+`/prices` and `/prices/stats` **refuse a window spanning a tariff change** (400, naming
+the boundary). A curve belongs to one tariff, and answering about only the first half is
+what `/bill` — which does segment, because a cost can be summed across tariffs where a
+curve cannot — would then contradict. They also cap the window: 31 days for `/prices`
+(a row per half hour) and 366 for `/prices/stats` (a row per day).
+
+What counts as "a tariff change" is the **curve identity**, not the number of agreement
+blocks. An agreement split that leaves the tariff code unchanged — see the VAT runbook
+below — is served normally, because the archive holds the supplier's own inc-VAT prices
+and a tax change simply arrives in them. A **flat** tariff across a VAT change is still
+refused: `flat_price` is one inc-VAT number derived from the config rate, and it
+genuinely differs either side.
+
+`/prices/stats` emits **both VAT bases**: the unsuffixed keys are inc-VAT, matching the
+other price routes, and `*_exc_vat` siblings carry the analytical figures.
+
+`/prices` carries **`known_to`** (the archive horizon, independent of the window asked
+for) and **`summary.current`** (the price of the slot covering now, absent when none
+does). Both exist so a live dashboard can draw retrospective context *and* watch for the
+daily publication from one call — `/prices/upcoming` is forward-only, so a chart showing
+the last few hours previously needed both routes to learn one number. `known_to` is part
+of the ETag, so a publication that extends the horizon without touching a past window's
+slots still invalidates it.
+
+On the price routes `window=today` means the **whole local day**, not the elapsed part
+as on the consumption routes. Today's prices are published in full before today begins,
+so a to-date curve would hand a dashboard half a chart and report it `complete`. `week`
+and `month` stay period-to-date, since the supplier publishes only about a day and a
+half ahead.
+
+`/healthz` carries a `reasons` array naming every failing condition, sorted and omitted
+when healthy.
+
+`/series` and `/bill` price buckets through **one** shared function, so a chart and a
+bill cannot disagree about what a window cost. Totals accumulate at full precision and
+round once — summing per-bucket costs already rounded for the wire drifts a month's
+half-hourly bill by several pence.
+
+Sharing that function is necessary but not sufficient, because **`/series` buckets are
+usually coarser than the price grid**: the default interval is `1h` for `window=today`
+and `1d` for `week`/`month`, while there are 48 prices a day. So when the tariff is
+half-hourly, the money is computed on the **30-minute grid regardless of the requested
+interval** and the costs are then folded up into the display buckets:
+
+```
+  requested 1d  ─────────────────────────────────────────────▶  1 display bucket
+  costed on     ┌──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┬──┐
+                │  │  │  │  │  │  │  │  │  │  │  │  │  │  │  │  48 × 30m, each at
+                └──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┴──┘  its own rate
+                                   │
+                                   └─▶ summed into cost[0], exact
+```
+
+`kwh[]` keeps the resolution the caller asked for and `cost[]` is exact, so `/series`
+agrees with `/bill` **by construction** rather than at one particular interval. Pricing
+a coarse bucket at the rate holding at its start instant measured **+43.6%** on a real
+recorded day and understates badly on a typical cheap-night/dear-evening one.
+Approximating instead — spreading a bucket's energy evenly over its slots — is exact
+for a fridge and badly wrong for a dishwasher, which is the load the tariff exists to
+shift. A **flat** tariff skips all of this: the price cannot change inside a bucket, so
+a monthly chart stays one query per day.
 
 ## Run locally
 

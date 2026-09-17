@@ -7,3 +7,6 @@
 
 # Editor / OS
 .DS_Store
+
+# Octopus account API key (local only — never commit)
+octopus-api-key.txt

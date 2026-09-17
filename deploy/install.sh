@@ -43,14 +43,11 @@ if [ ! -f /etc/$SERVICE/config.yaml ]; then
 # `sites` namespace, then UNCOMMENT BOTH namespaces with the documents published
 # for this site (e.g. devices_home and floorplan_home).
 #
-# The service refuses to start until BOTH are named, and it reports them one at a
-# time — so uncomment both now rather than meeting the second refusal after fixing
-# the first.
+# The devices namespace is NOT settable here — it comes from the shared `sites`
+# namespace, or the service does not start. What remains below is a fallback for a
+# site whose `sites` entry is only partly filled in; if you set one and `sites`
+# disagrees, `sites` wins and a warning names both values.
 #
-#   devices_namespace    there is no shared namespace to fall back to any more, so a
-#                        config naming none would fetch nothing and serve zero
-#                        devices — every bill and every series answering zero rather
-#                        than erroring.
 #   floorplan_namespace  the floor and room records (the same document greenhouse
 #                        reads). Unnamed, nothing breaks: /floors and /rooms still
 #                        list everything holding a metered device and every kWh is
@@ -68,7 +65,6 @@ if [ ! -f /etc/$SERVICE/config.yaml ]; then
 # once the fetch lands.
 site:
   id: "REPLACE_ME"
-  # devices_namespace: "devices_REPLACE_ME"
   # floorplan_namespace: "floorplan_REPLACE_ME"
 
 http:

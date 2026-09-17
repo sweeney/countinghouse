@@ -149,7 +149,14 @@ func TestAssembleBill(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			bill := AssembleBill(tc.window, tc.devices, tc.meterKWh, tc.meterPresent, realTariff)
+			// Pricing the devices is now the CALLER's job — only it knows whether it
+			// has one flat rate or per-half-hour buckets to price from — so the flat
+			// multiplication happens here, before assembly.
+			PriceFlat(tc.devices, realTariff)
+			bill := AssembleBill(tc.window, tc.devices, tc.meterKWh, tc.meterPresent, BillPricing{
+				StandingCharge: StandingChargeFor(tc.window.Days(), realTariff),
+				Attribution:    AttributionFlatRate,
+			})
 
 			if bill.Currency != "GBP" {
 				t.Errorf("Currency = %q, want GBP", bill.Currency)
@@ -207,9 +214,13 @@ func TestAssembleBill(t *testing.T) {
 // the meter-derived fields nil (omitted) rather than emitting a misleading
 // negative unmonitored remainder.
 func TestAssembleBill_NoMeter(t *testing.T) {
-	bill := AssembleBill(dayWindow("month", 10), []DeviceCost{
-		{DeviceID: "a", KWh: 4.2},
-	}, 0, false, realTariff)
+	win := dayWindow("month", 10)
+	devices := []DeviceCost{{DeviceID: "a", KWh: 4.2}}
+	PriceFlat(devices, realTariff)
+	bill := AssembleBill(win, devices, 0, false, BillPricing{
+		StandingCharge: StandingChargeFor(win.Days(), realTariff),
+		Attribution:    AttributionFlatRate,
+	})
 
 	r := bill.Reconciliation
 	if r.MeterPresent {

@@ -96,6 +96,18 @@ type Series struct {
 
 	TotalKWh  float64 `json:"total_kwh"`
 	TotalCost float64 `json:"total_cost"`
+
+	// UnpricedKWh is energy in buckets where NO rate was known — a half-hourly
+	// slot the archive does not hold. It is reported rather than folded into Cost
+	// at zero, because charging nothing for real consumption is the quiet way a
+	// bill comes out wrong. Omitted when zero, which is the normal case.
+	UnpricedKWh float64 `json:"unpriced_kwh,omitempty"`
+
+	// rawKWh and rawCost are the per-bucket values at FULL precision, kept only so a
+	// series computed on the half-hourly cost grid can be folded onto a coarser
+	// display axis without summing values already rounded for the wire. Unexported,
+	// so they never reach JSON; nil on a series that was never folded.
+	rawKWh, rawCost []float64
 }
 
 // SeriesResponse is the columnar ("wide") time-series payload (PLAN §A): a single
@@ -339,7 +351,7 @@ func AssembleSeries(
 	devices map[string]config.DeviceConfig,
 	energyByDevice map[string][]float64,
 	powerByDevice map[string][]float64,
-	tariff config.Tariff,
+	pricer Pricer,
 	groupBy string,
 	groupLabels map[string]string,
 ) []Series {
@@ -347,15 +359,15 @@ func AssembleSeries(
 
 	switch groupBy {
 	case GroupByRoom, GroupByFloor, GroupByClass:
-		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, tariff, get, groupBy, groupLabels)
+		return assembleGrouped(buckets, devices, energyByDevice, powerByDevice, pricer, get, groupBy, groupLabels)
 	case GroupByHouse:
-		return assembleHouse(buckets, bucketHours, devices, energyByDevice, powerByDevice, tariff, get)
+		return assembleHouse(buckets, bucketHours, devices, energyByDevice, powerByDevice, pricer, get)
 	case GroupBySelf:
-		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, tariff, get, true)
+		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, pricer, get, true)
 	case GroupByDevice, "":
-		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, tariff, get, false)
+		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, pricer, get, false)
 	default:
-		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, tariff, get, false)
+		return assembleByDevice(buckets, devices, energyByDevice, powerByDevice, pricer, get, false)
 	}
 }
 
@@ -386,7 +398,7 @@ func assembleByDevice(
 	buckets []time.Time,
 	devices map[string]config.DeviceConfig,
 	energyByDevice, powerByDevice map[string][]float64,
-	tariff config.Tariff,
+	pricer Pricer,
 	get getter,
 	includeWholeHouseTotal bool,
 ) []Series {
@@ -407,7 +419,7 @@ func assembleByDevice(
 		s := buildSeries(id, label, d.Place(), d.Class, buckets,
 			[][]float64{get(energyByDevice, id)},
 			[][]float64{get(powerByDevice, id)},
-			tariff)
+			pricer)
 		out = append(out, s)
 	}
 	return out
@@ -496,7 +508,7 @@ func assembleGrouped(
 	buckets []time.Time,
 	devices map[string]config.DeviceConfig,
 	energyByDevice, powerByDevice map[string][]float64,
-	tariff config.Tariff,
+	pricer Pricer,
 	get getter,
 	groupBy string,
 	groupLabels map[string]string,
@@ -560,7 +572,7 @@ func assembleGrouped(
 				label = name
 			}
 		}
-		out = append(out, buildSeries(k, label, room, "", buckets, es, ps, tariff))
+		out = append(out, buildSeries(k, label, room, "", buckets, es, ps, pricer))
 	}
 	return out
 }
@@ -578,17 +590,17 @@ func assembleHouse(
 	bucketHours []float64,
 	devices map[string]config.DeviceConfig,
 	energyByDevice, powerByDevice map[string][]float64,
-	tariff config.Tariff,
+	pricer Pricer,
 	get getter,
 ) []Series {
-	monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, tariff, get)
+	monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, pricer, get)
 
 	var out []Series
 	if monitored != nil {
 		out = append(out, *monitored)
 	}
 	if meter != nil {
-		out = append(out, deriveUnmonitored(buckets, bucketHours, monitored, *meter, tariff, false))
+		out = append(out, deriveUnmonitored(buckets, bucketHours, monitored, *meter, pricer, false))
 		out = append(out, *meter)
 	}
 	return out
@@ -603,7 +615,7 @@ func houseParts(
 	buckets []time.Time,
 	devices map[string]config.DeviceConfig,
 	energyByDevice, powerByDevice map[string][]float64,
-	tariff config.Tariff,
+	pricer Pricer,
 	get getter,
 ) (monitored, meter *Series) {
 	var monEnergy, monPower [][]float64
@@ -621,7 +633,7 @@ func houseParts(
 	}
 
 	if len(monEnergy) > 0 {
-		s := buildSeries(houseMonitoredKey, houseMonitoredKey, "", "", buckets, monEnergy, monPower, tariff)
+		s := buildSeries(houseMonitoredKey, houseMonitoredKey, "", "", buckets, monEnergy, monPower, pricer)
 		monitored = &s
 	}
 	if meterID != "" {
@@ -629,7 +641,7 @@ func houseParts(
 		s := buildSeries(houseMeterKey, houseMeterKey, d.Place(), d.Class, buckets,
 			[][]float64{get(energyByDevice, meterID)},
 			[][]float64{get(powerByDevice, meterID)},
-			tariff)
+			pricer)
 		meter = &s
 	}
 	return monitored, meter
@@ -648,14 +660,14 @@ func withUnmonitoredCatchAll(
 	bucketHours []float64,
 	devices map[string]config.DeviceConfig,
 	energyByDevice, powerByDevice map[string][]float64,
-	tariff config.Tariff,
+	pricer Pricer,
 ) []Series {
 	get := paddedGetter(len(buckets))
-	monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, tariff, get)
+	monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, pricer, get)
 	if meter == nil {
 		return grouped
 	}
-	return append(grouped, deriveUnmonitored(buckets, bucketHours, monitored, *meter, tariff, false))
+	return append(grouped, deriveUnmonitored(buckets, bucketHours, monitored, *meter, pricer, false))
 }
 
 // deriveUnmonitored builds the synthetic "unmonitored" (rest-of-home) series:
@@ -686,7 +698,7 @@ func withUnmonitoredCatchAll(
 // When unclamped is true (Q4 diagnostic mode) the per-bucket residual is left as
 // the raw meter − monitored, NEGATIVES PRESERVED, for data-quality investigation;
 // avg_w then follows the signed energy and can go negative too.
-func deriveUnmonitored(buckets []time.Time, bucketHours []float64, monitored *Series, meter Series, tariff config.Tariff, unclamped bool) Series {
+func deriveUnmonitored(buckets []time.Time, bucketHours []float64, monitored *Series, meter Series, pricer Pricer, unclamped bool) Series {
 	n := len(buckets)
 	s := Series{
 		Key:   houseUnmonitoredKey,
@@ -696,7 +708,10 @@ func deriveUnmonitored(buckets []time.Time, bucketHours []float64, monitored *Se
 		Cost:  make([]float64, n),
 		AvgW:  make([]float64, n),
 	}
-	mult := tariff.Multiplier()
+
+	// Per-bucket energy at full precision, for the same reason buildSeries keeps it:
+	// the wire gets a rounded copy, the totals are computed from these.
+	raw := make([]float64, n)
 	for i := 0; i < n; i++ {
 		var monKWh float64
 		if monitored != nil {
@@ -706,19 +721,35 @@ func deriveUnmonitored(buckets []time.Time, bucketHours []float64, monitored *Se
 		if !unclamped && kwh < 0 {
 			kwh = 0
 		}
+		raw[i] = kwh
+
 		var w float64
 		if i < len(bucketHours) && bucketHours[i] > 0 {
 			w = kwh * 1000.0 / bucketHours[i]
 		}
 		s.KWh[i] = round.To(kwh, round.KWhDP)
-		s.Cost[i] = round.To(kwh*tariff.UnitRate*mult, round.MoneyDP)
+		// Priced at THIS bucket's rate, not at one rate for the window.
+		if rate, known := pricer.RateAt(buckets[i]); known {
+			s.Cost[i] = round.To(kwh*rate, round.MoneyDP)
+		}
 		s.AvgW[i] = round.To(w, round.WDP)
+	}
 
-		s.TotalKWh += s.KWh[i]
-		s.TotalCost += s.Cost[i]
+	// Totals through the SAME function buildSeries uses, accumulating raw and
+	// rounding once. This is the second producer of a Series, and when only the
+	// first was fixed it kept both bugs: a month's rest-of-home cost understated by
+	// a third, and missing prices rounded away to an UnpricedKWh of exactly zero —
+	// which reads as "nothing was missing", the one answer worse than a wrong total.
+	// It reaches the wire on /series?group_by=house, include_unmonitored=true, and
+	// /devices/unmonitored/series.
+	cost, unpriced := CostBuckets(buckets, raw, pricer)
+	for _, kwh := range raw {
+		s.TotalKWh += kwh
 	}
 	s.TotalKWh = round.To(s.TotalKWh, round.KWhDP)
-	s.TotalCost = round.To(s.TotalCost, round.MoneyDP)
+	s.TotalCost = round.To(cost, round.MoneyDP)
+	s.UnpricedKWh = round.To(unpriced, round.KWhDP)
+	s.rawKWh, s.rawCost = raw, rawCosts(buckets, raw, pricer)
 	return s
 }
 
@@ -795,7 +826,7 @@ func computeDrift(buckets []time.Time, monitored, meter *Series) DriftStats {
 // diagnostic mode. No-op when there is no unmonitored series or no meter. The
 // negative buckets deliberately break the monitored+unmonitored==meter
 // presentation — that is the point of the diagnostic.
-func rebuildUnmonitoredUnclamped(series []Series, buckets []time.Time, bucketHours []float64, devices map[string]config.DeviceConfig, energyByDevice, powerByDevice map[string][]float64, tariff config.Tariff) []Series {
+func rebuildUnmonitoredUnclamped(series []Series, buckets []time.Time, bucketHours []float64, devices map[string]config.DeviceConfig, energyByDevice, powerByDevice map[string][]float64, pricer Pricer) []Series {
 	idx := -1
 	for i, s := range series {
 		if s.Key == houseUnmonitoredKey {
@@ -806,11 +837,11 @@ func rebuildUnmonitoredUnclamped(series []Series, buckets []time.Time, bucketHou
 	if idx < 0 {
 		return series
 	}
-	monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, tariff, paddedGetter(len(buckets)))
+	monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, pricer, paddedGetter(len(buckets)))
 	if meter == nil {
 		return series
 	}
-	series[idx] = deriveUnmonitored(buckets, bucketHours, monitored, *meter, tariff, true)
+	series[idx] = deriveUnmonitored(buckets, bucketHours, monitored, *meter, pricer, true)
 	return series
 }
 
@@ -873,7 +904,7 @@ func MeterID(devices map[string]config.DeviceConfig) (string, bool) {
 // buildSeries sums member energy/power slices bucket-wise, derives cost, rounds
 // every value, and computes totals. All member slices are assumed to be length
 // len(buckets).
-func buildSeries(key, label, place, class string, buckets []time.Time, energy, power [][]float64, tariff config.Tariff) Series {
+func buildSeries(key, label, place, class string, buckets []time.Time, energy, power [][]float64, pricer Pricer) Series {
 	n := len(buckets)
 	s := Series{
 		Key:   key,
@@ -884,7 +915,10 @@ func buildSeries(key, label, place, class string, buckets []time.Time, energy, p
 		Cost:  make([]float64, n),
 		AvgW:  make([]float64, n),
 	}
-	mult := tariff.Multiplier()
+
+	// Per-bucket energy at full precision. The wire gets a rounded copy; the totals
+	// are computed from THESE values, not from the rounded ones — see below.
+	raw := make([]float64, n)
 	for i := 0; i < n; i++ {
 		var kwh, w float64
 		for _, e := range energy {
@@ -893,18 +927,56 @@ func buildSeries(key, label, place, class string, buckets []time.Time, energy, p
 		for _, p := range power {
 			w += p[i]
 		}
-		cost := kwh * tariff.UnitRate * mult
+		raw[i] = kwh
+
+		var cost float64
+		if rate, known := pricer.RateAt(buckets[i]); known {
+			cost = kwh * rate
+		}
 
 		s.KWh[i] = round.To(kwh, round.KWhDP)
 		s.Cost[i] = round.To(cost, round.MoneyDP)
 		s.AvgW[i] = round.To(w, round.WDP)
+	}
 
-		s.TotalKWh += s.KWh[i]
-		s.TotalCost += s.Cost[i]
+	// Totals accumulate RAW and round exactly once.
+	//
+	// Summing the rounded per-bucket values instead was harmless while the totals
+	// only fed a chart, and stopped being harmless when /bill started reading them:
+	// a month at half-hourly resolution is 1488 buckets, and 1488 roundings of up to
+	// half a hundredth of a penny can drift a bill by several pence in one
+	// direction. Pence on a bill is the kind of wrong that is small and completely
+	// indefensible. The same argument applies to the energy total, and with more
+	// force to UnpricedKWh, where rounding each part away produced a total of zero
+	// — which reads as "nothing was missing".
+	//
+	// CostBuckets is the SINGLE definition of pricing a bucket axis, shared with the
+	// cost path, so /series and /bill cannot disagree about what a window cost.
+	cost, unpriced := CostBuckets(buckets, raw, pricer)
+	for _, kwh := range raw {
+		s.TotalKWh += kwh
 	}
 	s.TotalKWh = round.To(s.TotalKWh, round.KWhDP)
-	s.TotalCost = round.To(s.TotalCost, round.MoneyDP)
+	s.TotalCost = round.To(cost, round.MoneyDP)
+	s.UnpricedKWh = round.To(unpriced, round.KWhDP)
+	s.rawKWh, s.rawCost = raw, rawCosts(buckets, raw, pricer)
 	return s
+}
+
+// rawCosts is the per-bucket cost at full precision, for folding onto a coarser
+// display axis. Same rule as CostBuckets: a bucket with no known rate contributes no
+// cost, and its energy is the caller's unpriced total rather than a free ride.
+func rawCosts(buckets []time.Time, kwh []float64, pricer Pricer) []float64 {
+	out := make([]float64, len(buckets))
+	for i := range buckets {
+		if i >= len(kwh) || kwh[i] == 0 {
+			continue
+		}
+		if rate, known := pricer.RateAt(buckets[i]); known {
+			out[i] = kwh[i] * rate
+		}
+	}
+	return out
 }
 
 // isMetered reports whether a class participates in energy series at all (any
@@ -1011,13 +1083,23 @@ func BuildSeries(
 	includeUnmonitored bool,
 	unclamped bool,
 	devices map[string]config.DeviceConfig,
-	tariff config.Tariff,
+	pricer Pricer,
 	groupLabels map[string]string,
 	loc *time.Location,
 ) (SeriesResponse, error) {
 	if loc == nil {
 		loc = time.UTC
 	}
+
+	// The DISPLAY axis is what the caller asked for; the COST axis is what the money
+	// has to be computed on. They differ only when the price varies faster than the
+	// requested bucket — see costAxisFor. Everything below runs on the cost axis, and
+	// the series are folded back onto the display axis at the end, so a slot-priced
+	// monthly chart costs the same as the monthly bill.
+	display := iv
+	iv = costAxisFor(display, pricer)
+	displayBuckets := BucketStarts(win, display, loc)
+
 	buckets := BucketStarts(win, iv, loc)
 	idx := bucketIndex(buckets)
 	hrs := bucketHours(buckets, win.Start, win.Stop)
@@ -1079,27 +1161,27 @@ func BuildSeries(
 		demux(rows, idx, powerByDevice, len(buckets), func(v float64, _ int) float64 { return v })
 	}
 
-	series := AssembleSeries(buckets, hrs, devices, energyByDevice, powerByDevice, tariff, groupBy, groupLabels)
+	series := AssembleSeries(buckets, hrs, devices, energyByDevice, powerByDevice, pricer, groupBy, groupLabels)
 
 	// R2: opt the single unmonitored catch-all into a device/room/class
 	// grouping so the parts sum to the whole house. group_by=house already carries
 	// it, so the flag is a no-op there (and on any future grouping it is ignored
 	// rather than double-adding).
 	if includeUnmonitored && resolveGroupBy(groupBy) != GroupByHouse {
-		series = withUnmonitoredCatchAll(series, buckets, hrs, devices, energyByDevice, powerByDevice, tariff)
+		series = withUnmonitoredCatchAll(series, buckets, hrs, devices, energyByDevice, powerByDevice, pricer)
 	}
 
 	// C3 drift detection runs whenever the decomposition is produced (house, or a
 	// catch-all was added) — before any unclamping, on the true residual.
 	var drift DriftStats
 	if resolveGroupBy(groupBy) == GroupByHouse || includeUnmonitored {
-		monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, tariff, paddedGetter(len(buckets)))
+		monitored, meter := houseParts(buckets, devices, energyByDevice, powerByDevice, pricer, paddedGetter(len(buckets)))
 		drift = computeDrift(buckets, monitored, meter)
 	}
 
 	// Q4: replace the clamped unmonitored series with its raw (signed) form.
 	if unclamped {
-		series = rebuildUnmonitoredUnclamped(series, buckets, hrs, devices, energyByDevice, powerByDevice, tariff)
+		series = rebuildUnmonitoredUnclamped(series, buckets, hrs, devices, energyByDevice, powerByDevice, pricer)
 	}
 
 	// An assembly that produced nothing marshals as "series": null, and a consumer
@@ -1110,14 +1192,23 @@ func BuildSeries(
 		series = []Series{}
 	}
 
+	// Fold back onto the axis the caller asked for. The window totals were computed
+	// on the fine axis and are carried across exactly; only the per-bucket arrays are
+	// aggregated.
+	outBuckets := buckets
+	if iv.Token != display.Token {
+		series = foldAll(series, buckets, displayBuckets, hrs)
+		outBuckets = displayBuckets
+	}
+
 	resp := SeriesResponse{
 		Window:   win.Label,
 		From:     win.Start.In(loc).Format(time.RFC3339),
 		To:       win.Stop.In(loc).Format(time.RFC3339),
-		Interval: iv.Token,
+		Interval: display.Token,
 		GroupBy:  resolveGroupBy(groupBy),
 		Shape:    ShapeColumns,
-		Buckets:  buckets,
+		Buckets:  outBuckets,
 		Series:   series,
 	}
 	// Coverage + staleness are house-only confidence signals (C12/C13).
@@ -1331,4 +1422,122 @@ func resolveBucket(t time.Time, idx map[int64]int, starts []int64) int {
 		return -1
 	}
 	return idx[starts[lo-1]]
+}
+
+// ---------------------------------------------------------------------------
+// Folding a fine cost axis onto a coarse display axis.
+//
+// A half-hourly tariff has 48 prices a day; /series asks for 1h buckets on
+// window=today and 1d on week/month. Pricing a bucket at the rate holding at its
+// START instant is exact when the axes line up and silently wrong otherwise — a 1d
+// bucket charges the whole day at its 00:00 rate, which measured +43.6% on a real
+// recorded day and understates badly on a typical cheap-night/dear-evening one.
+//
+// Approximating instead — spreading a coarse bucket's energy evenly across its slots
+// — would be exact for a fridge and badly wrong for a dishwasher, which is precisely
+// the load this tariff exists to shift. So the energy is QUERIED at slot resolution,
+// costed there, and only then folded up for display: kwh[] keeps the resolution the
+// caller asked for, cost[] is exact, and /series agrees with /bill by construction
+// rather than at one particular interval.
+// ---------------------------------------------------------------------------
+
+// costAxisFor returns the interval a window's MONEY must be computed on, given the
+// display interval the caller asked for and the pricer in force.
+//
+// Equal to the display interval unless the pricer varies faster than it — so a flat
+// tariff keeps querying one bucket a day for a monthly chart, and only a slot-priced
+// window pays for the finer query.
+func costAxisFor(display Interval, pricer Pricer) Interval {
+	g, ok := pricer.(Granularity)
+	if !ok {
+		return display
+	}
+	ri := g.RateInterval()
+	if ri <= 0 || display.Duration <= ri {
+		return display
+	}
+	return CostingInterval()
+}
+
+// foldIndex maps each fine bucket to the display bucket containing it.
+//
+// Containment by timestamp rather than a fixed ratio, because a local calendar day is
+// 46, 48 or 50 half hours across a DST changeover — a ratio would misalign every
+// bucket after the transition, which is the one day of the year nobody checks.
+func foldIndex(fine, display []time.Time) []int {
+	out := make([]int, len(fine))
+	j := 0
+	for i, f := range fine {
+		// Advance while the NEXT display bucket still starts at or before this fine
+		// bucket. Fine buckets before the first display bucket fold into it.
+		for j+1 < len(display) && !display[j+1].After(f) {
+			j++
+		}
+		out[i] = j
+	}
+	return out
+}
+
+// foldSeries aggregates one series from the fine cost axis onto the display axis.
+//
+// Energy and money sum from the FULL-PRECISION carriers and are rounded once per
+// display bucket; summing the already-rounded wire values would reintroduce, per
+// bucket, the drift this file fixes at the window level. Average watts is an
+// hours-weighted mean, because summing watts over a day is not a wattage.
+//
+// The window totals are carried across untouched: they were computed on the fine axis
+// and are already exact, so folding must not recompute and cannot improve them.
+func foldSeries(s Series, fine, display []time.Time, fineHours []float64, at []int) Series {
+	n := len(display)
+	out := s
+	out.KWh = make([]float64, n)
+	out.Cost = make([]float64, n)
+	out.AvgW = make([]float64, n)
+
+	kwh := make([]float64, n)
+	cost := make([]float64, n)
+	wh := make([]float64, n) // watt-hours, for the weighted mean
+	hours := make([]float64, n)
+
+	for i := range fine {
+		j := at[i]
+		if j >= n {
+			continue
+		}
+		if s.rawKWh != nil && i < len(s.rawKWh) {
+			kwh[j] += s.rawKWh[i]
+		} else if i < len(s.KWh) {
+			kwh[j] += s.KWh[i]
+		}
+		if s.rawCost != nil && i < len(s.rawCost) {
+			cost[j] += s.rawCost[i]
+		} else if i < len(s.Cost) {
+			cost[j] += s.Cost[i]
+		}
+		if i < len(s.AvgW) && i < len(fineHours) {
+			wh[j] += s.AvgW[i] * fineHours[i]
+			hours[j] += fineHours[i]
+		}
+	}
+
+	for j := 0; j < n; j++ {
+		out.KWh[j] = round.To(kwh[j], round.KWhDP)
+		out.Cost[j] = round.To(cost[j], round.MoneyDP)
+		if hours[j] > 0 {
+			out.AvgW[j] = round.To(wh[j]/hours[j], round.WDP)
+		}
+	}
+	// The carriers describe the fine axis and are meaningless once folded.
+	out.rawKWh, out.rawCost = nil, nil
+	return out
+}
+
+// foldAll folds every series in a response onto the display axis.
+func foldAll(series []Series, fine, display []time.Time, fineHours []float64) []Series {
+	at := foldIndex(fine, display)
+	out := make([]Series, len(series))
+	for i, s := range series {
+		out[i] = foldSeries(s, fine, display, fineHours, at)
+	}
+	return out
 }
