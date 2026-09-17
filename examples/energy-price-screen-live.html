@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Electricity price today</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #F5F7F6;
+    --ink: #1F2A2E;
+    --muted: #69767A;
+    --rule: #DCE2E0;
+    --fine-bg: #CDE7D1;  --fine-ink: #1D5E34;
+    --wait-bg: #F3E1A6;  --wait-ink: #6B4A00;
+    --dear-bg: #F2C3BA;  --dear-ink: #8E2718;
+    --none-bg: #E3E8E6;
+    --headline-size: clamp(2.4rem, 6vw, 5.5rem);
+    --window: #3D6C99;   --window-bg: rgba(61, 108, 153, 0.14);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* The status field: its colour is readable from across the room */
+  .status {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    grid-template-areas: "headline when" "facts facts";
+    gap: 0 2rem;
+    padding: clamp(1.25rem, 3.5vw, 3rem) clamp(1.25rem, 5vw, 4rem);
+    background: var(--wait-bg);
+    color: var(--wait-ink);
+    transition: background-color 0.8s ease, color 0.8s ease;
+  }
+  .status[data-state="fine"] { background: var(--fine-bg); color: var(--fine-ink); }
+  .status[data-state="wait"] { background: var(--wait-bg); color: var(--wait-ink); }
+  .status[data-state="dear"] { background: var(--dear-bg); color: var(--dear-ink); }
+  .status[data-state="none"] { background: var(--none-bg); color: var(--ink); }
+
+  h1 {
+    grid-area: headline;
+    font-size: var(--headline-size);
+    line-height: 1;
+    font-weight: 700;
+    letter-spacing: -0.015em;
+  }
+  .when { grid-area: when; align-self: start; text-align: right; }
+  .clock { font-size: var(--headline-size); font-weight: 700; line-height: 1; letter-spacing: -0.015em; }
+  .when-sub { display: flex; justify-content: flex-end; align-items: center; gap: 0.6rem; margin-top: 0.3em; }
+  .date { font-size: clamp(1rem, 1.6vw, 1.3rem); }
+  .back {
+    margin-top: 0.35em;
+    padding: 0.15em 0.8em;
+    font: inherit;
+    font-size: clamp(1rem, 1.6vw, 1.3rem);
+    font-weight: 700;
+    color: inherit;
+    background: transparent;
+    border: 2px solid currentColor;
+    border-radius: 0.5em;
+    cursor: pointer;
+  }
+  .back:hover { background: rgba(255, 255, 255, 0.4); }
+  .back:focus-visible { outline: 3px solid currentColor; outline-offset: 3px; }
+
+  .facts {
+    grid-area: facts;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 1rem clamp(2rem, 7vw, 6rem);
+    margin-top: clamp(1rem, 2.5vw, 2rem);
+  }
+  .fact .label { font-size: clamp(1rem, 1.6vw, 1.3rem); }
+  .fact .value { font-size: clamp(1.6rem, 3.6vw, 2.9rem); font-weight: 700; line-height: 1.15; }
+  .fact .detail { font-size: clamp(1rem, 1.6vw, 1.3rem); }
+  [hidden] { display: none !important; }
+
+  .chart {
+    position: relative;
+    min-height: 260px;
+    padding: clamp(0.5rem, 1.5vw, 1rem) clamp(0.5rem, 3vw, 3rem) 0;
+  }
+  .plot { position: absolute; inset: clamp(0.5rem, 1.5vw, 1rem) clamp(0.5rem, 3vw, 3rem) 0; }
+  .plot svg { display: block; width: 100%; height: 100%; overflow: visible; cursor: pointer; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+  .plot svg:focus:not(:focus-visible) { outline: none; }
+  .plot svg:focus-visible { outline: 3px solid var(--window); outline-offset: 4px; border-radius: 4px; }
+
+  .grid { stroke: var(--rule); stroke-width: 1; }
+  .zero { stroke: var(--muted); stroke-width: 1.5; }
+  .divider { stroke: var(--muted); stroke-width: 1.5; stroke-dasharray: 6 4; }
+  .axis { fill: var(--muted); }
+  .zone-fine { fill: var(--fine-bg); opacity: 0.4; }
+  .zone-dear { fill: var(--dear-bg); opacity: 0.4; }
+  .window { fill: var(--window-bg); }
+  .window-label { fill: var(--window); font-weight: 700; }
+  .area { fill: var(--ink); opacity: 0.05; }
+  .line { fill: none; stroke-width: 3; stroke-linejoin: round; }
+  .line.past { stroke: var(--muted); opacity: 0.5; }
+  .line.future { stroke: var(--ink); }
+  .now { stroke: var(--ink); stroke-width: 3; stroke-dasharray: 0.5 7; stroke-linecap: round; }
+  .now-label { fill: var(--ink); font-weight: 700; }
+  .real-now { stroke: var(--muted); stroke-width: 1.5; }
+  .real-now-label { fill: var(--muted); }
+  .dot { stroke: var(--paper); stroke-width: 3; }
+  .avg { stroke-width: 6; stroke-linecap: round; opacity: 0.9; }
+  .avg-best { stroke: var(--window); }
+  .avg-run[data-state="fine"] { stroke: var(--fine-ink); }
+  .avg-run[data-state="wait"] { stroke: var(--wait-ink); }
+  .avg-run[data-state="dear"] { stroke: var(--dear-ink); }
+  .swatch.bar { height: 0.3em; vertical-align: 0.15em; border-radius: 1em; }
+  .dot[data-state="fine"] { fill: var(--fine-ink); }
+  .dot[data-state="wait"] { fill: var(--wait-ink); }
+  .dot[data-state="dear"] { fill: var(--dear-ink); }
+
+  .key {
+    padding: 0.75rem clamp(1.25rem, 5vw, 4rem) 1rem;
+    color: var(--muted);
+    font-size: clamp(0.85rem, 1.2vw, 1rem);
+    line-height: 1.5;
+  }
+  .swatch {
+    display: inline-block;
+    width: 0.8em; height: 0.8em;
+    border-radius: 2px;
+    vertical-align: -0.05em;
+    margin-right: 0.3em;
+  }
+  .sample { display: block; margin-bottom: 0.35rem; color: var(--ink); font-weight: 700; }
+  .key-item { white-space: nowrap; margin-right: 0.8em; }
+
+  @media (max-width: 600px) {
+    .status { grid-template-columns: 1fr; grid-template-areas: "when" "headline" "facts"; }
+    .when { text-align: left; margin-bottom: 0.75rem; display: flex; gap: 0.75rem; align-items: baseline; }
+    .when-sub { margin-top: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .status { transition: none; }
+  }
+
+  /* Set once, then left alone: a wall screen should not show its plumbing. */
+  .settings { display: block; margin-top: 0.6rem; }
+  .settings summary { cursor: pointer; }
+  .settings label { display: inline-flex; gap: 0.4em; align-items: baseline; margin: 0.5rem 1rem 0 0; }
+  .settings input { font: inherit; padding: 0.2em 0.4em; border: 1px solid var(--rule); border-radius: 4px; min-width: 14ch; }
+</style>
+</head>
+<body>
+
+<header class="status" id="status" data-state="wait">
+  <h1 id="headline">Loading prices</h1>
+  <div class="when">
+    <div class="clock" id="clock"></div>
+    <div class="when-sub">
+      <div class="date" id="date"></div>
+      <button class="back" id="back" type="button" hidden>Back to now</button>
+    </div>
+  </div>
+  <div class="facts">
+    <div class="fact" id="fact-price">
+      <div class="value" id="rank"></div>
+      <div class="detail" id="price"></div>
+    </div>
+    <div class="fact">
+      <div class="label">Cheapest slot</div>
+      <div class="value" id="best"></div>
+      <div class="detail" id="best-detail"></div>
+    </div>
+  </div>
+</header>
+
+<main class="chart">
+  <div class="plot" id="plot">
+    <svg id="svg" role="slider" tabindex="0" aria-label="Start time. Tap the chart, or use the left and right arrow keys; Escape returns to now."></svg>
+  </div>
+</main>
+
+<footer class="key">
+  <span class="sample" id="sample" hidden></span>
+  <span class="key-item">Tap the chart to pick a start time.</span>
+  <span class="key-item">Octopus Agile, including VAT.</span>
+  <span class="key-item"><span class="swatch" style="background:var(--window-bg);outline:1px solid var(--window)"></span>Cheapest slot after the dotted line</span>
+  <span class="key-item"><span class="swatch bar" style="background:var(--ink)"></span>2-hour average price</span>
+  <span class="key-item"><span class="swatch" style="background:var(--fine-bg)"></span>Within 3p of the cheapest slot</span>
+  <span class="key-item"><span class="swatch" style="background:var(--dear-bg)"></span>10p or more above it</span>
+  <details class="settings">
+    <summary>Connection</summary>
+    <label>Service <input id="base" type="url" spellcheck="false" placeholder="http://localhost:8585"></label>
+    <label>Token <input id="token" type="password" spellcheck="false" placeholder="bearer token"></label>
+  </details>
+</footer>
+
+<script>
+
+const SLOT = 30 * 60 * 1000;
+const HOUR = 60 * 60 * 1000;
+const WINDOW_SLOTS = 4;                 // 2 hours
+// How much waiting would save, in pence per kWh, before the advice changes
+const FINE_WITHIN = 3;                  // saving less than this: fine to run
+const VERY_EXPENSIVE_FROM = 10;         // saving this much or more: very expensive
+const IDLE_RESET = 2 * 60 * 1000;       // go back to now after 2 minutes untouched
+
+let selected = null;  // chosen start time in ms, or null to follow the clock
+let idleTimer = null;
+let layout = null;    // chart geometry from the last render, for turning taps into times
+
+// ---- Live state, filled by the API ----
+let slots = [];        // {start, end, price, band}
+let knownTo = null;    // how far countinghouse holds prices: the publication detector
+let lastOk = null;     // when we last got a good response
+let lastError = null;  // why the last attempt failed, if it did
+let justPublished = false;
+
+// ---- UK time helpers ----
+const partsFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+});
+const weekdayFmt = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", weekday: "short" });
+const dateFmt = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "Europe/London", weekday: "short", day: "numeric", month: "short"
+});
+function london(ms) {
+  const o = {};
+  for (const p of partsFmt.formatToParts(ms)) o[p.type] = p.value;
+  return { y: +o.year, m: +o.month, d: +o.day, h: +o.hour % 24, min: +o.minute };
+}
+const pad = n => String(n).padStart(2, "0");
+const dayKey = ms => { const p = london(ms); return `${p.y}-${pad(p.m)}-${pad(p.d)}`; };
+const hhmm = ms => { const p = london(ms); return `${pad(p.h)}:${pad(p.min)}`; };
+function ukMidnight(y, m, d) {
+  const guess = Date.UTC(y, m - 1, d);
+  const p = london(guess);
+  return guess - (p.h * 60 + p.min) * 60000;
+}
+// Prices can go negative, so use a proper minus sign and avoid showing "-0.0p"
+const pence = p => {
+  const r = Math.round(p * 10) / 10;
+  return `${r < 0 ? "\u2212" : ""}${Math.abs(r).toFixed(1)}p`;
+};
+
+function duration(ms) {
+  const mins = Math.max(1, Math.round(ms / 60000));
+  const h = Math.floor(mins / 60), m = mins % 60;
+  if (h === 0) return `${m} min`;
+  if (m === 0) return `${h} hour${h > 1 ? "s" : ""}`;
+  return `${h}h ${m}m`;
+}
+
+// ---- Talking to countinghouse ----
+//
+// One call does the whole screen. We ask for two whole local days from this
+// morning's midnight WITHOUT knowing whether tomorrow has been published yet, and
+// the response tells us which we got:
+//
+//   slots[]   the curve. `price` is pence per kWh, VAT inclusive, and signed.
+//   known_to  how far prices run AT ALL. This is the publication detector: when it
+//             moves past tonight's midnight, tomorrow has landed.
+//   complete  false whenever the window reaches past known_to, which is the normal
+//             state for most of the day — never treat it as an error.
+//
+// Deriving `hasTomorrow` from the slots we got back (below) is therefore honest
+// rather than a guess: known_to says where the curve stops, so a short answer is
+// distinguishable from a hole in the archive.
+const STORE = { base: "eps_base", token: "eps_token" };
+const cfg = {
+  base: localStorage.getItem(STORE.base) || window.CH_BASE || "http://localhost:8585",
+  token: localStorage.getItem(STORE.token) || window.CH_TOKEN || ""
+};
+
+// The supplier publishes tomorrow in the late afternoon (observed 15:54, 15:55), so
+// poll briskly across that window and lazily the rest of the day. The clock marker
+// moves on its own timer and needs no network at all.
+const WATCH_HOURS = [15, 16];
+const PERIOD_WATCH = 60 * 1000;
+const PERIOD_IDLE = 5 * 60 * 1000;
+let refreshTimer = null;
+
+function priceURL() {
+  const p = london(Date.now());
+  const from = new Date(ukMidnight(p.y, p.m, p.d)).toISOString();
+  const to = new Date(ukMidnight(p.y, p.m, p.d + 2)).toISOString();
+  return `${cfg.base}/prices?window=custom`
+    + `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+}
+
+async function fetchPrices() {
+  // A plain fetch: the browser revalidates with If-None-Match and takes the 304 by
+  // itself, so most polls cost a header exchange rather than a day of slots.
+  const res = await fetch(priceURL(), {
+    headers: cfg.token ? { Authorization: "Bearer " + cfg.token } : {}
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const d = await res.json();
+  if (d.half_hourly === false) throw new Error("tariff is flat-rate, so there is no curve");
+  return d;
+}
+
+function applyPrices(d) {
+  slots = (d.slots || []).map(s => ({
+    start: Date.parse(s.valid_from),
+    // valid_to is optional in the schema; a slot is half an hour when it is absent.
+    end: s.valid_to ? Date.parse(s.valid_to) : Date.parse(s.valid_from) + SLOT,
+    price: s.price,
+    band: s.band
+  })).sort((a, b) => a.start - b.start);
+
+  const was = knownTo;
+  knownTo = d.known_to ? Date.parse(d.known_to) : null;
+  justPublished = was != null && knownTo != null && knownTo > was;
+  lastOk = Date.now();
+  lastError = null;
+}
+
+async function refresh() {
+  try {
+    applyPrices(await fetchPrices());
+  } catch (e) {
+    // Keep the last good frame. A kitchen screen showing a slightly old curve tells
+    // somebody more than a blank one does.
+    lastError = e.message;
+  }
+  render();
+  clearTimeout(refreshTimer);
+  const h = london(Date.now()).h;
+  refreshTimer = setTimeout(refresh,
+    WATCH_HOURS.includes(h) ? PERIOD_WATCH : PERIOD_IDLE);
+}
+
+// ---- Work out what to show ----
+function buildModel(realNow, chosen) {
+  const [y, m, d] = dayKey(realNow).split("-").map(Number);
+  const dayStart = ukMidnight(y, m, d);
+  const todayEnd = ukMidnight(y, m, d + 1);
+  // Once tomorrow's prices are published (Agile does this in the afternoon), include them
+  // so the cheapest slot can be tomorrow, e.g. overnight or a sunny-day price plunge.
+  // We asked for two days either way, so this reads what actually came back.
+  const hasTomorrow = slots.some(s => s.start >= todayEnd && s.start < ukMidnight(y, m, d + 2));
+  const dayEnd = hasTomorrow ? ukMidnight(y, m, d + 2) : todayEnd;
+  const now = realNow;
+
+  const day = slots.filter(s => s.start >= dayStart && s.start < dayEnd);
+  if (!day.length) {
+    // Nothing for today yet: a cold archive, a misconfigured tariff, or we have not
+    // had a successful response. Say so rather than drawing an empty chart.
+    return { dayStart, dayEnd, todayEnd, hasTomorrow, now, at: now, isNow: true,
+             nowSlot: null, day: [], current: null, best: null, run: null,
+             saving: 0, reference: null, state: "none" };
+  }
+  // A chosen time only counts if it lands on a known price
+  const first = day[0], last = day[day.length - 1];
+  const isNow = !(chosen != null && first && chosen >= first.start && chosen < last.end);
+  const at = isNow ? now : chosen;
+  const nowSlot = day.find(s => s.start <= now && now < s.end) || null;
+
+  const current = day.find(s => s.start <= at && at < s.end) || null;
+  const avgOf = list => list.reduce((a, s) => a + s.price, 0) / list.length;
+
+  // Cheapest 2-hour block that hasn't finished by the chosen time
+  let best = null;
+  const ahead = day.filter(s => s.end > at);
+  for (let i = 0; i + WINDOW_SLOTS <= ahead.length; i++) {
+    const w = ahead.slice(i, i + WINDOW_SLOTS);
+    if (w[w.length - 1].end - w[0].start !== WINDOW_SLOTS * SLOT) continue;
+    const avg = avgOf(w);
+    if (!best || avg < best.avg) best = { start: w[0].start, end: w[w.length - 1].end, avg };
+  }
+
+  // What a 2-hour run starting at the chosen time would average,
+  // and how much waiting for the cheapest block would save (pence per kWh)
+  let run = null, saving = 0, reference = null, state = "none";
+  if (current) {
+    const runSlots = ahead.slice(0, WINDOW_SLOTS);
+    run = { start: runSlots[0].start, end: runSlots[runSlots.length - 1].end, avg: avgOf(runSlots) };
+    // Near the end of the known prices there may be no full 2 hours left: compare with the cheapest slot left
+    reference = best ? best.avg : Math.min(...ahead.map(s => s.price));
+    saving = Math.max(0, run.avg - reference);
+    if (saving >= VERY_EXPENSIVE_FROM) state = "dear";
+    else if (saving >= FINE_WITHIN) state = "wait";
+    else state = "fine";
+  }
+
+
+  return { dayStart, dayEnd, todayEnd, hasTomorrow, now, at, isNow, nowSlot, day, current, best, run, saving, reference, state };
+}
+
+// ---- Header ----
+const $ = id => document.getElementById(id);
+const HEADLINES = {
+  fine: "Fine to run",
+  wait: "Wait if you can",
+  dear: "Very expensive",
+  none: "No price yet"
+};
+const setText = (id, text) => { const e = $(id); if (e.textContent !== text) e.textContent = text; };
+
+function renderStatus(M, realNow) {
+  $("status").dataset.state = M.state;
+  setText("headline", HEADLINES[M.state]);
+  // The clock shows the chosen time while previewing, and the real time otherwise
+  setText("clock", hhmm(M.isNow ? realNow : M.at));
+  setText("date", dateFmt.format(M.isNow ? realNow : M.at));
+  $("back").hidden = M.isNow;
+
+  $("fact-price").hidden = !M.current;
+  if (M.current) {
+    const p = M.current.price;
+    setText("rank", `${pence(p)} per kWh`);
+    // The advice is based on the whole run, so say what the run averages
+    // Label the run length in hours, e.g. "2hr", "1.5hr", or "30min" near the end of the day
+    const runMins = Math.round((M.run.end - M.run.start) / 60000);
+    const runLength = runMins < 60 ? `${runMins}min` : `${runMins / 60}hr`;
+    setText("price", `${runLength} average: ${pence(M.run.avg)}`);
+  }
+
+  if (M.best) {
+    const started = M.best.start <= M.at;
+    const gap = duration(M.best.start - M.at);
+    setText("best", started ? "Now" : `In ${gap}`);
+    const tomorrow = dayKey(M.best.start) !== dayKey(M.at) ? "Tomorrow " : "";
+    const span = started ? `Until ${hhmm(M.best.end)}` : `${tomorrow}${hhmm(M.best.start)} to ${hhmm(M.best.end)}`;
+    let gain;
+    if (started) gain = `averaging ${pence(M.best.avg)}`;
+    else if (M.saving < 0.1) gain = "about the same price";
+    else gain = `save ${pence(M.saving)} per kWh`;
+    setText("best-detail", `${span}; ${gain}`);
+  } else {
+    setText("best", "None left");
+    const last = M.day[M.day.length - 1];
+    const lastDay = last && dayKey(last.start) !== dayKey(M.at) ? " tomorrow" : "";
+    setText("best-detail", last ? `Prices end at ${hhmm(last.end)}${lastDay}` : "No prices loaded");
+  }
+
+  // The footer note carries the two things a screen nobody reboots needs to know:
+  // whether what it is showing is current, and how far the prices run.
+  const note = $("sample");
+  let text = "";
+  if (lastError) {
+    text = lastOk
+      ? `Can't reach countinghouse (${lastError}) — showing prices as of ${hhmm(lastOk)}.`
+      : `Can't reach countinghouse (${lastError}).`;
+  } else if (justPublished) {
+    text = "Tomorrow's prices have just arrived.";
+  } else if (knownTo) {
+    const day = dayKey(knownTo) !== dayKey(M.now) ? " tomorrow" : "";
+    text = M.hasTomorrow
+      ? `Prices to ${hhmm(knownTo)}${day}.`
+      : `Prices to ${hhmm(knownTo)} tonight; tomorrow's arrive after 4pm.`;
+  }
+  note.hidden = !text;
+  note.textContent = text;
+}
+
+// ---- Chart ----
+function renderChart(M) {
+  const box = $("plot");
+  const W = box.clientWidth, H = box.clientHeight;
+  if (!W || !H || !M.day.length) return;
+
+  const fs = Math.round(Math.min(18, Math.max(13, W / 64)));
+  const L = fs * 3.2, R = fs * 0.6, T = fs * 2.6, B = fs * 2.4;
+  const pw = W - L - R, ph = H - T - B;
+
+  const maxPrice = Math.max(...M.day.map(s => s.price));
+  const minPrice = Math.min(...M.day.map(s => s.price));
+  const step = maxPrice - Math.min(0, minPrice) > 90 ? 20 : 10;
+  const yMax = Math.ceil((maxPrice + 2) / step) * step;
+  const yMin = minPrice < 0 ? Math.floor((minPrice - 1) / step) * step : 0;
+  const X = ms => L + ((ms - M.dayStart) / (M.dayEnd - M.dayStart)) * pw;
+  const Y = p => T + ph - ((Math.min(yMax, Math.max(yMin, p)) - yMin) / (yMax - yMin)) * ph;
+  const base = Y(yMin);   // bottom of the plot
+  const zeroY = Y(0);     // the 0p line, above the bottom when prices go negative
+  const priceLabel = v => `${v < 0 ? "\u2212" : ""}${Math.abs(v)}p`;
+  const approxWidth = text => text.length * fs * 0.56;
+  const clampX = (x, text) => Math.min(Math.max(x, L + approxWidth(text) / 2), L + pw - approxWidth(text) / 2);
+
+  let s = "";
+
+  // Bands
+  // Bands are measured from the cheapest 2 hours still to come, so they match the advice
+  if (M.reference != null) {
+    const fineTop = Math.max(yMin, Math.min(yMax, M.reference + FINE_WITHIN));
+    const dearBottom = Math.max(yMin, M.reference + VERY_EXPENSIVE_FROM);
+    s += `<rect class="zone-fine" x="${L}" y="${Y(fineTop)}" width="${pw}" height="${base - Y(fineTop)}"/>`;
+    if (dearBottom < yMax) s += `<rect class="zone-dear" x="${L}" y="${T}" width="${pw}" height="${Y(dearBottom) - T}"/>`;
+  }
+  if (M.best) s += `<rect class="window" x="${X(M.best.start)}" y="${T}" width="${X(M.best.end) - X(M.best.start)}" height="${ph}"/>`;
+
+  // Grid and axes
+  for (let v = yMin; v <= yMax; v += step) {
+    const cls = v === 0 && yMin < 0 ? "zero" : "grid";
+    s += `<line class="${cls}" x1="${L}" x2="${L + pw}" y1="${Y(v)}" y2="${Y(v)}"/>`;
+    s += `<text class="axis" x="${L - fs * 0.5}" y="${Y(v)}" text-anchor="end" dominant-baseline="middle">${priceLabel(v)}</text>`;
+  }
+
+  // Hour labels; when tomorrow is shown, its midnight is labelled with the day name
+  const hours = M.hasTomorrow ? 48 : 24;
+  const tickHours = M.hasTomorrow ? (pw / 8 < fs * 4 ? 12 : 6) : (pw / 8 < fs * 4 ? 6 : 3);
+  const ticks = hours / tickHours;
+  for (let k = 0; k <= ticks; k++) {
+    const h = k * tickHours;
+    const x = k === ticks ? L + pw : X(M.dayStart + h * HOUR);
+    const anchor = k === 0 ? "start" : k === ticks ? "end" : "middle";
+    const label = k === ticks ? "24:00" : h === 24 ? weekdayFmt.format(M.todayEnd) : pad(h % 24) + ":00";
+    s += `<line class="grid" x1="${x}" x2="${x}" y1="${base}" y2="${base + fs * 0.4}"/>`;
+    s += `<text class="axis" x="${x}" y="${base + fs * 1.6}" text-anchor="${anchor}">${label}</text>`;
+  }
+  if (M.hasTomorrow) {
+    s += `<line class="divider" x1="${X(M.todayEnd)}" x2="${X(M.todayEnd)}" y1="${T}" y2="${base}"/>`;
+  }
+
+  // Price line (step shape, since each price holds for a half hour)
+  let line = "", area = "";
+  M.day.forEach((slot, i) => {
+    const y = Y(slot.price);
+    const prev = M.day[i - 1];
+    if (!prev || prev.end !== slot.start) {
+      if (prev) area += `V${zeroY}Z`;
+      line += `M${X(slot.start)},${y}`;
+      area += `M${X(slot.start)},${zeroY}V${y}`;
+    } else {
+      line += `V${y}`;
+      area += `V${y}`;
+    }
+    line += `H${X(slot.end)}`;
+    area += `H${X(slot.end)}`;
+  });
+  area += `V${zeroY}Z`;
+
+  const xNow = X(M.now);
+  s += `<defs>
+    <clipPath id="clip-past"><rect x="0" y="0" width="${Math.max(0, xNow)}" height="${H}"/></clipPath>
+    <clipPath id="clip-future"><rect x="${xNow}" y="0" width="${Math.max(0, W - xNow)}" height="${H}"/></clipPath>
+  </defs>`;
+  s += `<path class="area" d="${area}"/>`;
+  s += `<path class="line past" clip-path="url(#clip-past)" d="${line}"/>`;
+  s += `<path class="line future" clip-path="url(#clip-future)" d="${line}"/>`;
+
+  // Average price over 2 hours from the dotted line, and over the cheapest 2 hours
+  if (M.best) {
+    s += `<line class="avg avg-best" x1="${X(M.best.start)}" x2="${X(M.best.end)}" y1="${Y(M.best.avg)}" y2="${Y(M.best.avg)}"/>`;
+  }
+  if (M.run && !(M.best && M.best.start <= M.at)) {
+    s += `<line class="avg avg-run" data-state="${M.state}" x1="${X(M.at)}" x2="${X(M.run.end)}" y1="${Y(M.run.avg)}" y2="${Y(M.run.avg)}"/>`;
+  }
+
+  const labelY = T - fs * 0.8;
+  const xAt = X(M.at);
+  const atLabel = M.isNow ? "Now" : hhmm(M.at);
+  const nowInDay = M.now >= M.dayStart && M.now <= M.dayEnd;
+  const showRealNow = !M.isNow && nowInDay;
+
+  // Cheapest window label, moved inside the plot if it would hit a marker label
+  if (M.best) {
+    const text = "Cheapest slot";
+    const cx = (X(M.best.start) + X(M.best.end)) / 2;
+    const near = x => Math.abs(cx - x) < approxWidth(text) / 2 + fs * 2.5;
+    const y = near(xAt) || (showRealNow && near(xNow)) ? T + fs * 1.4 : labelY;
+    s += `<text class="window-label" x="${clampX(cx, text)}" y="${y}" text-anchor="middle">${text}</text>`;
+  }
+
+  // Thin solid line for the real time while previewing another time
+  if (showRealNow) {
+    s += `<line class="real-now" x1="${xNow}" x2="${xNow}" y1="${T}" y2="${base}"/>`;
+    if (Math.abs(xNow - xAt) > fs * 4) {
+      s += `<text class="real-now-label" x="${clampX(xNow, "Now")}" y="${labelY}" text-anchor="middle">Now</text>`;
+    }
+  }
+
+  // Dotted line for the time the header is describing
+  if (M.at >= M.dayStart && M.at <= M.dayEnd) {
+    s += `<line class="now" x1="${xAt}" x2="${xAt}" y1="${T - fs * 0.3}" y2="${base}"/>`;
+    s += `<text class="now-label" x="${clampX(xAt, atLabel)}" y="${labelY}" text-anchor="middle">${atLabel}</text>`;
+    if (M.current) s += `<circle class="dot" data-state="${M.state}" cx="${xAt}" cy="${Y(M.current.price)}" r="${fs * 0.45}"/>`;
+  }
+
+  layout = {
+    L, pw, dayStart: M.dayStart, dayEnd: M.dayEnd, now: M.now,
+    firstStart: M.day[0].start, lastStart: M.day[M.day.length - 1].start,
+    nowSlotStart: M.nowSlot ? M.nowSlot.start : null
+  };
+
+  const svg = $("svg");
+  svg.setAttribute("aria-valuetext", M.isNow ? `Now, ${hhmm(M.now)}` : hhmm(M.at));
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.style.fontSize = fs + "px";
+  svg.innerHTML = s;
+}
+
+function render() {
+  const realNow = Date.now();
+  const M = buildModel(realNow, selected);
+  if (M.isNow) selected = null; // chosen time no longer valid, e.g. the day rolled over
+  renderStatus(M, realNow);
+  renderChart(M);
+}
+
+// ---- Choosing a time ----
+function choose(t) {
+  clearTimeout(idleTimer);
+  if (t != null) idleTimer = setTimeout(() => choose(null), IDLE_RESET);
+  if (t === selected) return;
+  selected = t;
+  render();
+}
+
+const clampSlot = t => Math.min(Math.max(t, layout.firstStart), layout.lastStart);
+
+function timeFromPointer(e) {
+  const box = $("svg").getBoundingClientRect();
+  const f = Math.min(1, Math.max(0, (e.clientX - box.left - layout.L) / layout.pw));
+  const raw = layout.dayStart + f * (layout.dayEnd - layout.dayStart);
+  if (Math.abs(raw - layout.now) < 15 * 60000) return null; // tapping near now snaps back to now
+  return clampSlot(layout.dayStart + Math.round((raw - layout.dayStart) / SLOT) * SLOT);
+}
+
+const svgEl = $("svg");
+let dragging = false;
+svgEl.addEventListener("pointerdown", e => {
+  if (!layout) return;
+  e.preventDefault();
+  dragging = true;
+  svgEl.setPointerCapture(e.pointerId);
+  choose(timeFromPointer(e));
+});
+svgEl.addEventListener("pointermove", e => { if (dragging && layout) choose(timeFromPointer(e)); });
+svgEl.addEventListener("pointerup", () => { dragging = false; });
+svgEl.addEventListener("pointercancel", () => { dragging = false; });
+
+svgEl.addEventListener("keydown", e => {
+  if (!layout) return;
+  const from = selected ?? layout.nowSlotStart ?? layout.firstStart;
+  let t;
+  if (e.key === "ArrowRight") t = clampSlot(from + SLOT);
+  else if (e.key === "ArrowLeft") t = clampSlot(from - SLOT);
+  else if (e.key === "Escape" || e.key === "Home") t = null;
+  else return;
+  e.preventDefault();
+  choose(t);
+});
+
+$("back").addEventListener("click", () => choose(null));
+
+// ---- Settings, so a wall screen can be pointed at an instance once ----
+const baseInput = $("base"), tokenInput = $("token");
+baseInput.value = cfg.base;
+tokenInput.value = cfg.token;
+function saveSettings() {
+  cfg.base = baseInput.value.trim().replace(/\/$/, "");
+  cfg.token = tokenInput.value.trim();
+  localStorage.setItem(STORE.base, cfg.base);
+  localStorage.setItem(STORE.token, cfg.token);
+  refresh();
+}
+baseInput.addEventListener("change", saveSettings);
+tokenInput.addEventListener("change", saveSettings);
+
+// The dotted line follows the clock: no network involved in keeping it current.
+render();
+setInterval(render, 15000);
+new ResizeObserver(render).observe($("plot"));
+
+// Prices are fetched on their own, much slower, schedule.
+refresh();
+</script>
+</body>
+</html>
