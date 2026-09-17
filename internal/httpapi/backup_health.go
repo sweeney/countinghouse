@@ -10,13 +10,17 @@ import "time"
 // should be able to produce any state without standing up an uploader. main.go
 // adapts between them.
 //
-// Nothing here names a credential, and nothing may be added that does. /healthz is
-// built to be polled by anything, and the R2 secret is the most valuable thing in
-// the process to leak. Bucket and env are locations, not secrets, and they are here
-// because "backed up where?" is the first question after "backed up?".
+// Nothing here names a credential, and nothing may be added that does — the R2 secret
+// is the most valuable thing in the process to leak.
+//
+// This is the FULL shape, and only /metrics serves it. Bucket, env, last key and error
+// text are not secrets, but they name our infrastructure, and /healthz is built to be
+// polled by anything: redactHealth drops all four before it is served there, leaving
+// the schedule, the timestamps, the counters and a class. "Backed up where?" is a
+// question for a caller holding a token.
 type BackupHealth struct {
-	Bucket   string `json:"bucket"`
-	Env      string `json:"env"`
+	Bucket   string `json:"bucket,omitempty"`
+	Env      string `json:"env,omitempty"`
 	Schedule string `json:"schedule,omitempty"`
 	Hour     int    `json:"hour"`
 
@@ -29,6 +33,15 @@ type BackupHealth struct {
 	// backup can be found without listing the bucket.
 	LastKey   string `json:"last_key,omitempty"`
 	LastError string `json:"last_error,omitempty"`
+
+	// LastErrorClass is what /healthz publishes in place of LastError.
+	//
+	// One class, not several: unlike the collector, nothing here has a typed error
+	// to read a cause from — common/backup hands us a string it composed — and
+	// guessing a cause by matching substrings of someone else's message is the bug
+	// this replaced. "It failed" is the honest amount to say without auth; the text
+	// is on /metrics.
+	LastErrorClass string `json:"last_error_class,omitempty"`
 
 	Successes int `json:"successes"`
 	Failures  int `json:"failures"`
@@ -84,8 +97,12 @@ func backupVerdict(h *BackupHealth, now time.Time) (degraded bool, reason string
 	if h == nil {
 		return false, ""
 	}
-	if h.LastError != "" {
-		return true, "price archive backup failing: " + h.LastError
+	// Either field, and NEITHER concatenated into the reason: redaction runs before
+	// this, so on /healthz LastError is already gone and LastErrorClass is set. The
+	// reason string is itself published unauthenticated, so it says that the backup
+	// is failing and leaves what it said to /metrics.
+	if h.LastError != "" || h.LastErrorClass != "" {
+		return true, "price archive backup failing"
 	}
 	if h.LastSuccess.IsZero() {
 		if h.LastAttempt.IsZero() {

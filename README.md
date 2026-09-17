@@ -264,18 +264,34 @@ Countinghouse reads whichever the devices namespace carries. A namespace still d
 
 ## Sites
 
-The devices namespace is named by config, so a site reads its own:
+An instance declares which property it serves, and normally nothing else:
 
 ```yaml
 site:
   id: home
 ```
 
-**`floorplan_namespace` is required too**, for a quieter version of the same reason.
-Omitting it breaks nothing: `/floors` and `/rooms` still list every floor and room
-holding a metered device, and every kWh and cost is exactly right. Only the **names** are
-lost — so those endpoints answer with ids where labels belong and `null` where storey
-order belongs, which is precisely what a floorplan publishing nothing would produce.
+The namespace pointers come from the shared **`sites`** document, keyed by that id. They
+are deliberately not a local setting: rename a namespace in `sites` and every other service
+follows, while a local copy would quietly keep reading the old document. So `sites`
+**wins** over a local value that disagrees — and a warning names both, because an
+operator's edit being ignored without a word is its own kind of silent failure.
+
+`floorplan_namespace` and `energy_agreements_namespace` keep a local fallback, which is what
+makes the migration safe: a site whose `sites` entry is only partly filled in keeps working
+off its own config. **`devices_namespace` has none, and is not settable here at all.** It is
+the pointer that decides whether any answer is right — a stale local copy would not degrade
+a label, it would bill *another property's* devices while the service looked entirely
+healthy. It comes from `sites` or the instance does not start. Nor is it derived from `id`:
+a namespace is a document that either exists or does not, so guessing `devices_<id>` would
+turn a typo into a 404, a fail-open empty snapshot, and every endpoint honestly reporting
+zero devices.
+
+**Both site namespaces are required**, wherever they are supplied from. For the floorplan
+that is a quieter version of the same reason. Omitting it breaks nothing: `/floors` and
+`/rooms` still list every floor and room holding a metered device, and every kWh and cost is
+exactly right. Only the **names** are lost — so those endpoints answer with ids where labels
+belong and `null` where storey order belongs, which is precisely what a floorplan publishing nothing would produce.
 Nothing distinguishes "not configured" from "configured and empty", and the omission
 surfaces days later as a chart legend reading `floor1.room-c` to a human. So it is
 declared or the service refuses to start. (This is stricter than greenhouse, which treats
@@ -578,6 +594,17 @@ held back a day so the two would look distinct, which cost more than it bought �
 permanently behind its neighbour carries less information than one that matches until
 something is wrong.
 
+**A failing collector reports differently on the two endpoints.** `/metrics` is behind auth
+and carries `last_error` — the whole string, which for an upstream failure can include up to
+2 KB of somebody else's response body. `/healthz` is unauthenticated, so it carries
+`last_error_class` instead: fixed words the collector picks from the *typed* error, one of
+`upstream rate limited`, `upstream rejected our request`, `upstream unavailable`,
+`upstream timeout`, `upstream error`, `archive error`, or a bare `error` when nothing more
+specific is known.
+A monitor can route on those without the service ever republishing arbitrary third-party
+bytes, or the local archive path, on a public endpoint. Both fields clear on the next
+success, and either one present degrades the top-level `status`.
+
 ### Backing up the archive
 
 > **Not configured yet, deliberately.** The service goes live without offsite backups
@@ -638,9 +665,10 @@ which is the layout `identity/common/backup` restores from.
   asked what it had done and could not be tested against a clock, so this service grew its
   own snapshot, schedule, status bookkeeping and credential redactor — about 230 lines.
   All four gaps are closed upstream (sweeney/identity#45), so all four local versions are
-  gone and what remains is an adapter from config to the `/healthz` block. `last_error`
+  gone and what remains is an adapter from config to the health blocks. `last_error`
   arrives already redacted by the library, whose redactor is key-aware where the local one
-  truncated bluntly at the first marker word.
+  truncated bluntly at the first marker word — and it is still served on `/metrics` only,
+  because a redactor that removes credentials does not remove infrastructure.
 - **Historically this did not use the scheduler, and the stated reason was wrong twice.**
   First: that `Manager` copied a WAL-mode database with `os.ReadFile` — true of v0.3.0, and
   fixed in v0.4.0 by `VACUUM INTO`, which this repo did not notice because it sat two
@@ -653,23 +681,44 @@ which is the layout `identity/common/backup` restores from.
   alone.
 
 `/healthz` and `/metrics` gain a `backup` block — omitted entirely when none is configured,
-so a zeroed block never reads as a broken backup:
+so a zeroed block never reads as a broken backup. **The two endpoints do not serve the same
+block.** `/metrics` is behind auth and reports everything; `/healthz` is unauthenticated and
+reports whether the backup is working, not where it lands:
 
 ```json
+// GET /healthz — no bucket, no env, no object key, no error text
+"backup": {
+  "schedule": "daily", "hour": 3,
+  "last_attempt": "…", "last_success": "…",
+  "successes": 9, "failures": 0,
+  "next_run": "…"
+}
+```
+
+```json
+// GET /metrics — the same block, plus what names our infrastructure
 "backup": {
   "bucket": "countinghouse-sqlite", "env": "production",
   "schedule": "daily", "hour": 3,
   "last_attempt": "…", "last_success": "…",
-  "last_key": "production/backups/countinghouse/2026/09/12/countinghouse-….sqlite3",
+  "last_key": "production/backups/…/countinghouse-….sqlite3",
+  "last_error": "…",
   "successes": 9, "failures": 0,
   "next_run": "…"
 }
 ```
 
 `last_attempt` moves on every run, `last_success` only on one that worked — so a lagging
-`last_success` means we are failing *now*, and `last_key` is how the newest backup is found
-without listing the bucket. Three states **degrade** the top-level status (never make it
-`unavailable`: nothing served depends on last night's upload):
+`last_success` means we are failing *now*. `last_key` is how the newest backup is found
+without listing the bucket, **and it is on `/metrics` only**: an anonymous caller has no use
+for an object key, and publishing one names the bucket, the prefix and the backup cadence to
+anyone who asks. `/healthz` keeps the timestamps and the counters, which is everything a
+monitor needs to alert. Same split for the failure: `/healthz` carries a fixed
+`last_error_class` (`"backup failed"`) where `/metrics` carries the message, because the R2
+endpoint host and the object key turn up in those strings.
+
+Three states **degrade** the top-level status (never make it `unavailable`: nothing served
+depends on last night's upload):
 
 - a failure since the last success — what is in the bucket no longer covers what would be lost;
 - attempted and **never** succeeded, which is what a typo'd credential leaves behind. Not

@@ -14,10 +14,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"runtime"
 	"sort"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -480,52 +478,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(buf.Bytes())
 }
 
-// errorClass reduces an error string to something safe to publish: what failed,
-// not what the failure said.
-//
-// A class is what a monitor actually alerts on — "the collector is failing" — and
-// it is the part that carries no upstream bytes, no paths and no identifiers.
-func errorClass(err string) string {
-	if err == "" {
-		return ""
-	}
-	// The HTTP status comes from the STRUCTURED part of APIError.Error()
-	// ("octopus: %s (%d) for %s: %s"), not from anywhere in the string.
-	//
-	// Matching bare digits was wrong in a way that matters here: this runs over up
-	// to 2 KB of upstream RESPONSE BODY, so a body containing "429" or a count of
-	// 4290 let the remote end choose what /healthz said had happened. It could never
-	// leak — every branch returns a fixed string — but a health endpoint reporting
-	// the wrong cause is the failure this service is careful about everywhere else.
-	if m := apiStatusRE.FindStringSubmatch(err); m != nil {
-		switch code := m[1]; {
-		case code == "429":
-			return "upstream rate limited"
-		case code == "401", code == "403":
-			return "upstream rejected our request"
-		case code[0] == '5':
-			return "upstream unavailable"
-		default:
-			return "upstream error"
-		}
-	}
-
-	switch {
-	case strings.Contains(err, "open archive"), strings.Contains(err, "read archive"),
-		strings.Contains(err, "prices: "):
-		return "archive error"
-	case strings.Contains(err, "context deadline exceeded"),
-		strings.Contains(err, "Client.Timeout"), strings.Contains(err, "i/o timeout"):
-		return "upstream timeout"
-	default:
-		return "error"
-	}
-}
-
-// apiStatusRE matches the parenthesised status code APIError renders, anchored to
-// the "octopus: <status> (<code>)" prefix so a body cannot forge one.
-var apiStatusRE = regexp.MustCompile(`^octopus: [^(]*\((\d{3})\)`)
-
 // redactHealth returns COPIES with the evidence stripped.
 //
 // Copies rather than in-place edits, because mutating would silently depend on
@@ -536,7 +488,14 @@ func redactHealth(prices []PriceHealth, backup *BackupHealth) ([]PriceHealth, *B
 	out := make([]PriceHealth, len(prices))
 	copy(out, prices)
 	for i := range out {
-		out[i].LastError = errorClass(out[i].LastError)
+		// The class is computed by the collector from the typed error. Publishing it
+		// and dropping the text is the whole split: /metrics keeps both.
+		out[i].LastError = ""
+		if out[i].LastErrorClass == "" && prices[i].LastError != "" {
+			// A failure recorded before the class existed, or by something that does
+			// not set one. Say that something is wrong rather than nothing.
+			out[i].LastErrorClass = "error"
+		}
 	}
 
 	if backup == nil {
@@ -545,7 +504,10 @@ func redactHealth(prices []PriceHealth, backup *BackupHealth) ([]PriceHealth, *B
 	// Keep the schedule and the timestamps — those are the operational signal — and
 	// drop what names our infrastructure.
 	b := *backup
-	b.LastError = errorClass(b.LastError)
+	if b.LastError != "" {
+		b.LastErrorClass = "backup failed"
+	}
+	b.LastError = ""
 	b.Bucket = ""
 	b.LastKey = ""
 	b.Env = ""

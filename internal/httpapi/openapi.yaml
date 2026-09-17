@@ -1197,6 +1197,12 @@ components:
         a publication can advance the horizon across a whole day while leaving
         that day short of slots, which is observed behaviour rather than a
         hypothetical.
+
+
+        This is the FULL shape, served on /metrics, which is authenticated.
+        Unauthenticated /healthz serves `PriceHealthRedacted` — same fields less
+        `last_error`. Anything added here has to be safe for a caller holding a
+        token, not for the public internet.
       properties:
         tariff_code:
           type: string
@@ -1234,7 +1240,20 @@ components:
             next success.
         last_error:
           type: string
-          description: The most recent failure, absent once a sync succeeds.
+          description: >-
+            The most recent failure, absent once a sync succeeds. /metrics only: the
+            text can quote an upstream we do not control, so /healthz publishes only
+            `last_error_class`.
+        last_error_class:
+          type: string
+          description: >-
+            The same failure named in fixed words the collector chooses from the typed
+            error — "upstream rate limited", "upstream rejected our request", "upstream
+            unavailable", "upstream timeout", "upstream error", "archive error", or a bare
+            "error". Enough to route an alert without quoting anything. Present
+            on both /metrics and /healthz, and cleared by a success alongside
+            `last_error`.
+          example: upstream unavailable
         syncs:
           type: integer
         failures:
@@ -1478,9 +1497,14 @@ components:
         Influx, so whether it is actually backed up is reported rather than assumed.
 
 
-        Nothing here is a credential and nothing that is one may be added: /healthz is
-        built to be polled by anything. Bucket and env are locations; error text is
-        scrubbed of anything credential-shaped before it is served.
+        This is the FULL shape, served on /metrics, which is authenticated. It names
+        our infrastructure — bucket, key prefix, object key — and none of that reaches
+        unauthenticated /healthz, which serves `BackupHealthRedacted` instead.
+
+
+        Nothing here is a credential and nothing that is one may be added, on either
+        endpoint. Error text is additionally scrubbed of anything credential-shaped
+        before it is served at all.
       required: [bucket, env, successes, failures]
       properties:
         bucket:
@@ -1525,7 +1549,15 @@ components:
           description: >-
             Why the most recent run failed, scrubbed of anything credential-shaped.
             Cleared by a success, so one bad night does not degrade the service
-            forever.
+            forever. /metrics only — the R2 endpoint host and object key turn up in
+            these messages, which is exactly what /healthz withholds.
+        last_error_class:
+          type: string
+          enum: [backup failed]
+          description: >-
+            That a run failed, without saying what failed. One value today, because
+            for a backup the fact IS the alert: the remedy does not change with the
+            cause. Present on both endpoints; cleared by a success.
         successes:
           type: integer
         failures:
@@ -1538,6 +1570,98 @@ components:
             `schedule: off`, or an on-demand-only deployment. It answers the question the
             timestamps cannot ("is a backup coming?"), which is what separates a fresh
             start from a wedged scheduler.
+
+    PriceHealthRedacted:
+      type: object
+      description: >-
+        One tariff's price-archive health as served on /healthz, which is
+        UNAUTHENTICATED and built to be polled by anything.
+        Every field of `PriceHealth` except `last_error`, whose text can quote an
+        upstream we do not control; `last_error_class` carries the failure instead.
+        Field meanings are identical — see `PriceHealth`.
+
+
+        Spelled out as its own schema rather than "PriceHealth, minus one field",
+        because a generated client reading the fuller schema would offer callers a
+        `last_error` that is never populated here, and an operator would write the
+        alert that never fires.
+      properties:
+        tariff_code:
+          type: string
+          example: E-1R-AGILE-24-10-01-A
+        known_to:
+          type: string
+          format: date-time
+        complete_to:
+          type: string
+          format: date-time
+          description: How far prices run with no gaps. This is the field to alert on.
+        last_attempt:
+          type: string
+          format: date-time
+        last_success:
+          type: string
+          format: date-time
+        last_error_class:
+          type: string
+          description: >-
+            What went wrong, in fixed words — never the upstream's own text. Absent
+            once a sync succeeds. A failure recorded with no class reports the bare
+            "error" rather than nothing at all, so the presence of this field is a
+            reliable "collection is failing".
+          example: upstream unavailable
+        syncs:
+          type: integer
+        failures:
+          type: integer
+        inserted:
+          type: integer
+        restated:
+          type: integer
+        rejected:
+          type: integer
+        warnings:
+          type: integer
+
+    BackupHealthRedacted:
+      type: object
+      description: >-
+        Offsite-backup state as served on /healthz, which is UNAUTHENTICATED.
+        The operational signal — is a backup scheduled, did the last one work, when is
+        the next — with everything that names our infrastructure removed: no `bucket`,
+        no `env`, no `last_key`, no `last_error`. An anonymous caller can still tell a
+        healthy backup from a failing one, which is the only thing /healthz owes them.
+        Field meanings are identical — see `BackupHealth`.
+      required: [successes, failures]
+      properties:
+        schedule:
+          type: string
+          enum: [daily, weekly, monthly, off]
+        hour:
+          type: integer
+          description: UTC hour (0-23) scheduled backups run at. 0 is midnight, not unset.
+        last_attempt:
+          type: string
+          format: date-time
+        last_success:
+          type: string
+          format: date-time
+          description: >-
+            Absent until one succeeds. Lagging behind last_attempt means backups are
+            failing NOW.
+        last_error_class:
+          type: string
+          enum: [backup failed]
+          description: >-
+            That the last run failed. Not why: the cause names the R2 endpoint and the
+            object key, and the remedy does not depend on it. /metrics has the text.
+        successes:
+          type: integer
+        failures:
+          type: integer
+        next_run:
+          type: string
+          format: date-time
 
     MetricsResponse:
       type: object
@@ -2193,16 +2317,25 @@ components:
             normal state for a deployment whose tariff agreements are all
             flat-rate — an empty array would read as a broken archive rather than
             as no archive.
+
+
+            REDACTED relative to the same field on /metrics: /healthz is
+            unauthenticated, so the upstream's own error text is withheld and
+            `last_error_class` carries the failure.
           items:
-            $ref: "#/components/schemas/PriceHealth"
+            $ref: "#/components/schemas/PriceHealthRedacted"
         backup:
           allOf:
-            - $ref: "#/components/schemas/BackupHealth"
+            - $ref: "#/components/schemas/BackupHealthRedacted"
           description: >-
             Offsite-backup state for the price archive. OMITTED ENTIRELY when no
             backup is configured, which is the normal state in development and on
             any deployment with no archive — a zeroed block would read as a broken
             backup rather than as no backup.
+
+
+            REDACTED relative to /metrics: an anonymous caller learns whether the
+            backup is working, not which bucket it lands in.
         remote_config:
           type: object
           description: >-

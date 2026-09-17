@@ -19,9 +19,11 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -157,6 +159,17 @@ type Status struct {
 	LastAttempt time.Time
 	LastSuccess time.Time
 	LastError   string
+
+	// LastErrorClass is LastError reduced to one of a fixed set of causes, derived
+	// HERE because this is where the typed error still exists.
+	//
+	// /healthz is unauthenticated and publishes the class; /metrics, behind auth,
+	// publishes the text. Deriving the class downstream from the string cannot work:
+	// every call site wraps before storing, so the stored value always begins
+	// "collector: <stage>: " and an octopus-anchored match found none of it. It is
+	// also simply worse — the status code is right here on the error, rather than
+	// something to recover by parsing prose that embeds an untrusted response body.
+	LastErrorClass string
 
 	// KnownTo is the end of the newest slot held. CompleteTo is the
 	// end of the newest fully populated local day. They differ, and the
@@ -776,8 +789,48 @@ func (c *Collector) fail(err error) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.status.LastError = err.Error()
+	c.status.LastErrorClass = classify(err)
 	c.status.Failures++
 	return err
+}
+
+// classify reduces an error to one of a fixed set of causes, safe to publish on an
+// unauthenticated endpoint.
+//
+// From the TYPE, not from the message: *octopus.APIError carries the status code,
+// so a response body full of misleading digits cannot reach the decision.
+func classify(err error) string {
+	if err == nil {
+		return ""
+	}
+	var apiErr *octopus.APIError
+	if errors.As(err, &apiErr) {
+		switch code := apiErr.StatusCode; {
+		case code == http.StatusTooManyRequests:
+			return "upstream rate limited"
+		case code == http.StatusUnauthorized, code == http.StatusForbidden:
+			return "upstream rejected our request"
+		case code >= 500:
+			return "upstream unavailable"
+		default:
+			return "upstream error"
+		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "upstream timeout"
+	}
+	// No type to lean on for these: the archive wraps with fmt.Errorf and the
+	// message is our own, not an upstream body.
+	switch msg := err.Error(); {
+	case strings.Contains(msg, "open archive"), strings.Contains(msg, "read archive"),
+		strings.Contains(msg, "prices: "):
+		return "archive error"
+	case strings.Contains(msg, "context deadline exceeded"),
+		strings.Contains(msg, "i/o timeout"):
+		return "upstream timeout"
+	default:
+		return "error"
+	}
 }
 
 // markSuccess clears the last error and folds in the sync's counters.

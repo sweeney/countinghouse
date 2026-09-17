@@ -58,7 +58,7 @@ func BenchmarkCurveRateAt(b *testing.B) {
 	}
 }
 
-// NewCurve itself, because dropAmbiguous added a map build and a pass over every
+// NewCurve itself, because oneRowPerInterval added a map build and a pass over every
 // slot to the construction path — which runs on every /prices request, including
 // the ones that end in a 304. Worth knowing the cost at the window caps the routes
 // actually permit: a month is 1,488 half hours, a year 17,520.

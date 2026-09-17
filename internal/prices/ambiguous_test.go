@@ -116,3 +116,64 @@ func TestTwoStandingChargesForOneStartAreRefused(t *testing.T) {
 		t.Error("ChargeOver must refuse a window it cannot price rather than guess")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Two rows AGREEING on the price is the other half of the same problem, and it
+// needs the opposite answer: the price is known, so dropping the interval would
+// discard a fact we hold — but keeping both rows counts the half hour twice
+// everywhere the population is what matters. The surplus row goes; the price stays.
+// ---------------------------------------------------------------------------
+
+func TestTwoPaymentMethodsAgreeingOnThePriceCountOnce(t *testing.T) {
+	from := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	next := from.Add(SlotLength)
+	c := NewCurve(from, next.Add(SlotLength), []Slot{
+		ambigSlot(from, "DIRECT_DEBIT", 27.4113),
+		ambigSlot(from, "NON_DIRECT_DEBIT", 27.4113),
+		ambigSlot(next, "DIRECT_DEBIT", 30.0),
+	})
+
+	// The price is not in doubt, so it must still price.
+	if _, ok := c.RateAt(from.Add(5 * time.Minute)); !ok {
+		t.Error("refused an interval whose two rows carry the SAME price; it is known")
+	}
+	if !c.Complete() {
+		t.Error("Complete() is false although every interval in the window has a price")
+	}
+	// But the half hour exists once.
+	if got := c.Summary().Slots; got != 2 {
+		t.Errorf("Summary.Slots = %d; the window holds 2 half hours, not %d", got, got)
+	}
+	if n := len(c.Priced()); n != 2 {
+		t.Errorf("Priced() returned %d slots, want 2 — the duplicate must not render twice", n)
+	}
+	if n := len(c.Slots); n != 2 {
+		t.Errorf("Slots holds %d rows, want 2", n)
+	}
+}
+
+// A duplicated row must not drag the median or the ranks with it: the cheapest
+// half hour counted twice makes every other slot look dearer than it is.
+func TestAnAgreeingDuplicateDoesNotSkewTheRanking(t *testing.T) {
+	from := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	mk := func(i int, method string, exc float64) Slot {
+		return ambigSlot(from.Add(time.Duration(i)*SlotLength), method, exc)
+	}
+	// Three intervals at 10/20/30 ex-VAT, the cheapest published twice.
+	c := NewCurve(from, from.Add(3*SlotLength), []Slot{
+		mk(0, "DIRECT_DEBIT", 10), mk(0, "NON_DIRECT_DEBIT", 10),
+		mk(1, "DIRECT_DEBIT", 20), mk(2, "DIRECT_DEBIT", 30),
+	})
+
+	// Median over {10,20,30} is 20; over the duplicated {10,10,20,30} it is 15.
+	if got, want := c.Median(), 20*1.05; !approxEq(got, want) {
+		t.Errorf("Median = %.4f, want %.4f — computed over a duplicated population", got, want)
+	}
+	dearest := mk(2, "DIRECT_DEBIT", 30)
+	if got := c.RankOf(dearest); got != 3 {
+		t.Errorf("RankOf(dearest) = %d, want 3 of 3", got)
+	}
+	if got := c.PercentileOf(dearest); !approxEq(got, 1) {
+		t.Errorf("PercentileOf(dearest) = %.4f, want 1", got)
+	}
+}

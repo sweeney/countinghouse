@@ -29,6 +29,11 @@ type PriceHealth struct {
 	LastSuccess time.Time `json:"last_success,omitempty"`
 	LastError   string    `json:"last_error,omitempty"`
 
+	// LastErrorClass is LastError reduced to a fixed cause by the collector, where
+	// the typed error still exists. /healthz publishes this and drops LastError;
+	// /metrics, behind auth, publishes both.
+	LastErrorClass string `json:"last_error_class,omitempty"`
+
 	// Cumulative counters since start, for /metrics.
 	Syncs    int `json:"syncs"`
 	Failures int `json:"failures"`
@@ -66,7 +71,12 @@ type PricesProvider interface {
 // are unaffected. Influx being unreachable is the only hard failure.
 func priceVerdict(health []PriceHealth, now time.Time) (degraded bool, reason string) {
 	for _, h := range health {
-		if h.LastError != "" {
+		// Either field. Redaction runs BEFORE the verdict — deliberately, so that
+		// nothing it strips can reach `reasons` — which means the /healthz copy
+		// arrives here with LastError already cleared. Keying on LastError alone
+		// would have reported a failing collector as healthy on the one endpoint
+		// built to be polled.
+		if h.LastError != "" || h.LastErrorClass != "" {
 			return true, "price fetch failing for " + h.TariffCode
 		}
 		if h.CompleteTo.IsZero() {

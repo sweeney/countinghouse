@@ -455,26 +455,31 @@ func NewCurve(from, to time.Time, slots []Slot) Curve {
 	// a separate pass meant a second map the size of byStart, which cost ~1.9x the
 	// construction time and twice the memory on a path that runs for every /prices
 	// request — to find something that does not occur while the house is on a tariff
-	// publishing one payment method. See dropAmbiguous for why they are dropped.
+	// publishing one payment method. See oneRowPerInterval for what is done with them.
 	c.byStart = make(map[int64]int, len(slots))
 	inc := make([]float64, 0, len(slots))
 	var ambiguous map[int64]bool
+	var repeats int
 	for i, sl := range slots {
 		k := sl.ValidFrom.UTC().Unix()
-		if j, seen := c.byStart[k]; seen &&
-			math.Abs(sl.IncVATPence-slots[j].IncVATPence) > priceEpsilon {
-			if ambiguous == nil {
-				ambiguous = make(map[int64]bool, 2)
+		if j, seen := c.byStart[k]; seen {
+			if math.Abs(sl.IncVATPence-slots[j].IncVATPence) > priceEpsilon {
+				if ambiguous == nil {
+					ambiguous = make(map[int64]bool, 2)
+				}
+				ambiguous[k] = true
+			} else {
+				repeats++
 			}
-			ambiguous[k] = true
 		}
 		c.byStart[k] = i
 		inc = append(inc, sl.IncVATPence)
 	}
-	if ambiguous != nil {
+	if ambiguous != nil || repeats > 0 {
 		// Rare enough to be worth re-entering cleanly rather than unpicking the
-		// half-built index. The second pass finds nothing to drop and terminates.
-		return NewCurve(from, to, dropAmbiguous(slots, ambiguous))
+		// half-built index. The second pass sees one row per interval, so it finds
+		// nothing to resolve and terminates.
+		return NewCurve(from, to, oneRowPerInterval(slots, ambiguous))
 	}
 	sort.Float64s(inc)
 	c.sortedInc = inc
@@ -563,8 +568,9 @@ func (c Curve) rateAtSlow(t time.Time) (float64, bool) {
 	return 0, false
 }
 
-// dropAmbiguous removes every slot whose interval was found to carry more than one
-// price. NewCurve detects them; this drops them.
+// oneRowPerInterval reduces the slots to at most one per interval: intervals found
+// to carry DISAGREEING prices are dropped entirely, and exact repeats of the same
+// price collapse to their first row. NewCurve detects both; this resolves them.
 //
 // The archive's key is (tariff_code, payment_method, valid_from), and it is that
 // wide because a variable tariff publishes the SAME half hour once per payment
@@ -574,25 +580,36 @@ func (c Curve) rateAtSlow(t time.Time) (float64, bool) {
 // twice in the slot list with rank and median computed over a duplicated
 // population.
 //
-// Picking one is not available: which payment method the account is on is a
-// configuration fact this package does not have. Refusing the rows on write is
-// worse — it would make the composite key pointless, and two separate Put calls
-// could reach the same state anyway.
+// The two cases need different answers because they are different problems.
 //
-// So an interval with two prices is an interval whose price we do not know, which
-// Pricer's (float64, bool) already expresses. Dropping it here means RateAt misses
-// it, Complete() reports the gap, and the energy in it surfaces as unpriced_kwh —
-// visible, and never a confident wrong number. Identical rows are not ambiguous;
-// only a genuine disagreement is.
+// Disagreement: picking one is not available, because which payment method the
+// account is on is a configuration fact this package does not have. Refusing the
+// rows on write is worse — it would make the composite key pointless, and two
+// separate Put calls could reach the same state anyway. So an interval with two
+// prices is an interval whose price we do not know, which Pricer's (float64, bool)
+// already expresses. Dropping it means RateAt misses it, Complete() reports the
+// gap, and the energy in it surfaces as unpriced_kwh — visible, and never a
+// confident wrong number.
+//
+// Agreement: the price is known, so dropping it would throw away a fact we hold.
+// But keeping both rows double-counts the interval everywhere the population is
+// what matters — summary.slots would overstate how much of the day is held, the
+// slot list would render the half hour twice, and one duplicated cheap slot would
+// drag the median and every rank with it. So the price survives and the surplus row
+// does not.
 //
 // Not reachable while the house is on Agile, which publishes payment_method null.
 // The archive is explicitly designed to outlive the current tariff.
-func dropAmbiguous(slots []Slot, ambiguous map[int64]bool) []Slot {
+func oneRowPerInterval(slots []Slot, ambiguous map[int64]bool) []Slot {
 	out := make([]Slot, 0, len(slots))
+	kept := make(map[int64]bool, len(slots))
 	for _, sl := range slots {
-		if !ambiguous[sl.ValidFrom.UTC().Unix()] {
-			out = append(out, sl)
+		k := sl.ValidFrom.UTC().Unix()
+		if ambiguous[k] || kept[k] {
+			continue
 		}
+		kept[k] = true
+		out = append(out, sl)
 	}
 	return out
 }

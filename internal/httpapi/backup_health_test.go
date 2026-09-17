@@ -112,8 +112,14 @@ func TestHealthDegradesWhenBackupsHaveNeverSucceeded(t *testing.T) {
 		t.Errorf("status = %v, want degraded — backups have never succeeded", m["status"])
 	}
 	b := m["backup"].(map[string]any)
-	if b["last_error"] == nil {
-		t.Error("the reason must be reported, not just the verdict")
+	// The CLASS is reported, not the text: /healthz is unauthenticated, and the
+	// message came from an upstream we do not control. The full string is on
+	// /metrics, behind auth.
+	if b["last_error_class"] == nil {
+		t.Error("the failure must be reported, not just the verdict")
+	}
+	if b["last_error"] != nil {
+		t.Errorf("/healthz still carries the raw error: %v", b["last_error"])
 	}
 }
 

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -103,9 +104,11 @@ func TestHealthzStillDegradesOnACollectorFailure(t *testing.T) {
 	s, _ := dataSetup(t)
 	s.Prices = leakyPrices{h: []PriceHealth{{
 		TariffCode: pxTariff,
-		// The real shape APIError.Error() renders, not an invented one.
-		LastError:   "octopus: Too Many Requests (429) for https://api.octopus.energy/v1/x: throttled",
-		LastAttempt: time.Now(),
+		// Both fields, as a real provider supplies them: the collector derives the
+		// class from the typed error and keeps the text for /metrics.
+		LastError:      "collector: horizon probe: octopus: 429 Too Many Requests (429) for https://api.octopus.energy/v1/x: throttled",
+		LastErrorClass: "upstream rate limited",
+		LastAttempt:    time.Now(),
 	}}}
 	m := decode(t, doGET(t, s, "/healthz"))
 	if m["status"] == "ok" {
@@ -115,4 +118,86 @@ func TestHealthzStillDegradesOnACollectorFailure(t *testing.T) {
 	if !strings.Contains(body, "rate limited") {
 		t.Errorf("the class should survive redaction so the reason is actionable: %s", body)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The split is only real if the spec says so. /healthz and /metrics referenced ONE
+// pair of schemas, so the published contract promised anonymous callers a
+// `last_error`, a `bucket` and an object key that redaction had already removed —
+// a generated client would offer a field that is never set, and an operator would
+// write the alert that never fires.
+//
+// So the redacted schemas are checked against what the handler actually emits, in
+// BOTH directions: a field served but undocumented is a disclosure nobody reviewed,
+// and a field documented but never served is a promise. Populating every source
+// field is what makes the second direction meaningful.
+// ---------------------------------------------------------------------------
+
+// specSchemaProps returns the property names of one component schema.
+func specSchemaProps(t *testing.T, s *Server, name string) map[string]bool {
+	t.Helper()
+	var doc struct {
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	body := doGET(t, s, "/openapi.json").Body.Bytes()
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("unmarshal spec: %v", err)
+	}
+	sc, ok := doc.Components.Schemas[name]
+	if !ok {
+		t.Fatalf("schema %s is not in the spec", name)
+	}
+	out := make(map[string]bool, len(sc.Properties))
+	for p := range sc.Properties {
+		out[p] = true
+	}
+	return out
+}
+
+func compareKeys(t *testing.T, what string, served map[string]any, documented map[string]bool) {
+	t.Helper()
+	for k := range served {
+		if !documented[k] {
+			t.Errorf("%s serves %q, which the redacted schema does not document", what, k)
+		}
+	}
+	for k := range documented {
+		if _, ok := served[k]; !ok {
+			t.Errorf("%s documents %q but never serves it", what, k)
+		}
+	}
+}
+
+func TestHealthzMatchesTheRedactedSchemas(t *testing.T) {
+	s, _ := dataSetup(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	// Every source field populated, so "documented but not served" is a real finding
+	// rather than an artefact of omitempty.
+	s.Prices = leakyPrices{h: []PriceHealth{{
+		TariffCode: pxTariff, KnownTo: now, CompleteTo: now,
+		LastAttempt: now, LastSuccess: now,
+		LastError: "octopus: returned 500: SECRET",
+		Syncs:     3, Failures: 1, Inserted: 96, Restated: 2, Rejected: 1, Warnings: 4,
+	}}}
+	s.Backups = staticBackup{h: &BackupHealth{
+		Bucket: "countinghouse-sqlite", Env: "production", Schedule: "daily", Hour: 3,
+		LastAttempt: now, LastSuccess: now,
+		LastKey:   "production/backups/countinghouse/2026/09/16/countinghouse-x.sqlite3",
+		LastError: "r2: PutObject 403 AccessDenied",
+		Successes: 9, Failures: 1, NextRun: now.Add(24 * time.Hour),
+	}}
+
+	m := decode(t, doGET(t, s, "/healthz"))
+	prices, ok := m["prices"].([]any)
+	if !ok || len(prices) == 0 {
+		t.Fatalf("no prices block on /healthz: %v", m["prices"])
+	}
+	compareKeys(t, "/healthz prices[]", prices[0].(map[string]any),
+		specSchemaProps(t, s, "PriceHealthRedacted"))
+	compareKeys(t, "/healthz backup", m["backup"].(map[string]any),
+		specSchemaProps(t, s, "BackupHealthRedacted"))
 }

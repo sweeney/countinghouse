@@ -91,7 +91,7 @@ type Schedule struct {
 // NewSchedule builds a schedule, sorting defensively: the archive returns rows
 // in order, but a caller assembling them by hand is not obliged to.
 func NewSchedule(charges []DailyCharge) Schedule {
-	// Same reasoning as Curve's dropAmbiguous, and the same resolution: at() scans
+	// Same reasoning as Curve's oneRowPerInterval, and the same resolution: at() scans
 	// backwards and returns the LAST covering charge, so two charges starting at the
 	// same instant at different prices would silently resolve to whichever sorted
 	// last. A standing charge we cannot name is one ChargeOver must refuse rather

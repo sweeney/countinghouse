@@ -383,18 +383,19 @@ func priceHealth(collectors []*collector.Collector) httpapi.PricesProvider {
 		for _, c := range collectors {
 			st := c.Status()
 			out = append(out, httpapi.PriceHealth{
-				TariffCode:  st.TariffCode,
-				KnownTo:     st.KnownTo,
-				CompleteTo:  st.CompleteTo,
-				LastAttempt: st.LastAttempt,
-				LastSuccess: st.LastSuccess,
-				LastError:   st.LastError,
-				Syncs:       st.Syncs,
-				Failures:    st.Failures,
-				Inserted:    st.Inserted,
-				Restated:    st.Restated,
-				Rejected:    st.Rejected,
-				Warnings:    st.Warnings,
+				TariffCode:     st.TariffCode,
+				KnownTo:        st.KnownTo,
+				CompleteTo:     st.CompleteTo,
+				LastAttempt:    st.LastAttempt,
+				LastSuccess:    st.LastSuccess,
+				LastError:      st.LastError,
+				LastErrorClass: st.LastErrorClass,
+				Syncs:          st.Syncs,
+				Failures:       st.Failures,
+				Inserted:       st.Inserted,
+				Restated:       st.Restated,
+				Rejected:       st.Rejected,
+				Warnings:       st.Warnings,
 			})
 		}
 		return out
