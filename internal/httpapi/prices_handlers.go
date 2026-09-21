@@ -445,6 +445,14 @@ func (s *Server) handleCheapestPrice(w http.ResponseWriter, r *http.Request) {
 // either way — which is the point of keeping prices rather than only fetching what
 // is next.
 func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
+	// ?tariff_code= asks about the PRODUCT, not about what this site was buying,
+	// so it bypasses agreement resolution entirely — including the switchover
+	// refusal and the configured VAT rate. See handleArchivedCurve.
+	if code := r.URL.Query().Get("tariff_code"); code != "" {
+		s.handleArchivedCurve(w, r, code)
+		return
+	}
+
 	win, ok := s.resolveWindow(w, r)
 	if !ok {
 		return
@@ -553,6 +561,17 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 // and the only framing in which a 23- or 25-hour day makes sense. `spread` is the
 // number that says whether shifting load was worth the bother.
 func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
+	// ?tariff_code= asks about the PRODUCT, exactly as it does on /prices, and
+	// for a stronger reason here: this route returns one row per day or per
+	// month rather than one per slot, which is why it carries the 366-day cap
+	// rather than 31. Without it the rollup exists but cannot be pointed at the
+	// archive, so a seasonal question is still ~24 paginated /prices calls and a
+	// client-side aggregation — the workflow this endpoint was built to remove.
+	if code := r.URL.Query().Get("tariff_code"); code != "" {
+		s.handleArchivedStats(w, r, code)
+		return
+	}
+
 	win, ok := s.resolveWindow(w, r)
 	if !ok {
 		return
