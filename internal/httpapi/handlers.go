@@ -147,7 +147,9 @@ func (s *Server) handleDeviceCost(w http.ResponseWriter, r *http.Request) {
 	// /devices/{id}/cost costs one device's worth of query, not the fleet's.
 	costed := []energy.DeviceCost{{DeviceID: id, Class: dev.Class}}
 	only := map[string]config.DeviceConfig{id: dev}
-	if err := s.costDevices(r, win, plan, only, costed); err != nil {
+	// The unmonitored remainder is discarded here: this inventory is one device,
+	// so it holds no meter and the build produces no catch-all to report.
+	if _, err := s.costDevices(r, win, plan, only, costed); err != nil {
 		influxFailed(w, err)
 		return
 	}
@@ -779,7 +781,8 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 	// bucketed path issues ONE set of queries for the fleet rather than one per
 	// device, which is also what makes the per-device costs sum exactly to the
 	// monitored total (decision C1).
-	if err := s.costDevices(r, win, plan, devices, billable); err != nil {
+	unmonitored, err := s.costDevices(r, win, plan, devices, billable)
+	if err != nil {
 		influxFailed(w, err)
 		return
 	}
@@ -798,6 +801,23 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		meterKWh = kwh
 	}
 
+	// The flat path produces no buckets, so its remainder is priced here, at window
+	// level, which is the only place the meter total is known. Under one rate that
+	// is exact — kWh × rate however you slice the window — so the two paths agree
+	// on a flat tariff and each is right on its own terms.
+	if plan.scalar && meterPresent {
+		var monitored float64
+		for _, dc := range billable {
+			monitored += dc.KWh
+		}
+		remainder := meterKWh - monitored
+		unmonitored = energy.UnmonitoredCost{
+			Known:     true,
+			Cost:      energy.DeviceCostFor(remainder, plan.flat),
+			PricedKWh: remainder,
+		}
+	}
+
 	// The standing charge rides on the bill and is never apportioned across devices:
 	// no device causes it, so splitting it would invent a number that reads like a
 	// measurement (decision D2).
@@ -805,6 +825,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		StandingCharge:       plan.standing,
 		StandingChargeSource: plan.standingSource,
 		Attribution:          plan.attribution(),
+		Unmonitored:          unmonitored,
 	})
 	writeJSON(w, http.StatusOK, roundBill(bill))
 }
@@ -829,6 +850,12 @@ func roundBill(b energy.Bill) energy.Bill {
 	roundPtr(b.Reconciliation.MeterKWh, round.KWhDP)
 	roundPtr(b.Reconciliation.UnmonitoredKWh, round.KWhDP)
 	roundPtr(b.Reconciliation.Coverage, round.CovDP)
+	roundPtr(b.Reconciliation.UnmonitoredCost, round.MoneyDP)
+	roundPtr(b.Reconciliation.UnmonitoredPricedKWh, round.KWhDP)
+	// Rounded from their full-precision values, like Total, not by summing
+	// already-rounded parts.
+	roundPtr(b.HouseholdEnergyCost, round.MoneyDP)
+	roundPtr(b.HouseholdTotal, round.MoneyDP)
 	return b
 }
 

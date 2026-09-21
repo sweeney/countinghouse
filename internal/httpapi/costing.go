@@ -209,8 +209,13 @@ type deviceTotals struct {
 // scalars and never reach the wire, so enforcing it would only make a month's bill
 // unanswerable.
 func (s *Server) slotCosts(r *http.Request, win energy.Window, devices map[string]config.DeviceConfig, pricer energy.Pricer) (map[string]deviceTotals, error) {
+	// includeUnmonitored=true so the rest-of-home remainder is priced by the SAME
+	// build, per bucket, at each bucket's own rate. It costs no extra Influx work
+	// (the meter is already in the inventory this queries) and it is what makes
+	// /bill's household figure and /series?group_by=house structurally unable to
+	// disagree — they are now literally the same number from the same call.
 	resp, err := s.buildSeries(r, win, energy.CostingInterval(), energy.GroupByDevice,
-		false /* includeUnmonitored: the bill reconciles the meter separately */, false, devices, pricer)
+		true, false, devices, pricer)
 	if err != nil {
 		return nil, err
 	}
@@ -221,19 +226,33 @@ func (s *Server) slotCosts(r *http.Request, win energy.Window, devices map[strin
 	return out, nil
 }
 
+// unmonitoredFrom extracts the rest-of-home totals from a costing build.
+//
+// Absent means the build produced no catch-all — no meter configured — which is
+// reported as not-known rather than as zero.
+func unmonitoredFrom(totals map[string]deviceTotals) energy.UnmonitoredCost {
+	t, ok := totals[energy.UnmonitoredID]
+	if !ok {
+		return energy.UnmonitoredCost{}
+	}
+	return energy.UnmonitoredCost{Known: true, Cost: t.cost, PricedKWh: t.kwh}
+}
+
 // costDevices fills in KWh, Cost and UnpricedKWh for each billable device under
 // the given plan, picking the scalar or the bucketed path.
 //
 // devices must be the inventory the costs are drawn from, and billable the subset
 // to report — the two differ for /bill, where the whole-house meter is in the
 // inventory but is reconciled rather than billed.
-func (s *Server) costDevices(r *http.Request, win energy.Window, plan tariffPlan, devices map[string]config.DeviceConfig, billable []energy.DeviceCost) error {
+// It also returns the priced rest-of-home remainder, which only the bucketed path
+// can derive directly; the scalar path's caller computes it from the flat rate.
+func (s *Server) costDevices(r *http.Request, win energy.Window, plan tariffPlan, devices map[string]config.DeviceConfig, billable []energy.DeviceCost) (energy.UnmonitoredCost, error) {
 	if plan.scalar {
 		for i := range billable {
 			dc := &billable[i]
 			kwh, _, err := s.deviceWindowKWh(r, dc.DeviceID, dc.Class, win)
 			if err != nil {
-				return err
+				return energy.UnmonitoredCost{}, err
 			}
 			dc.KWh = kwh
 		}
@@ -241,12 +260,15 @@ func (s *Server) costDevices(r *http.Request, win energy.Window, plan tariffPlan
 		for i := range billable {
 			billable[i].EffectiveRate = billable[i].EffectiveRateOf()
 		}
-		return nil
+		// The flat path has no buckets — it is one increase() over the whole window
+		// — so the remainder is priced at window level by the caller, which is the
+		// only place the meter total is known. Exact either way under one rate.
+		return energy.UnmonitoredCost{}, nil
 	}
 
 	totals, err := s.slotCosts(r, win, devices, plan.pricer)
 	if err != nil {
-		return err
+		return energy.UnmonitoredCost{}, err
 	}
 	for i := range billable {
 		dc := &billable[i]
@@ -257,7 +279,7 @@ func (s *Server) costDevices(r *http.Request, win energy.Window, plan tariffPlan
 		dc.KWh, dc.Cost, dc.UnpricedKWh = t.kwh, t.cost, t.unpriced
 		dc.EffectiveRate = dc.EffectiveRateOf()
 	}
-	return nil
+	return unmonitoredFrom(totals), nil
 }
 
 // influxFailed writes the 502 the cost handlers share for a failed query.

@@ -43,7 +43,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
 | `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=&prices=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter (see [When the parts do not sum to the meter](#when-the-parts-do-not-sum-to-the-meter) for the one case where they overshoot it). `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. `prices=true` adds the per-bucket price array — see [The price behind each bucket](#the-price-behind-each-bucket). |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
-| `GET /bill?window=&from=&to=` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
+| `GET /bill?window=&from=&to=` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `scope`, plus `household_energy_cost`/`household_total` — see [What `/bill` covers](#what-bill-covers). Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered. |
 | `GET /prices` | Half-hourly price curve over a window, past or future. |
 | `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
@@ -976,6 +976,60 @@ half ahead.
 
 `/healthz` carries a `reasons` array naming every failing condition, sorted and omitted
 when healthy.
+
+### What `/bill` covers
+
+`energy_cost` is the sum of the device rows, and `total` is that plus the standing
+charge. **Both exclude the unmonitored remainder.** On a home where the meter sees
+roughly twice what the monitored plugs do, `/bill.total` is about **45% of the
+household bill** — and the endpoint is called `/bill`, so it gets quoted.
+
+The existing fields keep their exact meanings; a silent numerical change to `total`
+would be worse than the ambiguity it fixes. What is added is the scope, stated, and the
+household figures beside it:
+
+```json
+{
+  "scope": "monitored_devices",
+  "energy_cost": 21.2032,
+  "standing_charge": 11.832,
+  "total": 33.0352,
+
+  "household_energy_cost": 61.9237,
+  "household_total": 73.7557,
+
+  "reconciliation": {
+    "meter_present": true,
+    "monitored_kwh": 209.3,
+    "meter_kwh": 418.336,
+    "unmonitored_kwh": 209.0,
+    "unmonitored_cost": 40.7205,
+    "unmonitored_priced_kwh": 209.0,
+    "coverage": 0.5074
+  }
+}
+```
+
+`household_total` is **top-level, not inside `reconciliation`**. Both fields are new, so
+their placement cannot threaten `total`'s meaning — and burying the real figure inside
+the block that explains the gap is how it got missed in the first place.
+
+`unmonitored_cost` is priced through the **same pricer the device rows went through**,
+from the same build: under a half-hourly tariff that is per half hour at each half
+hour's own rate, not the remainder at some average. It is the same quantity
+`/series?group_by=house` reports as the `unmonitored` series' cost, so the chart and the
+bill cannot disagree.
+
+`unmonitored_priced_kwh` is the energy that cost was computed from, and it is **not
+always `unmonitored_kwh`**. `unmonitored_kwh` is `meter − monitored` over the whole
+window, signed; the bucketed path prices the per-bucket residual with each bucket
+clamped at zero (see [When the parts do not sum to the
+meter](#when-the-parts-do-not-sum-to-the-meter)). Reporting both keeps the pair
+self-consistent instead of implying an effective rate nobody charged.
+
+With **no meter** configured there is no remainder to price, so `household_energy_cost`
+and `household_total` are omitted rather than sent as a copy of the monitored total.
+`scope` is still present, because what `total` covers is worth saying either way.
 
 ### The price behind each bucket
 
