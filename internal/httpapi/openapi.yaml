@@ -183,6 +183,7 @@ paths:
         - $ref: "#/components/parameters/FloorsFilter"
         - $ref: "#/components/parameters/IncludeUnmonitored"
         - $ref: "#/components/parameters/Unclamped"
+        - $ref: "#/components/parameters/WithPrices"
         - $ref: "#/components/parameters/Shape"
       responses:
         "200":
@@ -242,6 +243,7 @@ paths:
         - $ref: "#/components/parameters/To"
         - $ref: "#/components/parameters/Interval"
         - $ref: "#/components/parameters/Unclamped"
+        - $ref: "#/components/parameters/WithPrices"
         - $ref: "#/components/parameters/Shape"
       responses:
         "200":
@@ -847,6 +849,27 @@ components:
       schema:
         type: boolean
         default: false
+    WithPrices:
+      name: prices
+      in: query
+      required: false
+      description: >
+        Opt in to the per-bucket price array: `prices[]` aligned to `buckets[]`,
+        plus `price_unit`, `price_vat_included`, `price_basis`,
+        `unpriced_buckets` and `tariff_codes`. Default false, so no existing
+        payload grows.
+
+
+        It exists because `cost` is kwh × price and the price cannot be recovered
+        from a bucket where kwh is zero — which are exactly the buckets that
+        answer "it was cheap and we did NOT use it". Joining /series to /prices on
+        an RFC3339 string instead works only while both are 30m: at interval=15m
+        it silently matched half the buckets. The server resolves by containment,
+        so it can answer at any interval.
+      schema:
+        type: boolean
+        default: false
+
     Unclamped:
       name: unclamped
       in: query
@@ -1907,6 +1930,61 @@ components:
             sum to the meter. Unlike coverage and stale_monitored_*, this is NOT
             house-only: the catch-all added by include_unmonitored is clamped the
             same way. Absent under unclamped=true, where no clamp is applied.
+        prices:
+          type: array
+          description: >
+            VAT-inclusive price behind each bucket, ALIGNED TO buckets[]:
+            len(prices) == len(buckets), same order, always. Present only with
+            prices=true.
+
+
+            A null entry means NO RATE IS HELD for that bucket, never free — the
+            same distinction the cost path draws when it reports unpriced_kwh.
+
+
+            CONTRACT: `cost[i] == kwh[i] × prices[i]` holds only when
+            `price_basis` is "slot". At coarser buckets the cost accumulates on
+            the rate grid while the reported price is a time-weighted mean, so the
+            identity is deliberately false there.
+          items:
+            type: number
+            nullable: true
+        price_unit:
+          type: string
+          example: GBP/kWh
+          description: >
+            Pounds per kWh — NOT the pence the /prices family speaks. This array
+            sits beside cost[] and kwh[] in the same response, and consistency
+            inside one payload beats consistency with a different endpoint.
+        price_vat_included:
+          type: boolean
+        price_basis:
+          type: string
+          enum: [slot, mean_over_bucket, flat]
+          description: >
+            How each value was arrived at. "slot": the bucket sits inside one rate
+            interval, so the value is that interval's own rate, exact.
+            "mean_over_bucket": the bucket spans several, so the value is the
+            TIME-weighted mean across them — not energy-weighted, which is
+            cost÷kwh and undefined in a zero-kWh bucket. "flat": one rate covers
+            all time. A bucket is priced under mean_over_bucket only when EVERY
+            interval inside it is priced; otherwise it is null, because a mean
+            over the slots that happen to be held is a plausible-looking wrong
+            number.
+        unpriced_buckets:
+          type: integer
+          description: >
+            Count of null entries in prices[]. Sent even when 0, because 0 is the
+            assertion a consumer wants: this window is fully priced.
+        tariff_codes:
+          type: array
+          items:
+            type: string
+          description: >
+            Every tariff the window touches, in order. Plural because a /series
+            window MAY span a switchover: /prices refuses one, since a curve is a
+            property of a single tariff, but a per-bucket array is not a curve —
+            each bucket belongs to exactly one tariff, so every value is honest.
         buckets:
           type: array
           items:
@@ -2042,6 +2120,61 @@ components:
           description: >
             Mirrors SeriesResponse.clamp — shape must not change what a response
             explains.
+        prices:
+          type: array
+          description: >
+            Mirrors SeriesResponse.prices. Still aligned to the BUCKET axis, not
+            to rows: a row is one (series, bucket) pair, so per-row prices would
+            repeat each value once per series.
+
+
+            A null entry means NO RATE IS HELD for that bucket, never free — the
+            same distinction the cost path draws when it reports unpriced_kwh.
+
+
+            CONTRACT: `cost[i] == kwh[i] × prices[i]` holds only when
+            `price_basis` is "slot". At coarser buckets the cost accumulates on
+            the rate grid while the reported price is a time-weighted mean, so the
+            identity is deliberately false there.
+          items:
+            type: number
+            nullable: true
+        price_unit:
+          type: string
+          example: GBP/kWh
+          description: >
+            Pounds per kWh — NOT the pence the /prices family speaks. This array
+            sits beside cost[] and kwh[] in the same response, and consistency
+            inside one payload beats consistency with a different endpoint.
+        price_vat_included:
+          type: boolean
+        price_basis:
+          type: string
+          enum: [slot, mean_over_bucket, flat]
+          description: >
+            How each value was arrived at. "slot": the bucket sits inside one rate
+            interval, so the value is that interval's own rate, exact.
+            "mean_over_bucket": the bucket spans several, so the value is the
+            TIME-weighted mean across them — not energy-weighted, which is
+            cost÷kwh and undefined in a zero-kWh bucket. "flat": one rate covers
+            all time. A bucket is priced under mean_over_bucket only when EVERY
+            interval inside it is priced; otherwise it is null, because a mean
+            over the slots that happen to be held is a plausible-looking wrong
+            number.
+        unpriced_buckets:
+          type: integer
+          description: >
+            Count of null entries in prices[]. Sent even when 0, because 0 is the
+            assertion a consumer wants: this window is fully priced.
+        tariff_codes:
+          type: array
+          items:
+            type: string
+          description: >
+            Every tariff the window touches, in order. Plural because a /series
+            window MAY span a switchover: /prices refuses one, since a curve is a
+            property of a single tariff, but a per-bucket array is not a curve —
+            each bucket belongs to exactly one tariff, so every value is honest.
         series:
           type: array
           items:

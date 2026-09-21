@@ -468,6 +468,12 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Parsed here rather than at the point of use so a malformed value is a 400
+	// before any Influx work, like every other param on this route.
+	withPrices, ok := parseBoolParam(w, r, "prices")
+	if !ok {
+		return
+	}
 	devices, ok := s.resolveDeviceFilter(w, r, groupBy, includeUnmonitored)
 	if !ok {
 		return
@@ -489,7 +495,40 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
 	}
+	if withPrices {
+		resp.AttachPrices(win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
+	}
 	writeSeriesShaped(w, shape, resp)
+}
+
+// tariffCodesFor names every tariff covering [from, to), in order, de-duplicated.
+//
+// Plural because a /series window MAY span a switchover. /prices refuses one,
+// because a price CURVE is a property of a single tariff and answering about only
+// the first half would contradict /bill. A per-bucket array is not a curve: each
+// bucket belongs to exactly one tariff, so every value in it is honest and the
+// array is the one shape that can describe the window truthfully.
+//
+// Best-effort: a window the agreements do not cover yields no codes rather than
+// an error. The prices array already reports that stretch as nulls, and failing
+// the whole request over a missing label would be the 503 this service replaced
+// with "answer what you can" everywhere else.
+func (s *Server) tariffCodesFor(from, to time.Time) []string {
+	segments, err := s.Config.Tariffs().PeriodsBetween(from, to)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, seg := range segments {
+		code := seg.Tariff.TariffCode
+		if code == "" || seen[code] {
+			continue
+		}
+		seen[code] = true
+		out = append(out, code)
+	}
+	return out
 }
 
 // parseBoolParam reads an optional boolean query param. Absent ⇒ (false, true):
@@ -545,6 +584,10 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid 'shape' (want columns or rows)")
 		return
 	}
+	withPrices, ok := parseBoolParam(w, r, "prices")
+	if !ok {
+		return
+	}
 
 	win, iv, ok := s.resolveSeriesParams(w, r)
 	if !ok {
@@ -573,6 +616,9 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "influx query failed: "+err.Error())
 		return
+	}
+	if withPrices {
+		resp.AttachPrices(win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
 	writeSingleSeries(w, shape, resp, id)
 }
@@ -618,6 +664,10 @@ func (s *Server) handleUnmonitoredSeries(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	withPrices, ok := parseBoolParam(w, r, "prices")
+	if !ok {
+		return
+	}
 
 	win, iv, ok := s.resolveSeriesParams(w, r)
 	if !ok {
@@ -640,6 +690,11 @@ func (s *Server) handleUnmonitoredSeries(w http.ResponseWriter, r *http.Request)
 	// device, and none of the house-only signals the build attached on the way
 	// through. AsSingleDevice does all three together on purpose — doing only the
 	// first two is issue #23.
+	// Attached BEFORE the reshape: prices describe the bucket axis, which
+	// AsSingleDevice does not touch, so they survive it and must.
+	if withPrices {
+		resp.AttachPrices(win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
+	}
 	writeSingleSeries(w, shape, resp.AsSingleDevice(energy.UnmonitoredID), energy.UnmonitoredID)
 }
 

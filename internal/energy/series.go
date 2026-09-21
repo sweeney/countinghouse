@@ -130,6 +130,30 @@ type SeriesResponse struct {
 	Buckets []time.Time `json:"buckets"`
 	Series  []Series    `json:"series"`
 
+	// The price behind each bucket, opt-in via prices=true. All five move
+	// together: either the caller asked and every one is present, or none is.
+	//
+	// The contract, which the spec states and tests pin: len(Prices) ==
+	// len(Buckets), same order, and a nil entry means no rate is held rather than
+	// free. `cost[i] == kwh[i] × prices[i]` holds only when PriceBasis is
+	// "slot" — at coarser buckets the cost accumulates on the rate grid while the
+	// reported price is a time-weighted mean, so the identity is deliberately
+	// false there and saying so is what stops it becoming the next silent join.
+	Prices           []*float64 `json:"prices,omitempty"`
+	PriceUnit        string     `json:"price_unit,omitempty"`
+	PriceVATIncluded *bool      `json:"price_vat_included,omitempty"`
+	PriceBasis       string     `json:"price_basis,omitempty"`
+
+	// UnpricedBuckets is a pointer so a genuine 0 — "every bucket is priced",
+	// which is the answer a consumer most wants — is sent rather than omitted.
+	UnpricedBuckets *int `json:"unpriced_buckets,omitempty"`
+
+	// TariffCodes names every tariff the window touches, in order. Plural because
+	// a window MAY span a switchover here: /prices refuses that, since a curve is
+	// a property of one tariff, but a per-bucket array is not a curve — each
+	// bucket belongs to exactly one tariff, so every value is honest.
+	TariffCodes []string `json:"tariff_codes,omitempty"`
+
 	// Clamp explains a parts-vs-meter shortfall, present only when there is one.
 	// Unlike HouseStats it is NOT house-only: the catch-all added by
 	// include_unmonitored is clamped the same way, and that grouping is where the
@@ -1642,4 +1666,26 @@ func foldAll(series []Series, fine, display []time.Time, fineHours []float64) []
 		out[i] = foldSeries(s, fine, display, fineHours, at)
 	}
 	return out
+}
+
+// AttachPrices fills in the opt-in per-bucket price array for the response's own
+// bucket axis.
+//
+// A method on the assembled response rather than a parameter to BuildSeries: the
+// price of a bucket is a function of the axis and the pricer, both of which are
+// known after the build, and BuildSeries already takes twelve arguments. It also
+// means the array is computed against the DISPLAY buckets — the ones the caller
+// actually receives, after any folding — so len(prices) == len(buckets) cannot
+// drift from the axis it is meant to align to.
+//
+// stop is the window end; see BucketPrices.
+func (r *SeriesResponse) AttachPrices(stop time.Time, p Pricer, tariffCodes []string) {
+	prices, basis, unpriced := BucketPrices(r.Buckets, stop, p)
+	vatIncluded := true
+	r.Prices = prices
+	r.PriceUnit = PriceUnitGBPPerKWh
+	r.PriceVATIncluded = &vatIncluded
+	r.PriceBasis = basis
+	r.UnpricedBuckets = &unpriced
+	r.TariffCodes = tariffCodes
 }

@@ -64,6 +64,16 @@ type RowsResponse struct {
 	// not lose the reason its numbers overshoot the meter.
 	Clamp *ClampReport `json:"clamp,omitempty"`
 
+	// The price fields mirror SeriesResponse for the same reason. prices[] stays
+	// aligned to the BUCKET axis, not to rows: a row is one (series, bucket) pair,
+	// so per-row prices would repeat each value once per series.
+	Prices           []*float64 `json:"prices,omitempty"`
+	PriceUnit        string     `json:"price_unit,omitempty"`
+	PriceVATIncluded *bool      `json:"price_vat_included,omitempty"`
+	PriceBasis       string     `json:"price_basis,omitempty"`
+	UnpricedBuckets  *int       `json:"unpriced_buckets,omitempty"`
+	TariffCodes      []string   `json:"tariff_codes,omitempty"`
+
 	Series []SeriesMeta  `json:"series"`
 	Rows   []SeriesPoint `json:"rows"`
 }
@@ -82,8 +92,15 @@ func (r SeriesResponse) Rows() RowsResponse {
 		Shape:      ShapeRows,
 		HouseStats: r.HouseStats,
 		Clamp:      r.Clamp,
-		Series:     make([]SeriesMeta, 0, len(r.Series)),
-		Rows:       make([]SeriesPoint, 0, len(r.Series)*len(r.Buckets)),
+
+		Prices:           r.Prices,
+		PriceUnit:        r.PriceUnit,
+		PriceVATIncluded: r.PriceVATIncluded,
+		PriceBasis:       r.PriceBasis,
+		UnpricedBuckets:  r.UnpricedBuckets,
+		TariffCodes:      r.TariffCodes,
+		Series:           make([]SeriesMeta, 0, len(r.Series)),
+		Rows:             make([]SeriesPoint, 0, len(r.Series)*len(r.Buckets)),
 	}
 	for _, s := range r.Series {
 		out.Series = append(out.Series, SeriesMeta{
