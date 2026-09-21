@@ -277,6 +277,15 @@ paths:
         reconciliation against the whole-house meter for the window.
 
 
+        SCOPE MATTERS HERE. `energy_cost` is the sum of the device rows and
+        `total` is that plus the standing charge, so BOTH exclude the unmonitored
+        remainder. On a home where the meter sees twice what the plugs do, quoting
+        `total` understates the household bill by half. `scope` names what they
+        cover, and `household_energy_cost` / `household_total` give the whole-home
+        figures beside them. The existing fields are unchanged — a silent
+        numerical change to `total` would be worse than the ambiguity it fixes.
+
+
         Energy is priced as for /devices/{id}/cost, and `attribution` reports how:
         `flat_rate` under a single fixed tariff, `counter_slot` when any part of the
         window is half-hourly (each half hour's energy at that half hour's rate). The
@@ -1483,6 +1492,22 @@ components:
           description: >-
             Monitored fraction of meter; not clamped to [0,1]. Present only when
             meter_present is true.
+        unmonitored_cost:
+          type: number
+          description: >-
+            The rest-of-home remainder, priced through the SAME pricer the device
+            rows used — under a half-hourly tariff, per half hour at each half
+            hour's own rate. It is the same quantity /series?group_by=house
+            reports as the "unmonitored" series' cost, from the same build, so the
+            two cannot disagree. Omitted when not derivable.
+        unmonitored_priced_kwh:
+          type: number
+          description: >-
+            The energy `unmonitored_cost` was computed from. NOT always
+            `unmonitored_kwh`: that is meter − monitored over the whole window,
+            signed, whereas the bucketed path prices the per-bucket residual with
+            each bucket clamped at zero. Reported so the pair stays
+            self-consistent instead of implying an effective rate nobody charged.
 
     BillResponse:
       type: object
@@ -1496,9 +1521,32 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DeviceCostBreakdown"
+        scope:
+          type: string
+          enum: [monitored_devices]
+          description: >-
+            What `energy_cost` and `total` cover: the monitored devices, NOT the
+            household. Always present. It exists because the endpoint is called
+            /bill and the name does not say it.
+        household_energy_cost:
+          type: number
+          description: >-
+            `energy_cost` PLUS the unmonitored remainder, priced through the same
+            pricer — the whole home's energy. Omitted when no meter is configured
+            or the remainder could not be priced, rather than sent as a figure
+            that silently excludes half the house.
+        household_total:
+          type: number
+          description: >-
+            `household_energy_cost` plus the standing charge: the number a person
+            would call "the bill". Top-level rather than inside `reconciliation`,
+            because burying the real figure inside the block that explains the gap
+            is how it gets missed.
         energy_cost:
           type: number
-          description: Sum of the per-device costs. Excludes the standing charge.
+          description: >-
+            Sum of the per-device costs. Excludes the standing charge AND the
+            unmonitored remainder — see `scope`.
         standing_charge:
           type: number
           description: >-

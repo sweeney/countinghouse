@@ -23,13 +23,18 @@
   ],
   "effective_rate": 0.21935,
   "energy_cost": 0.4606,
+  "household_energy_cost": -0,
+  "household_total": 0.3243,
   "reconciliation": {
     "coverage": 0,
     "meter_kwh": 0,
     "meter_present": true,
     "monitored_kwh": 2.1,
-    "unmonitored_kwh": -2.1
+    "unmonitored_cost": -0.4606,
+    "unmonitored_kwh": -2.1,
+    "unmonitored_priced_kwh": -2.1
   },
+  "scope": "monitored_devices",
   "standing_charge": 0.3243,
   "standing_charge_source": "config",
   "total": 0.7849,

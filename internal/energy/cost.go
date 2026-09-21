@@ -73,7 +73,25 @@ type Reconciliation struct {
 	MeterKWh       *float64 `json:"meter_kwh,omitempty"`
 	UnmonitoredKWh *float64 `json:"unmonitored_kwh,omitempty"`
 	Coverage       *float64 `json:"coverage,omitempty"`
+
+	// UnmonitoredCost is the rest-of-home energy priced through the same pricer
+	// the device rows used, so /bill and /series?group_by=house cannot disagree
+	// about what it cost. Omitted when it could not be derived.
+	UnmonitoredCost *float64 `json:"unmonitored_cost,omitempty"`
+
+	// UnmonitoredPricedKWh is the energy UnmonitoredCost was computed from — see
+	// UnmonitoredCost.PricedKWh for why it can differ from UnmonitoredKWh.
+	UnmonitoredPricedKWh *float64 `json:"unmonitored_priced_kwh,omitempty"`
 }
+
+// ScopeMonitoredDevices names what EnergyCost and Total have always covered: the
+// monitored devices, not the household.
+//
+// On the wire because the name /bill does not say it, and on a home where the
+// meter sees twice what the plugs do, quoting `total` understates the bill by
+// half. The field is additive and the numbers are unchanged; what changes is that
+// the scope is now stated rather than inferred from the reconciliation block.
+const ScopeMonitoredDevices = "monitored_devices"
 
 // Bill is the assembled /bill response for one window: per-device breakdown,
 // money totals (VAT-inclusive £), and meter reconciliation.
@@ -83,6 +101,22 @@ type Bill struct {
 	Devices        []DeviceCost `json:"devices"`
 	EnergyCost     float64      `json:"energy_cost"`
 	StandingCharge float64      `json:"standing_charge"`
+
+	// Scope names what EnergyCost and Total cover. Always present.
+	Scope string `json:"scope,omitempty"`
+
+	// HouseholdEnergyCost and HouseholdTotal are the whole-home figures: the
+	// monitored devices PLUS the unmonitored remainder, and that plus the standing
+	// charge. Omitted when there is no meter, or when the remainder could not be
+	// priced — a household total that silently excluded half the house is the
+	// problem, not the fix.
+	//
+	// Top-level rather than inside `reconciliation`, deliberately. Both fields are
+	// new, so their placement cannot threaten `total`'s meaning, and burying the
+	// real figure inside the block that explains the gap is how it got missed in
+	// the first place.
+	HouseholdEnergyCost *float64 `json:"household_energy_cost,omitempty"`
+	HouseholdTotal      *float64 `json:"household_total,omitempty"`
 
 	// StandingChargeSource is "archive" when the standing charge is the supplier's
 	// own VAT-inclusive daily figure, "config" when it is the configured ex-VAT rate
@@ -121,6 +155,36 @@ type BillPricing struct {
 	StandingCharge       float64
 	StandingChargeSource string
 	Attribution          string
+
+	// Unmonitored carries the rest-of-home energy priced through the SAME pricer
+	// the device rows went through. Supplied by the caller rather than derived
+	// here, because deriving it needs the bucketed build — and using that build is
+	// exactly what stops /bill and /series disagreeing about what the rest of the
+	// home cost.
+	Unmonitored UnmonitoredCost
+}
+
+// UnmonitoredCost is the rest-of-home remainder, priced.
+//
+// Known is load-bearing: false means the figure could not be derived (no meter,
+// or no pricer), and the household fields are then omitted rather than sent as a
+// confident zero. That is the same distinction Pricer.RateAt's bool carries.
+type UnmonitoredCost struct {
+	Known bool
+
+	// Cost is the VAT-inclusive £ of the rest-of-home energy.
+	Cost float64
+
+	// PricedKWh is the energy that Cost was actually computed from.
+	//
+	// It is NOT always Reconciliation.UnmonitoredKWh, and the difference is not a
+	// bug. UnmonitoredKWh is meter − monitored over the WHOLE window, signed. The
+	// bucketed path prices the per-bucket residual, each half hour clamped at zero
+	// and charged at its own rate, so a window with any negative bucket prices
+	// slightly more energy than the window-level subtraction suggests. Reporting
+	// the kWh the money came from keeps the pair self-consistent instead of
+	// implying an effective rate nobody charged.
+	PricedKWh float64
 }
 
 // DeviceCostFor returns the VAT-inclusive £ cost of kwh at tariff t:
@@ -223,6 +287,22 @@ func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, meterPr
 		rec.Coverage = &coverage
 	}
 
+	// The household figures: what a person would call "the bill". EnergyCost and
+	// Total keep their existing meanings exactly — they are the MONITORED scope,
+	// which `scope` now names — because changing them would be a silent numerical
+	// change to every existing consumer, the worst kind.
+	var householdEnergy, householdTotal *float64
+	if meterPresent && pricing.Unmonitored.Known {
+		uc := pricing.Unmonitored.Cost
+		rec.UnmonitoredCost = &uc
+		pk := pricing.Unmonitored.PricedKWh
+		rec.UnmonitoredPricedKWh = &pk
+
+		he := energyCost + uc
+		ht := he + standing
+		householdEnergy, householdTotal = &he, &ht
+	}
+
 	return Bill{
 		Window:               window.Label,
 		Currency:             "GBP",
@@ -231,6 +311,9 @@ func AssembleBill(window Window, devices []DeviceCost, meterKWh float64, meterPr
 		StandingCharge:       standing,
 		StandingChargeSource: pricing.StandingChargeSource,
 		Total:                energyCost + standing,
+		Scope:                ScopeMonitoredDevices,
+		HouseholdEnergyCost:  householdEnergy,
+		HouseholdTotal:       householdTotal,
 		Reconciliation:       rec,
 		Attribution:          pricing.Attribution,
 		// Priced energy only: dividing by kWh that carried no price would quietly
