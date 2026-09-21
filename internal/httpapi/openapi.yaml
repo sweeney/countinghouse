@@ -326,6 +326,143 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /compare:
+    get:
+      summary: What this window would have cost under an alternative
+      description: >
+        Prices the window as it actually was, and again under one or more
+        counterfactuals, returning both plus the difference per component.
+
+
+        It exists because "what would this have cost under X?" was the question
+        nearly every consumer was really asking, and each of them hand-rolled it.
+        Five hand-rolls in one session produced two baseline errors — comparing
+        against a tariff that had already EXPIRED, and omitting the
+        STANDING-CHARGE difference. Both are errors a server-side primitive makes
+        structurally hard: `available_now` is a labelled field rather than a
+        silence, and `delta` is split so the standing charge has its own
+        component and the totals will not reconcile without it.
+
+
+        The service already holds the dated agreements, the price curve and the
+        consumption. The client supplies only the alternative.
+
+
+        The baseline runs through the same path /bill runs, so a comparison and a
+        bill cannot disagree about what actually happened. A window spanning a
+        tariff change is fine here, as on /bill: a cost can be summed across
+        tariffs where a curve cannot.
+      operationId: getCompare
+      tags: [data]
+      parameters:
+        - $ref: "#/components/parameters/Window"
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+        - name: scope
+          in: query
+          required: true
+          description: >
+            Which load to compare over. REQUIRED, with no default.
+
+
+            On one measured window the same question answered -0.4% at
+            `household` scope and -31.8% at `monitored`: automation doing
+            excellent work on the load it controls, swamped at whole-house level
+            by unmonitored evening cooking. Both numbers are correct and they
+            support opposite conclusions, so a default would pick one silently,
+            once, for every caller, forever. The friction is the point.
+
+
+            `household` needs a whole-house meter; without one it is a 400
+            naming `monitored` as the alternative, rather than quietly answering
+            from the monitored devices and relabelling a partial figure.
+          schema:
+            type: string
+            enum: [household, monitored]
+        - name: alt
+          in: query
+          required: true
+          description: >
+            The counterfactual to compare against, as `kind` or `kind:k=v,k=v`.
+            REPEATABLE — five counterfactuals should be one call, not five.
+
+
+            `window_mean` — the same kWh spread flat across this window's own
+            prices. No parameters. The standing charge is unchanged, so the whole
+            difference is load shape: this is the number that says whether
+            shifting load actually paid. The mean is TIME-weighted; an
+            energy-weighted one is the effective rate already paid, so comparing
+            against it would always report level and answer nothing.
+
+
+            `tariff:id=<code or name>` — a dated agreement this service already
+            holds. Sets `available_now`. A half-hourly agreement is a 501:
+            comparing against it needs that tariff's own archived curve, and the
+            collector archives only the tariff this site is on.
+
+
+            `flat:unit_rate=&daily_standing_charge=&vat_rate=&label=` — rates the
+            caller supplies, for a quote that exists only on a letter. Rates are
+            ex-VAT, matching /tariffs. All three numbers are REQUIRED; see the
+            400 below.
+          schema:
+            type: array
+            items:
+              type: string
+          examples:
+            windowMean:
+              value: ["window_mean"]
+            namedTariff:
+              value: ["tariff:id=E-1R-VAR-22-11-01-C"]
+            renewalQuote:
+              value: ["flat:unit_rate=0.2150,daily_standing_charge=0.4200,vat_rate=0.05,label=Renewal quote"]
+      responses:
+        "200":
+          description: The actual cost and each alternative beside it
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/WindowCacheControl"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompareResponse"
+        "400":
+          description: >
+            Malformed window, a missing or invalid `scope`, no `alt`, an unknown
+            alt kind, or an `alt=flat` missing one of its three rates.
+
+
+            `vat_rate` in particular is NOT defaulted to 5%. A VAT rate assumed
+            wrong yields a comparison that is well-formed, internally consistent
+            and wrong by a few percent with nothing on the wire to say so — the
+            failure this service refuses everywhere else — and a statutory zero
+            rate currently in force makes 5% a poor guess besides.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No configured agreement has the requested id or name.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "501":
+          description: >
+            The named agreement is half-hourly, so comparing against it needs its
+            own price curve, which this instance does not archive.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: >
+            No tariff is configured, or — for `window_mean` — some half hour in
+            the window holds no price, so the window has no honest mean rate. A
+            mean over the priced half would be a plausible-looking wrong number.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
   /tariffs:
     get:
       summary: Current tariffs by fuel
@@ -2006,6 +2143,105 @@ components:
         days:
           type: number
           description: Price routes only — the window asked for.
+
+    Costed:
+      type: object
+      description: One priced view of a window. All money is VAT-inclusive GBP.
+      properties:
+        label:
+          type: string
+          description: What to call this in a UI; "actual" for the real bill.
+        tariff_codes:
+          type: array
+          items: { type: string }
+          description: >
+            The tariffs behind it, when known. Plural because a window may span a
+            switchover.
+        kwh:
+          type: number
+          description: >
+            The energy the comparison is over, at the requested scope. Every
+            alternative is priced on this same figure — a counterfactual changes
+            the price, not the consumption.
+        energy_cost: { type: number }
+        standing_charge: { type: number }
+        total: { type: number }
+      required: [label, kwh, energy_cost, standing_charge, total]
+
+    CompareDelta:
+      type: object
+      description: >
+        actual MINUS the alternative, per component. Negative means the actual was
+        cheaper.
+
+
+        Split rather than a single number because omitting the standing-charge
+        difference was one of the two baseline errors this endpoint exists to
+        prevent. `energy + standing == total` ALWAYS, including after rounding for
+        the wire — a much stronger guarantee than a sentence in the docs.
+      properties:
+        energy:   { type: number }
+        standing: { type: number }
+        total:    { type: number }
+      required: [energy, standing, total]
+
+    CompareAlternative:
+      allOf:
+        - $ref: "#/components/schemas/Costed"
+        - type: object
+          properties:
+            kind:
+              type: string
+              enum: [flat, tariff, window_mean]
+            available_now:
+              type: boolean
+              description: >
+                Whether this is something that could be bought today, from the
+                agreement's own dates against the service clock.
+
+
+                OMITTED where availability does not apply — a rate off a letter
+                has no dates, nor does the window's own mean. Present and false is
+                therefore a statement that the comparator has lapsed, which is the
+                expired-baseline error made impossible to miss.
+            available_note:
+              type: string
+              description: Why it is not available, when it is not.
+            delta:
+              $ref: "#/components/schemas/CompareDelta"
+            verdict:
+              type: string
+              enum: [actual_cheaper, alternative_cheaper, level]
+              description: >
+                The sign of delta.total, so a consumer does not have to decide
+                which direction is good. `level` covers a dead band of one
+                hundredth of a penny: below that, reporting a winner would be
+                noise dressed as a finding.
+          required: [kind, delta, verdict]
+
+    CompareResponse:
+      type: object
+      properties:
+        window: { type: string }
+        from:   { type: string, format: date-time }
+        to:     { type: string, format: date-time }
+        days:
+          type: number
+          description: >
+            Window length in FRACTIONAL days. Standing charges are pro-rated on
+            it, so a part-day window does not flatter or penalise an alternative
+            for a reason unrelated to the tariff.
+        scope:
+          type: string
+          enum: [household, monitored]
+        currency: { type: string, example: GBP }
+        actual:
+          $ref: "#/components/schemas/Costed"
+        alternatives:
+          type: array
+          items:
+            $ref: "#/components/schemas/CompareAlternative"
+      required: [window, from, to, days, scope, currency, actual, alternatives]
 
     ClampReport:
       type: object

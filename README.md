@@ -44,6 +44,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=&prices=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter (see [When the parts do not sum to the meter](#when-the-parts-do-not-sum-to-the-meter) for the one case where they overshoot it). `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. `prices=true` adds the per-bucket price array — see [The price behind each bucket](#the-price-behind-each-bucket). |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
 | `GET /bill?window=&from=&to=` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `scope`, plus `household_energy_cost`/`household_total` — see [What `/bill` covers](#what-bill-covers). Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
+| `GET /compare?window=&from=&to=&scope=&alt=` | What this window would have cost under one or more alternatives, with the difference split per component — see [Counterfactuals](#counterfactuals). `scope` is required. `alt` is repeatable. |
 | `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered, when it was fetched, and whether that snapshot is stale. Each agreement carries `available_now`. |
 | `GET /prices` | Half-hourly price curve over a window, past or future. |
 | `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
@@ -1004,6 +1005,77 @@ half ahead.
 
 `/healthz` carries a `reasons` array naming every failing condition, sorted and omitted
 when healthy.
+
+### Counterfactuals
+
+`GET /compare` answers *"what would this window have cost under X?"* — the question
+nearly every consumer of this service turned out to be asking, and the one each of them
+hand-rolled. Five hand-rolls in one session produced two baseline errors: comparing
+against a tariff that had already **expired**, and omitting the **standing-charge**
+difference.
+
+Both are errors the shape now makes structurally hard rather than merely documented
+against.
+
+```
+GET /compare?window=30d&scope=household
+    &alt=window_mean
+    &alt=tariff:id=E-1R-VAR-22-11-01-C
+    &alt=flat:unit_rate=0.2150,daily_standing_charge=0.4200,vat_rate=0.05,label=Renewal quote
+```
+
+```json
+{
+  "scope": "household", "days": 30.0, "currency": "GBP",
+  "actual": { "label": "actual", "kwh": 418.336,
+              "energy_cost": 61.9237, "standing_charge": 11.832, "total": 73.7557 },
+  "alternatives": [
+    { "label": "Flexible Octopus", "kind": "tariff",
+      "available_now": false,
+      "available_note": "this agreement ended 2026-03-01 and is not on sale",
+      "energy_cost": 91.7599, "standing_charge": 11.1174, "total": 102.8773,
+      "delta": { "energy": -29.8362, "standing": 0.7146, "total": -29.1216 },
+      "verdict": "actual_cheaper" }
+  ]
+}
+```
+
+**`delta` is split per component**, and `energy + standing == total` always — including
+after rounding for the wire. You cannot quietly drop the standing charge when it has its
+own field and the totals will not reconcile without it.
+
+**`available_now` is a labelled field**, derived from the agreement's own dates against
+the service clock. An expired comparator is a statement, not a silence. It is *omitted*
+where availability does not apply — a rate off a letter has no dates, nor does the
+window's own mean — so `false` always means something.
+
+**`scope` is required and has no default.** On one measured window the same question
+answered **−0.4%** at `household` scope and **−31.8%** at `monitored`: automation doing
+excellent work on the load it controls, swamped at whole-house level by unmonitored
+evening cooking. Both numbers are correct and they support opposite conclusions. A
+default would pick one silently, once, for every caller, forever — so the friction is
+deliberate. `household` needs a whole-house meter; without one it refuses and names
+`monitored`, rather than answering from the monitored devices and relabelling a partial
+figure as the whole house.
+
+`alt` is **repeatable**: five counterfactuals should be one call.
+
+| `alt` | supply | notes |
+|---|---|---|
+| `window_mean` | — | the same kWh spread flat across this window's own prices. The standing charge is unchanged, so the whole difference is **load shape** — the number that says whether shifting load actually paid. The mean is time-weighted; an energy-weighted one is the effective rate already paid, so it would always report `level`. |
+| `tariff:id=` | a code or name from `/tariffs` | sets `available_now`. A **half-hourly** agreement is a `501`: comparing against it needs that tariff's own archived curve, and the collector archives only the tariff this site is on. |
+| `flat:unit_rate=&daily_standing_charge=&vat_rate=&label=` | the rates | the renewal-letter case. Rates are **ex-VAT**, matching `/tariffs`. |
+
+All three `flat` numbers are **required**. `vat_rate` in particular is not defaulted to
+5%: a VAT rate assumed wrong yields a comparison that is well-formed, internally
+consistent and wrong by a few percent with nothing on the wire to say so — and the
+statutory zero rate now in force makes 5% a poor guess besides.
+
+The baseline runs through the same path `/bill` runs, so a comparison and a bill cannot
+disagree about what actually happened. Standing charges are pro-rated on **fractional**
+days, so a part-day window does not flatter or penalise an alternative for a reason
+unrelated to the tariff. A window spanning a tariff change is fine here, as on `/bill`:
+a cost can be summed across tariffs where a curve cannot.
 
 ### Knowing whether config is stale
 

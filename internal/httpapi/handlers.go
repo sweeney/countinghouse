@@ -778,6 +778,20 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	bill, ok := s.assembleBill(w, r, win, plan)
+	if !ok {
+		return
+	}
+	s.writeJSONWindowCacheable(w, win, roundBill(bill))
+}
+
+// assembleBill builds the bill for a window under a resolved plan, writing the
+// refusal and reporting false on failure.
+//
+// Split out of handleBill so /compare can establish its BASELINE through exactly
+// this path rather than a parallel one. An endpoint whose entire output is a
+// difference from the actual bill must not be able to disagree with the bill.
+func (s *Server) assembleBill(w http.ResponseWriter, r *http.Request, win energy.Window, plan tariffPlan) (energy.Bill, bool) {
 	devices := s.Config.Devices()
 
 	var billable []energy.DeviceCost
@@ -816,7 +830,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 	unmonitored, err := s.costDevices(r, win, plan, devices, billable)
 	if err != nil {
 		influxFailed(w, err)
-		return
+		return energy.Bill{}, false
 	}
 
 	// Whole-house meter total. If no electricity meter is configured we pass
@@ -828,7 +842,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		kwh, _, err := s.deviceWindowKWh(r, meterID, energy.EnergyMeterClass, win)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, "influx query failed for meter "+meterID+": "+err.Error())
-			return
+			return energy.Bill{}, false
 		}
 		meterKWh = kwh
 	}
@@ -853,13 +867,12 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 	// The standing charge rides on the bill and is never apportioned across devices:
 	// no device causes it, so splitting it would invent a number that reads like a
 	// measurement (decision D2).
-	bill := energy.AssembleBill(win, billable, meterKWh, meterPresent, energy.BillPricing{
+	return energy.AssembleBill(win, billable, meterKWh, meterPresent, energy.BillPricing{
 		StandingCharge:       plan.standing,
 		StandingChargeSource: plan.standingSource,
 		Attribution:          plan.attribution(),
 		Unmonitored:          unmonitored,
-	})
-	s.writeJSONWindowCacheable(w, win, roundBill(bill))
+	}), true
 }
 
 // roundBill rounds every numeric field of a Bill for presentation. Totals are

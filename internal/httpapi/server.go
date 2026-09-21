@@ -273,6 +273,7 @@ var dataRoutes = []route{
 	{"GET /events", func(s *Server) http.HandlerFunc { return s.handleEvents }},
 	{"GET /series", func(s *Server) http.HandlerFunc { return s.handleSeries }},
 	{"GET /bill", func(s *Server) http.HandlerFunc { return s.handleBill }},
+	{"GET /compare", func(s *Server) http.HandlerFunc { return s.handleCompare }},
 	{"GET /tariffs", func(s *Server) http.HandlerFunc { return s.handleTariffs }},
 	{"GET /prices", func(s *Server) http.HandlerFunc { return s.handlePrices }},
 	{"GET /prices/upcoming", func(s *Server) http.HandlerFunc { return s.handleUpcomingPrices }},
