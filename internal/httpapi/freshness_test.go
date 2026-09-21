@@ -226,3 +226,67 @@ func TestPrices_DayCapRefusalCarriesTheNumbers(t *testing.T) {
 		t.Errorf("days = %v, should exceed the cap", body.Limits.Days)
 	}
 }
+
+// The adjacent rejection from the same endpoint must carry its constraint as
+// data too. Reported in review as a live false positive: reaching for
+// interval=1m to provoke a cap breach returns THIS instead, so a check for
+// `limits` failed for a reason unrelated to caps, and a retry loop would
+// conclude `limits` is unreliable rather than that it met a different rule.
+func TestSeries_IntervalEnumRefusalCarriesTheAllowedSet(t *testing.T) {
+	s := floorSeriesSetup(t)
+	w := doGET(t, s, "/series?window=today&group_by=house&interval=1m")
+	if w.Code != 400 {
+		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Error  string `json:"error"`
+		Limits struct {
+			Interval         string   `json:"interval"`
+			AllowedIntervals []string `json:"allowed_intervals"`
+		} `json:"limits"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Error == "" {
+		t.Error("the prose message was dropped")
+	}
+	if body.Limits.Interval != "1m" {
+		t.Errorf("limits.interval = %q, want the token asked for", body.Limits.Interval)
+	}
+	if len(body.Limits.AllowedIntervals) == 0 {
+		t.Fatalf("no allowed_intervals: %s", w.Body.String())
+	}
+	// The whole set, so a client can pick without knowing the vocabulary.
+	want := map[string]bool{"5m": true, "15m": true, "30m": true, "1h": true, "6h": true, "1d": true}
+	if len(body.Limits.AllowedIntervals) != len(want) {
+		t.Errorf("allowed_intervals = %v, want all six", body.Limits.AllowedIntervals)
+	}
+	for _, iv := range body.Limits.AllowedIntervals {
+		if !want[iv] {
+			t.Errorf("unexpected interval %q in allowed set", iv)
+		}
+	}
+}
+
+// Both rejections come from the same endpoint, so both must be machine-readable
+// — that is the claim the limits block makes.
+func TestSeries_BothIntervalRefusalsCarryLimits(t *testing.T) {
+	s := floorSeriesSetup(t)
+	for _, path := range []string{
+		"/series?window=today&group_by=house&interval=1m",                                                     // not in the enum
+		"/series?window=custom&from=2026-01-01T00:00:00Z&to=2026-03-01T00:00:00Z&interval=30m&group_by=house", // over the cap
+	} {
+		w := doGET(t, s, path)
+		if w.Code != 400 {
+			t.Fatalf("%s: want 400, got %d", path, w.Code)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, ok := body["limits"]; !ok {
+			t.Errorf("%s: no limits block, so a caller still has to parse prose", path)
+		}
+	}
+}

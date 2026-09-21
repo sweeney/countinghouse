@@ -108,7 +108,10 @@ func ResolveInterval(win Window, requested string, loc *time.Location) (Interval
 
 	iv, ok := lookupInterval(token)
 	if !ok {
-		return Interval{}, fmt.Errorf("energy: interval %q not allowed; choose one of %v", requested, AllowedIntervals())
+		return Interval{}, &IntervalNotAllowedError{
+			Interval: requested,
+			Allowed:  AllowedIntervals(),
+		}
 	}
 
 	n := bucketCount(win, iv, loc)
@@ -174,4 +177,29 @@ type BucketCapError struct {
 func (e *BucketCapError) Error() string {
 	return fmt.Sprintf("energy: interval %q yields %d buckets over the window, exceeding the cap of %d; request a coarser interval (e.g. %q)",
 		e.Interval, e.Buckets, e.MaxBuckets, e.Suggested)
+}
+
+// IntervalNotAllowedError is the refusal for an interval outside the allowed set.
+//
+// Typed for the same reason BucketCapError is, and because the two arrive from
+// the SAME endpoint: a caller discovering constraints programmatically hits both,
+// and getting structure from one and a sentence from the other means it still has
+// to parse prose — which is the thing making caps machine-readable set out to
+// stop.
+//
+// Reported in review as a live false positive: reaching for interval=1m to
+// provoke a cap breach returns this instead, so a check for `limits` fails for a
+// reason that has nothing to do with caps, and a retry loop concludes `limits` is
+// unreliable rather than that it met a different rule.
+type IntervalNotAllowedError struct {
+	// Interval is the token the caller asked for.
+	Interval string
+
+	// Allowed is the whole accepted set, smallest first, so a client can pick
+	// without knowing the vocabulary in advance.
+	Allowed []string
+}
+
+func (e *IntervalNotAllowedError) Error() string {
+	return fmt.Sprintf("energy: interval %q not allowed; choose one of %v", e.Interval, e.Allowed)
 }

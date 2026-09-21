@@ -1031,6 +1031,20 @@ families, so one auto-chunking routine can read either. It is omitted for a cale
 interval (`1d`), whose real length varies with DST and month length — a single number
 would be a lie there, and this field exists to be arithmetic you can trust.
 
+The **other** interval rejection carries its constraint too, since both arrive from the
+same endpoint:
+
+```json
+{
+  "error": "energy: interval \"1m\" not allowed; choose one of [5m 15m 30m 1h 6h 1d]",
+  "limits": { "interval": "1m", "allowed_intervals": ["5m","15m","30m","1h","6h","1d"] }
+}
+```
+
+Without it, a caller writing one retry loop gets structure from the cap breach and a
+sentence from the enum rejection, and has to parse prose after all — so "every `400`
+from these routes states its limit as data" would be nearly true rather than true.
+
 ### What `/bill` covers
 
 `energy_cost` is the sum of the device rows, and `total` is that plus the standing

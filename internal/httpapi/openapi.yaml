@@ -1946,6 +1946,20 @@ components:
         suggested_interval:
           type: string
           description: /series only — the finest allowed interval that would fit.
+        allowed_intervals:
+          type: array
+          items: { type: string }
+          description: >
+            /series only, and present on the OTHER interval rejection: the whole
+            accepted set, smallest first, so a client can pick without knowing the
+            vocabulary in advance.
+
+
+            It is here because both refusals arrive from the same endpoint. A
+            caller discovering constraints programmatically meets the cap breach
+            and the enum rejection, and getting structure from one and a sentence
+            from the other means it still has to parse prose — which is what this
+            block exists to stop.
         max_days:
           type: integer
           description: Price routes only.

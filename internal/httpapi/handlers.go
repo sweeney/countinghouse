@@ -201,6 +201,17 @@ func (s *Server) resolveSeriesParams(w http.ResponseWriter, r *http.Request) (en
 	}
 	iv, err := energy.ResolveInterval(win, r.URL.Query().Get("interval"), s.loc())
 	if err != nil {
+		var notAllowed *energy.IntervalNotAllowedError
+		if errors.As(err, &notAllowed) {
+			// The adjacent rejection from the same endpoint, carrying its
+			// constraint as data too — so "every 400 from these routes states its
+			// limit" is true rather than nearly true.
+			writeErrorWithLimits(w, http.StatusBadRequest, err.Error(), map[string]any{
+				"interval":          notAllowed.Interval,
+				"allowed_intervals": notAllowed.Allowed,
+			})
+			return energy.Window{}, energy.Interval{}, false
+		}
 		var cap *energy.BucketCapError
 		if errors.As(err, &cap) {
 			limits := map[string]any{
