@@ -23,6 +23,18 @@ type Tariff struct {
 	// Name is the agreement's human label, when the document carries one.
 	Name string `json:"name,omitempty"`
 
+	// AgreementID is the supplier's tariff code as the AGREEMENT declared it,
+	// carried for EVERY agreement type — unlike TariffCode below, which is set
+	// only for half-hourly ones because its presence is the marker that MAKES a
+	// resolved tariff half-hourly.
+	//
+	// The two exist separately because that marker cannot also serve as a label:
+	// a fixed agreement must have an empty TariffCode or the cost layer would
+	// price it from an archive that holds nothing for it, yet it still has an
+	// identity worth naming. Conflating them is what made /series?prices=true
+	// report one tariff_code for a window spanning two agreements.
+	AgreementID string `json:"agreement_id,omitempty"`
+
 	// TariffCode is set when the unit rate is HALF-HOURLY: it varies within the
 	// period, so it comes from the price archive rather than from config, and this
 	// is the key it is archived under. UnitRate is zero in that case.

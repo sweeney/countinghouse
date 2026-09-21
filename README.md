@@ -41,7 +41,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /devices/{id}/series?window=&interval=&shape=` | Single-device time-series (kWh / cost / avg W per bucket), for any energy-capable device **including the whole-house meter** (excluded from `/series?group_by=device`, but a request for one device cannot double-count). Reserved id `unmonitored` serves the rest-of-home series in the same shape — the *same* shape, so it omits the house-only `coverage`/`stale_monitored_*` signals even though deriving it needs the whole-house decomposition; `group_by=house` carries those beside the identical values (404 when no meter is configured). |
 | `GET /devices/{id}/events?window=` | State-transition events (for vertical-line overlays). |
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
-| `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter (see [When the parts do not sum to the meter](#when-the-parts-do-not-sum-to-the-meter) for the one case where they overshoot it). `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
+| `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=&prices=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter (see [When the parts do not sum to the meter](#when-the-parts-do-not-sum-to-the-meter) for the one case where they overshoot it). `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. `prices=true` adds the per-bucket price array — see [The price behind each bucket](#the-price-behind-each-bucket). |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
 | `GET /bill?window=&from=&to=` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered. |
@@ -976,6 +976,83 @@ half ahead.
 
 `/healthz` carries a `reasons` array naming every failing condition, sorted and omitted
 when healthy.
+
+### The price behind each bucket
+
+`/series` returns `cost`, but cost is `kwh × price` — and you cannot recover the price
+from a bucket where `kwh` is zero. Those are exactly the buckets that answer *"it was
+cheap and we did **not** use it"*, which is what a load-shifting analysis is really
+asking. So `prices=true` returns the factor alongside the product:
+
+```
+GET /series?window=7d&interval=30m&group_by=house&prices=true
+```
+
+```json
+{
+  "buckets": ["2026-08-24T00:00:00+01:00", "2026-08-24T00:30:00+01:00", "..."],
+  "prices": [0.13977, 0.12104, null, "..."],
+  "price_unit": "GBP/kWh",
+  "price_vat_included": true,
+  "price_basis": "slot",
+  "unpriced_buckets": 1,
+  "tariff_codes": ["E-1R-AGILE-24-10-01-C"],
+  "series": [{ "key": "meter", "kwh": [], "cost": [], "avg_w": [] }]
+}
+```
+
+It is **opt-in**, so no existing payload grows, and it is on `/devices/{id}/series` and
+`/devices/unmonitored/series` too.
+
+**`len(prices) == len(buckets)`, same order, always.** That is the contract to zip
+against. A `null` means **no rate is held** for that bucket, never free — the same
+distinction `unpriced_kwh` draws — and `unpriced_buckets` counts them, so `0` is a
+positive assertion that the window is fully priced.
+
+Each bucket is priced over **the part of it the window covers**, not over its nominal
+span. The axis is built on calendar boundaries, so a `custom` window starting mid-bucket
+has a first bucket labelled *before* the window begins — and since its `kwh` and `cost`
+already describe only the covered part, its price has to as well, or the three do not
+belong in one row.
+
+**Pounds, not pence.** The price family speaks `p/kWh`; this array speaks `GBP/kWh`,
+because it sits beside `cost[]` and `kwh[]` in the same response and self-consistency
+inside one payload beats consistency with a different endpoint. `price_unit` says so
+either way.
+
+`price_basis` says how each value was arrived at, and it is the field that makes the
+array safe to do arithmetic with:
+
+| `price_basis` | when | value |
+|---|---|---|
+| `slot` | the bucket sits inside one rate interval (`5m`, `15m`, `30m` against a half-hourly tariff) | that interval's own rate — exact |
+| `mean_over_bucket` | the bucket spans several (`1h`, `6h`, `1d`) | the **time-weighted** mean across them |
+| `flat` | one rate covers all time | that rate, repeated |
+
+**The identity `cost[i] == kwh[i] × prices[i]` holds only when `price_basis` is
+`slot`.** At coarser buckets the cost accumulates on the rate grid while the reported
+price is a mean over the bucket, so the identity is deliberately false there — stated
+here because an unstated arithmetic relationship is how the old string join failed.
+
+The mean is **time-weighted, not energy-weighted**: energy-weighted is `cost ÷ kwh`,
+which is undefined in a zero-kWh bucket, and those are the buckets that matter most
+here. A coarse bucket is priced only when **every** interval inside it is; otherwise it
+is `null`, because a mean over the slots that happen to be held is a plausible-looking
+wrong number.
+
+`tariff_codes` is plural because a `/series` window **may** span a switchover. `/prices`
+refuses one — a price *curve* is a property of a single tariff — but a per-bucket array
+is not a curve: each bucket belongs to exactly one tariff, so every value in it is
+honest.
+
+**Fixed agreements are named too**, so `len(tariff_codes)` can be trusted as the number
+of tariffs in the window — the natural reading of a plural array. Each entry is the
+supplier tariff code where there is one, the agreement's own `id` otherwise, and its
+`name` when a fixed block carries neither. Entries de-duplicate by that label, so a
+VAT-only agreement split — two blocks describing one tariff, as in the
+[zero-rate runbook](#runbook-the-temporary-zero-rate-of-vat-1-oct-2026--31-mar-2027) —
+collapses to a single entry, because curve identity is what makes a tariff change rather
+than block count.
 
 ### When the parts do not sum to the meter
 
