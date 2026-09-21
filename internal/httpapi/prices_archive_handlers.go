@@ -211,3 +211,81 @@ func missingRanges(c prices.Curve, loc *time.Location) []map[string]any {
 	flush(prev)
 	return out
 }
+
+// handleArchivedStats serves GET /prices/stats?tariff_code=… — the product's
+// aggregates, with no agreement applied.
+//
+// The other half of asking about a product rather than a purchase. /prices
+// gained ?tariff_code= so the archive could be READ by code; without the same on
+// this route the archive could not be AGGREGATED by code, and the two ideas that
+// together answer "how often do cheap slots occur in winter versus summer" never
+// met: /prices caps at 31 days, so two years remained ~24 paginated calls and a
+// client-side rollup — the same shape of work the rollup exists to remove.
+//
+// It carries the same three semantics handleArchivedCurve establishes, and the
+// third matters more here than there: a monthly row silently computed over a
+// partial month is exactly the failure `days` was added to prevent, so an
+// unreachable stretch is reported rather than quietly averaged over.
+func (s *Server) handleArchivedStats(w http.ResponseWriter, r *http.Request, code string) {
+	win, ok := s.resolveWindow(w, r)
+	if !ok {
+		return
+	}
+	// The 366-day cap, not /prices' 31: a row per day or per month is bounded by
+	// the window in a way a row per slot is not, which is the whole reason a
+	// seasonal window belongs on this route.
+	if !capWindow(w, win, maxStatsDays, "daily rows") {
+		return
+	}
+	if !s.requirePriceArchive(w) {
+		return
+	}
+
+	groupBy := r.URL.Query().Get("group_by")
+	if groupBy == "" {
+		groupBy = prices.GroupByDay
+	}
+	if !prices.ValidPeriodGrouping(groupBy) {
+		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want day or month)")
+		return
+	}
+	cheapBelow, ok := parseCheapBelow(w, r)
+	if !ok {
+		return
+	}
+
+	slots, err := s.PriceReader.Range(r.Context(), code, win.Start.UTC(), win.Stop.UTC())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "could not read the price archive: "+err.Error())
+		return
+	}
+
+	loc := s.loc()
+	curve := prices.NewCurve(win.Start.UTC(), win.Stop.UTC(), slots)
+
+	body := map[string]any{
+		"tariff_code": code,
+		"scope":       "product",
+		"window":      win.Label,
+		"from":        win.Start.In(loc), "to": win.Stop.In(loc),
+		"unit": "p/kWh", "vat_included": true,
+		// The supplier's own inc/exc pair, not the configured vat_rate applied
+		// here — grossing up by this site's rate would answer "what would I have
+		// paid", which is the other question.
+		"vat_source":  "supplier",
+		"half_hourly": true,
+		"group_by":    groupBy,
+		"cheap_below": cheapBelow,
+		"complete":    curve.Complete(),
+	}
+	if miss := missingRanges(curve, loc); len(miss) > 0 {
+		body["missing"] = miss
+	}
+
+	// periods[] at BOTH groupings on this route, never days[]. The
+	// agreement-scoped path's days[] carries a different per-day schema
+	// (prices.DayStats), and serving two different shapes under one key is how a
+	// consumer ends up parsing whichever it happened to meet first.
+	body["periods"] = roundPeriods(curve.PeriodStatsOver(loc, groupBy, cheapBelow))
+	writeJSONCachedWindow(w, r, code, win, curve.Fingerprint(), body)
+}

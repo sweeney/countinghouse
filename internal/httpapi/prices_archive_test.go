@@ -257,3 +257,172 @@ func TestPricesByCode_StillCapsTheWindow(t *testing.T) {
 		t.Errorf("want 400 over the cap, got %d", code)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// /prices/stats?tariff_code= — the other half of friction #2.
+//
+// /prices gained ?tariff_code= so the archive could be READ by code. Without the
+// same here the archive could not be AGGREGATED by code, so "how often do cheap
+// slots occur in winter versus summer" was still ~24 paginated /prices calls and
+// a client-side rollup: the rollup existed but could not be pointed at it.
+// ---------------------------------------------------------------------------
+
+// The reviewer's repro: a seasonal window, by code, far outside any configured
+// agreement. The agreement path refuses it; the product path answers.
+func TestArchivedStats_AnswersASeasonalWindowByCode(t *testing.T) {
+	s := pxFlatConfig(t)
+	now := pxNow(t)
+	// Two days of slots inside the window we ask about.
+	start := now.Add(-48 * time.Hour)
+	s.PriceReader = fakePriceReader{slots: map[string][]prices.Slot{
+		"E-1R-AGILE-X": pxSlots(start, 10, 20, 5, 40, 30, 60),
+	}}
+
+	w := doGET(t, s, "/prices/stats?window=7d&group_by=month&tariff_code=E-1R-AGILE-X&cheap_below=10")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		TariffCode string  `json:"tariff_code"`
+		Scope      string  `json:"scope"`
+		VATSource  string  `json:"vat_source"`
+		GroupBy    string  `json:"group_by"`
+		CheapBelow float64 `json:"cheap_below"`
+		Periods    []struct {
+			Period     string  `json:"period"`
+			Slots      int     `json:"slots"`
+			CheapSlots *int    `json:"cheap_slots"`
+			Min        float64 `json:"min"`
+		} `json:"periods"`
+		Days []any `json:"days"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Scope != "product" || body.TariffCode != "E-1R-AGILE-X" {
+		t.Errorf("scope/code = %q/%q, want product/E-1R-AGILE-X", body.Scope, body.TariffCode)
+	}
+	// The supplier's own VAT, as on the by-code curve.
+	if body.VATSource != "supplier" {
+		t.Errorf("vat_source = %q, want supplier", body.VATSource)
+	}
+	if len(body.Periods) == 0 {
+		t.Fatalf("no periods: %s", w.Body.String())
+	}
+	if body.Periods[0].CheapSlots == nil {
+		t.Error("cheap_below was supplied but no cheap counts came back")
+	}
+	// periods[] at every grouping on this route; never the agreement path's
+	// days[], whose per-day schema is different.
+	if body.Days != nil {
+		t.Error("days[] must not appear on the by-code route")
+	}
+}
+
+// Agreement boundaries are irrelevant to a question about the product, so the
+// window the agreement path refuses is answerable here. This is the gap the
+// review reported, stated as a test.
+func TestArchivedStats_IgnoresAgreementBoundaries(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Clock = fixedClock{pxNow(t)}
+	now := pxNow(t)
+	early := now.Add(-90 * 24 * time.Hour)
+	mid := now.Add(-24 * time.Hour)
+	s.Config = pxConfig{agreements: config.EnergyAgreements{
+		Agreements: map[string][]config.Agreement{"electricity": {
+			{From: &early, To: &mid, Name: "Old", Type: config.TariffTypeFixed,
+				VATRate: 0.05, UnitRate: 0.20, DailyStandingCharge: 0.5},
+			{From: &mid, Name: "New", Type: config.TariffTypeFixed,
+				VATRate: 0.05, UnitRate: 0.25, DailyStandingCharge: 0.5},
+		}},
+	}}
+	s.PriceReader = fakePriceReader{slots: map[string][]prices.Slot{
+		"E-1R-AGILE-X": pxSlots(now.Add(-2*time.Hour), 11, 12),
+	}}
+
+	// The agreement path refuses this window...
+	if w := doGET(t, s, "/prices/stats?window=7d&group_by=month"); w.Code == http.StatusOK {
+		t.Fatalf("fixture should span a tariff change; agreement path gave 200")
+	}
+	// ...and the product path answers it.
+	w := doGET(t, s, "/prices/stats?window=7d&group_by=month&tariff_code=E-1R-AGILE-X")
+	if w.Code != http.StatusOK {
+		t.Errorf("by code should ignore agreement boundaries, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// A monthly row silently computed over a partial month is exactly the failure
+// `days` was added to prevent, so an unreachable stretch is reported.
+func TestArchivedStats_ReportsWhatItCannotReach(t *testing.T) {
+	s := pxFlatConfig(t)
+	s.PriceReader = fakePriceReader{slots: map[string][]prices.Slot{}}
+
+	w := doGET(t, s, "/prices/stats?window=7d&group_by=month&tariff_code=E-1R-NEVER-HELD")
+	if w.Code != http.StatusOK {
+		t.Fatalf("a held-nothing answer is still an answer, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Complete bool `json:"complete"`
+		Missing  []struct {
+			From string `json:"from"`
+		} `json:"missing"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Complete {
+		t.Error("complete = true for a code the archive has never held")
+	}
+	if len(body.Missing) == 0 {
+		t.Errorf("an unreachable window must say what is missing: %s", w.Body.String())
+	}
+}
+
+// The 366-day cap, not /prices' 31 — the reason a seasonal window belongs here.
+func TestArchivedStats_UsesTheDailyRowCapNotTheSlotCap(t *testing.T) {
+	s := pxFlatConfig(t)
+	s.PriceReader = fakePriceReader{slots: map[string][]prices.Slot{}}
+
+	// 90 days: over /prices' 31-day cap, well inside this route's 366.
+	if w := doGET(t, s,
+		"/prices/stats?window=custom&from=2026-01-01T00:00:00Z&to=2026-04-01T00:00:00Z&tariff_code=E-1R-X"); w.Code != http.StatusOK {
+		t.Errorf("90 days should be inside the 366-day cap, got %d: %s", w.Code, w.Body.String())
+	}
+	// Over 366 still refuses.
+	if w := doGET(t, s,
+		"/prices/stats?window=custom&from=2024-01-01T00:00:00Z&to=2026-01-01T00:00:00Z&tariff_code=E-1R-X"); w.Code != http.StatusBadRequest {
+		t.Errorf("two years should exceed the cap, got %d", w.Code)
+	}
+}
+
+func TestArchivedStats_RefusesWithoutAnArchive(t *testing.T) {
+	s := pxFlatConfig(t)
+	s.PriceReader = nil
+	if w := doGET(t, s, "/prices/stats?window=7d&tariff_code=E-1R-X"); w.Code != http.StatusServiceUnavailable {
+		t.Errorf("want 503 with no archive, got %d", w.Code)
+	}
+}
+
+// The agreement-scoped route is untouched by any of this.
+func TestArchivedStats_AgreementPathUnchanged(t *testing.T) {
+	now := pxNow(t)
+	s := pxSetup(t, pxSlots(now.Add(-24*time.Hour), 20, 21, 22, -3, 60, 5))
+
+	w := doGET(t, s, "/prices/stats?window=7d")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Days  []any `json:"days"`
+		Scope any   `json:"scope"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Days) == 0 {
+		t.Error("the agreement path must still serve days[]")
+	}
+	if body.Scope != nil {
+		t.Error("scope is a by-code field and must not leak into the agreement path")
+	}
+}

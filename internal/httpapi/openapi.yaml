@@ -719,6 +719,35 @@ paths:
         - { $ref: "#/components/parameters/Window" }
         - { $ref: "#/components/parameters/From" }
         - { $ref: "#/components/parameters/To" }
+        - name: tariff_code
+          in: query
+          required: false
+          description: >
+            Aggregate the archive by PRODUCT rather than by agreement, returning
+            PriceStatsByCodeResponse.
+
+
+            The other half of `?tariff_code=` on /prices. That made the archive
+            READABLE by code; this makes it AGGREGABLE by code, and without both
+            the seasonal question stays out of reach: /prices caps at 31 days, so
+            two years of curve is ~24 paginated calls and a client-side rollup —
+            the work this endpoint exists to remove. This route returns a row per
+            day or per month rather than per slot, which is why it carries the
+            366-day cap and is where a seasonal window belongs.
+
+
+            Same three semantics as /prices?tariff_code=: the supplier's own VAT
+            rather than the configured rate (`vat_source`), agreement boundaries
+            irrelevant, and a window the archive cannot reach answering
+            `complete: false` with explicit `missing` ranges. The last matters
+            more here, because a monthly row silently computed over a partial
+            month is exactly the failure `days` was added to prevent.
+
+
+            Returns `periods[]` at BOTH groupings, never `days[]` — the
+            agreement-scoped `days[]` carries a different per-day schema.
+          schema:
+            type: string
         - name: group_by
           in: query
           required: false
@@ -777,6 +806,7 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/PriceStatsResponse"
                   - $ref: "#/components/schemas/PricePeriodStatsResponse"
+                  - $ref: "#/components/schemas/PriceStatsByCodeResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "503":
           description: >
@@ -1672,6 +1702,52 @@ components:
             properties:
               from: { type: string, format: date-time }
               to:   { type: string, format: date-time }
+
+    PriceStatsByCodeResponse:
+      type: object
+      description: >
+        The ?tariff_code= shape: the product's aggregates, with no agreement
+        applied. Carries periods[] at every grouping.
+      properties:
+        tariff_code: { type: string }
+        scope:
+          type: string
+          enum: [product]
+          description: >
+            Agreement resolution was bypassed, so these are the product's figures
+            and not necessarily what this site paid.
+        window: { type: string }
+        from:   { type: string, format: date-time }
+        to:     { type: string, format: date-time }
+        unit:   { type: string, example: p/kWh }
+        vat_included: { type: boolean }
+        vat_source:
+          type: string
+          enum: [supplier]
+        half_hourly: { type: boolean }
+        group_by:
+          type: string
+          enum: [day, month]
+        cheap_below:
+          type: number
+          description: The threshold echoed back; null when none was supplied.
+        complete:
+          type: boolean
+          description: Whether every half hour of the window holds a price.
+        missing:
+          type: array
+          description: >
+            Contiguous ranges the archive does not hold, present only when there
+            are any. A monthly row computed over a partial month would otherwise
+            read as a whole one.
+          items:
+            type: object
+            properties:
+              from: { type: string, format: date-time }
+              to:   { type: string, format: date-time }
+        periods:
+          type: array
+          items: { $ref: "#/components/schemas/PricePeriodStats" }
 
     PricePeriodStats:
       type: object

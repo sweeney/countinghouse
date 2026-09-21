@@ -50,7 +50,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /prices/tariffs` | What the price archive holds: codes, spans, slot counts, and whether each is still being collected. |
 | `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
 | `GET /prices/cheapest` | The cheapest contiguous window for a deferrable load. |
-| `GET /prices/stats?group_by=&cheap_below=` | Per-day min/max/mean/spread and plunge-slot counts. `group_by=month` rolls them up — see [Seasonal rollups](#seasonal-rollups). |
+| `GET /prices/stats?group_by=&cheap_below=&tariff_code=` | Per-day min/max/mean/spread and plunge-slot counts. `group_by=month` rolls them up; `tariff_code=` aggregates the archive by product — see [Seasonal rollups](#seasonal-rollups). |
 | `GET /metrics` | Query counters, Influx latency, `drift_buckets_total` (negative meter−monitored drift beyond the 0.1 kWh quantum), uptime, goroutines. |
 
 **Windows:** `today`, `week` (starts Monday), `month` — all period-to-date — and `custom`
@@ -1093,6 +1093,37 @@ afterwards, and the shape is chosen around that:
 
 `plunge_slots` is at-or-below zero; `negative_slots` is strictly below. They differ by
 the exactly-zero slots, which are free but not paid-to-take.
+
+### Rolling up the archive itself
+
+`group_by=month` alone is still **agreement-scoped**, and that is not enough to answer
+the question it was built for. On a house with four agreement changes in two years, no
+window longer than the current agreement is expressible: a 90-day request meets
+`400 this window spans a tariff change`, and only the stretch since the latest
+switchover can be rolled up at all.
+
+So `/prices/stats` takes `tariff_code` too:
+
+```
+GET /prices/stats?tariff_code=E-1R-AGILE-24-10-01-X&group_by=month&from=2024-10-01&to=2025-10-01
+```
+
+This is the other half of [`?tariff_code=` on `/prices`](#asking-about-the-product). That
+one made the archive **readable** by code; this makes it **aggregable** by code. Without
+both, two years of curve is ~24 paginated `/prices` calls (it caps at 31 days) and a
+client-side rollup — precisely the work the rollup exists to remove. This route returns a
+row per day or per month rather than per slot, which is why it carries the **366-day**
+cap and is where a seasonal window belongs.
+
+The three product semantics carry over unchanged: the supplier's own VAT rather than the
+configured rate (`vat_source: "supplier"`), agreement boundaries irrelevant, and a window
+the archive cannot reach answering `complete: false` with explicit `missing` ranges. The
+last matters more here than on the curve — a monthly row silently computed over a partial
+month is exactly the failure `days` was added to prevent.
+
+It returns `periods[]` at **both** groupings, never `days[]`, because the
+agreement-scoped `days[]` carries a different per-day schema and serving two shapes under
+one key is how a consumer ends up parsing whichever it met first.
 
 `cheap_below` is in **pence per kWh, inc VAT** — not pounds. `cheap_below=0.10` means a
 tenth of a penny and is accepted silently, because negative thresholds are meaningful
