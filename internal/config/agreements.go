@@ -119,6 +119,10 @@ func (a Agreement) resolve() Tariff {
 		VATRate:             a.VATRate,
 		DailyStandingCharge: a.DailyStandingCharge,
 		Name:                a.Name,
+		// Set for BOTH types, unlike TariffCode below. See Tariff.AgreementID:
+		// a fixed agreement has an identity even though it must not look
+		// half-hourly to the cost layer.
+		AgreementID: a.ID,
 	}
 	if a.Type == TariffTypeVariable {
 		// TariffCode is what marks the resolved tariff half-hourly, so the cost

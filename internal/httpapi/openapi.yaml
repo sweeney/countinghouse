@@ -1981,10 +1981,27 @@ components:
           items:
             type: string
           description: >
-            Every tariff the window touches, in order. Plural because a /series
-            window MAY span a switchover: /prices refuses one, since a curve is a
-            property of a single tariff, but a per-bucket array is not a curve —
-            each bucket belongs to exactly one tariff, so every value is honest.
+            Every tariff the window touches, in order, de-duplicated. Plural
+            because a /series window MAY span a switchover: /prices refuses one,
+            since a curve is a property of a single tariff, but a per-bucket array
+            is not a curve — each bucket belongs to exactly one tariff, so every
+            value is honest.
+
+
+            FIXED agreements are named too. Each entry is the supplier tariff code
+            where there is one, the agreement's own id otherwise, and its name when
+            a fixed block carries neither — so `len(tariff_codes)` can be trusted
+            as the number of tariffs in the window, which is the natural reading of
+            a plural array.
+
+
+            De-duplicated by that label, so a VAT-only agreement split — two blocks
+            describing one tariff, as in the zero-rate runbook — collapses to one
+            entry. Curve identity is what makes a tariff change, not block count.
+
+
+            Absent only for a legacy single-rate document carrying neither a code
+            nor a name, where there is genuinely no identity to report.
         buckets:
           type: array
           items:
@@ -2171,10 +2188,27 @@ components:
           items:
             type: string
           description: >
-            Every tariff the window touches, in order. Plural because a /series
-            window MAY span a switchover: /prices refuses one, since a curve is a
-            property of a single tariff, but a per-bucket array is not a curve —
-            each bucket belongs to exactly one tariff, so every value is honest.
+            Every tariff the window touches, in order, de-duplicated. Plural
+            because a /series window MAY span a switchover: /prices refuses one,
+            since a curve is a property of a single tariff, but a per-bucket array
+            is not a curve — each bucket belongs to exactly one tariff, so every
+            value is honest.
+
+
+            FIXED agreements are named too. Each entry is the supplier tariff code
+            where there is one, the agreement's own id otherwise, and its name when
+            a fixed block carries neither — so `len(tariff_codes)` can be trusted
+            as the number of tariffs in the window, which is the natural reading of
+            a plural array.
+
+
+            De-duplicated by that label, so a VAT-only agreement split — two blocks
+            describing one tariff, as in the zero-rate runbook — collapses to one
+            entry. Curve identity is what makes a tariff change, not block count.
+
+
+            Absent only for a legacy single-rate document carrying neither a code
+            nor a name, where there is genuinely no identity to report.
         series:
           type: array
           items:

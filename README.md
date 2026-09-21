@@ -1039,6 +1039,15 @@ refuses one — a price *curve* is a property of a single tariff — but a per-b
 is not a curve: each bucket belongs to exactly one tariff, so every value in it is
 honest.
 
+**Fixed agreements are named too**, so `len(tariff_codes)` can be trusted as the number
+of tariffs in the window — the natural reading of a plural array. Each entry is the
+supplier tariff code where there is one, the agreement's own `id` otherwise, and its
+`name` when a fixed block carries neither. Entries de-duplicate by that label, so a
+VAT-only agreement split — two blocks describing one tariff, as in the
+[zero-rate runbook](#runbook-the-temporary-zero-rate-of-vat-1-oct-2026--31-mar-2027) —
+collapses to a single entry, because curve identity is what makes a tariff change rather
+than block count.
+
 ### When the parts do not sum to the meter
 
 `unmonitored` is `clamp(meter − monitored)` **per bucket**, so a bucket where monitored

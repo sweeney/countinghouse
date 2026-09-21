@@ -513,6 +513,16 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 // an error. The prices array already reports that stretch as nulls, and failing
 // the whole request over a missing label would be the 503 this service replaced
 // with "answer what you can" everywhere else.
+//
+// A FIXED agreement is named too. It used to be skipped, because this read
+// Tariff.TariffCode and resolve() sets that only for half-hourly agreements —
+// its presence being the marker that makes a tariff half-hourly. So the field
+// was doing double duty, a marker in the cost layer and a label here, and the
+// two disagreed about what emptiness meant. The visible damage was in exactly
+// the case this array was made plural for: a window spanning fixed→variable
+// reported ONE code, so a consumer testing len(tariff_codes) == 1 to decide
+// "one tariff, so I may treat this as one curve" got yes for a window spanning
+// two.
 func (s *Server) tariffCodesFor(from, to time.Time) []string {
 	segments, err := s.Config.Tariffs().PeriodsBetween(from, to)
 	if err != nil {
@@ -521,14 +531,35 @@ func (s *Server) tariffCodesFor(from, to time.Time) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, seg := range segments {
-		code := seg.Tariff.TariffCode
-		if code == "" || seen[code] {
+		label := tariffLabel(seg.Tariff)
+		if label == "" || seen[label] {
 			continue
 		}
-		seen[code] = true
-		out = append(out, code)
+		seen[label] = true
+		out = append(out, label)
 	}
 	return out
+}
+
+// tariffLabel identifies a resolved tariff for the wire.
+//
+// TariffCode first, so a half-hourly tariff is named by the code its prices are
+// archived under — the identifier that can actually be looked up. Then the
+// agreement's own id, which a fixed agreement may legally carry. Then its name,
+// which is the only identifier a code-less fixed block has.
+//
+// Empty only for a legacy single-rate document carrying neither, where there
+// genuinely is no identity to report and inventing one would be the ids-as-labels
+// failure this service refuses elsewhere.
+func tariffLabel(t config.Tariff) string {
+	switch {
+	case t.TariffCode != "":
+		return t.TariffCode
+	case t.AgreementID != "":
+		return t.AgreementID
+	default:
+		return t.Name
+	}
 }
 
 // parseBoolParam reads an optional boolean query param. Absent ⇒ (false, true):
