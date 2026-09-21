@@ -43,7 +43,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
 | `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter. `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
-| `GET /bill?window=month` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
+| `GET /bill?window=&from=&to=` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered. |
 | `GET /prices` | Half-hourly price curve over a window, past or future. |
 | `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
@@ -59,7 +59,12 @@ otherwise be silently discarded). **Rolling windows:** `<N>d` is a trailing N ca
 `<N>h` is an **exact** trailing N hours (e.g. `24h`), not midnight-aligned. Use these for
 "last 7 days" / "last 30 days" (`7d`/`30d`), as distinct from `week`/`month`, which reset
 on Monday / the 1st. **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default per window
-(rolling windows default by span) and a ~1000-bucket cap.
+(rolling windows default by span) and a ~1000-bucket cap. That cap is stated in
+**buckets**, so the window length it allows depends on the interval asked for — at `30m`
+it is about 20 days, at `1h` about 41. The price routes cap in **days** instead (31 for
+`/prices`, 366 for `/prices/stats` — see [How spend is calculated](#how-spend-is-calculated)),
+so a caller chunking a price/consumption join across both needs two chunk sizes, and the
+boundaries do not line up.
 
 ### Series response shapes (`shape=columns|rows`)
 
@@ -897,6 +902,10 @@ figure should be read:
 
 A window spanning a **switchover** is billed one segment per agreement, each at its own
 rate and VAT multiplier, with the boundary half hour belonging to the *later* tariff.
+The VAT multiplier is **not** constant across time: see
+[the runbook for the temporary zero rate, 1 Oct 2026 – 31 Mar 2027](#runbook-the-temporary-zero-rate-of-vat-1-oct-2026--31-mar-2027).
+Any comparison spanning that boundary that assumes one VAT rate throughout is wrong,
+and nothing in a response will say so — the figures are correct, the assumption is not.
 The standing charge is apportioned the same way — each side's daily rate for its own
 days, pro rata for a partial day — and is charged **once, on the bill, never split
 across devices**: no device causes a standing charge, so apportioning it would invent a
@@ -908,6 +917,11 @@ Two fields exist because a cost on its own is not interpretable:
   bill it is the single number saying how well the house played the curve. It can be
   **negative**: Agile prices go below zero, and consuming then is a credit, which the
   whole pipeline carries through rather than clamping.
+
+  The same is true **per bucket**: `/series` returns a negative `cost` in a bucket whose
+  slots priced below zero. A consumer doing `sum(abs(cost))`, `max(0, cost)` or a
+  log-scale chart is wrong exactly there — and those are the buckets a price-response
+  analysis cares most about.
 - **`unpriced_kwh`** — energy in half hours no rate is held for. It is **not** folded
   into `cost` and is absent when zero, so its presence always means the answer is
   incomplete. Charging nothing for real energy is the silent failure this path exists to
@@ -923,11 +937,13 @@ every slot on every poll.
 the boundary). A curve belongs to one tariff, and answering about only the first half is
 what `/bill` — which does segment, because a cost can be summed across tariffs where a
 curve cannot — would then contradict. They also cap the window: 31 days for `/prices`
-(a row per half hour) and 366 for `/prices/stats` (a row per day).
+(a row per half hour) and 366 for `/prices/stats` (a row per day). Note these are stated
+in **days**, while `/series` caps in **buckets** (~1000) — a join across both is chunked
+by two different rules.
 
 What counts as "a tariff change" is the **curve identity**, not the number of agreement
 blocks. An agreement split that leaves the tariff code unchanged — see the VAT runbook
-below — is served normally, because the archive holds the supplier's own inc-VAT prices
+above — is served normally, because the archive holds the supplier's own inc-VAT prices
 and a tax change simply arrives in them. A **flat** tariff across a VAT change is still
 refused: `flat_price` is one inc-VAT number derived from the config rate, and it
 genuinely differs either side.
