@@ -1491,7 +1491,15 @@ small enough to look like float noise and not that.
 
 `clamp.kwh` is exactly `parts − meter`, so the discrepancy is always accounted for, and
 the block's **absence means the parts sum exactly** — the same convention as
-`unpriced_kwh`. It is carried on `shape=rows` too, because shape is a rendering choice
+`unpriced_kwh`.
+
+**Check it on the per-bucket arrays, not on `total_kwh`.** The identity is
+`Σ kwh[] over the parts == Σ kwh[] of the meter + clamp.kwh`, and it is exact. Each
+series' `total_kwh` accumulates the *raw* values and rounds once, deliberately — so over
+a few hundred buckets it sits a hair away from the sum of its own rounded array, and the
+identity checked on totals is out by that much rather than by anything real. A few
+hundredths of a kWh across a week is per-bucket rounding; `clamp.kwh` is the number that
+tells you about actual clamping. It is carried on `shape=rows` too, because shape is a rendering choice
 and must not change what a response explains, and it is **not** house-only: the
 `include_unmonitored` catch-all is clamped the same way.
 
