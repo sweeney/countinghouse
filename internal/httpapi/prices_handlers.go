@@ -445,6 +445,14 @@ func (s *Server) handleCheapestPrice(w http.ResponseWriter, r *http.Request) {
 // either way — which is the point of keeping prices rather than only fetching what
 // is next.
 func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
+	// ?tariff_code= asks about the PRODUCT, not about what this site was buying,
+	// so it bypasses agreement resolution entirely — including the switchover
+	// refusal and the configured VAT rate. See handleArchivedCurve.
+	if code := r.URL.Query().Get("tariff_code"); code != "" {
+		s.handleArchivedCurve(w, r, code)
+		return
+	}
+
 	win, ok := s.resolveWindow(w, r)
 	if !ok {
 		return

@@ -830,3 +830,84 @@ func TestPutNormalisesANonUTCValidFrom(t *testing.T) {
 		t.Errorf("ValidFrom = %s, want %s", got[0].ValidFrom, local.UTC())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Coverage: what the archive holds, which is a different question from what a
+// price is. Issue #36 idea 3 — without it, an empty curve for an old window is
+// indistinguishable from "there were genuinely no prices then", and those lead
+// to opposite actions.
+// ---------------------------------------------------------------------------
+
+func TestCoverageReportsSpanAndCount(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	if _, err := s.Put(ctx, []Slot{
+		slot(t, "2026-03-01T00:00:00Z", 10, 10.5, "2026-03-01T00:00:00Z"),
+		slot(t, "2026-03-01T00:30:00Z", 11, 11.55, "2026-03-01T00:00:00Z"),
+		slot(t, "2026-03-01T01:00:00Z", 12, 12.6, "2026-03-01T00:00:00Z"),
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := s.Coverage(ctx)
+	if err != nil {
+		t.Fatalf("Coverage: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 pair, got %d: %+v", len(got), got)
+	}
+	c := got[0]
+	if c.TariffCode != tariffA {
+		t.Errorf("tariff_code = %q", c.TariffCode)
+	}
+	if c.Slots != 3 {
+		t.Errorf("slots = %d, want 3", c.Slots)
+	}
+	if !c.FirstSlot.Equal(at(t, "2026-03-01T00:00:00Z")) {
+		t.Errorf("first_slot = %v", c.FirstSlot)
+	}
+	// The end of the newest slot, not its start.
+	if !c.KnownTo.Equal(at(t, "2026-03-01T01:30:00Z")) {
+		t.Errorf("known_to = %v, want the newest slot's END", c.KnownTo)
+	}
+}
+
+// Each (tariff_code, payment_method) pair is reported separately, because that
+// is the archive's key: on variable tariffs the same half hour is published
+// twice at different prices.
+func TestCoverageSeparatesCodesAndPaymentMethods(t *testing.T) {
+	s := openMemory(t)
+	ctx := context.Background()
+
+	a := slot(t, "2026-03-01T00:00:00Z", 10, 10.5, "2026-03-01T00:00:00Z")
+	b := slot(t, "2026-03-01T00:00:00Z", 20, 21, "2026-03-01T00:00:00Z")
+	b.TariffCode = tariffB
+	c := slot(t, "2026-03-01T00:00:00Z", 30, 31.5, "2026-03-01T00:00:00Z")
+	c.PaymentMethod = "DIRECT_DEBIT"
+
+	if _, err := s.Put(ctx, []Slot{a, b, c}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := s.Coverage(ctx)
+	if err != nil {
+		t.Fatalf("Coverage: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("want 3 pairs (two codes, and one split by payment method), got %d: %+v",
+			len(got), got)
+	}
+}
+
+// Holding nothing is a legitimate state at first boot, and has to stay
+// distinguishable from a failure.
+func TestCoverageOnAnEmptyArchive(t *testing.T) {
+	got, err := openMemory(t).Coverage(context.Background())
+	if err != nil {
+		t.Fatalf("an empty archive is not an error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("want no rows, got %+v", got)
+	}
+}

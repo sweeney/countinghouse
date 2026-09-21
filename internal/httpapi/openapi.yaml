@@ -507,6 +507,33 @@ paths:
         - { $ref: "#/components/parameters/Window" }
         - { $ref: "#/components/parameters/From" }
         - { $ref: "#/components/parameters/To" }
+        - name: tariff_code
+          in: query
+          required: false
+          description: >
+            Ask about the PRODUCT rather than about the agreement. Reads the
+            archive by code, bypassing agreement resolution entirely, and returns
+            PriceCurveByCodeResponse instead of the usual shape.
+
+
+            Every other price route resolves the configured agreements first, so
+            every question is really "what was I buying". A consumer wanting the
+            curve for the years BEFORE this site moved onto a half-hourly tariff
+            could not express it: under a flat agreement they got flat_price and
+            no slots, before any agreement a 503, across a switchover a 400. All
+            three are right for billing; none is about the product, which exists
+            whether or not this site was buying it.
+
+
+            Three deliberate differences follow. The configured `vat_rate` is NOT
+            applied — the archive holds the supplier's own inc/exc pair and both
+            are served, so `vat_source` is "supplier". A window spanning an
+            agreement change is fine, because agreements are irrelevant to the
+            question. And a window the archive does not reach is a 200 with
+            `complete: false` and an explicit `missing` range, never an empty
+            slots[] that would read as "no prices existed".
+          schema:
+            type: string
       responses:
         "304":
           $ref: "#/components/responses/NotModified"
@@ -530,6 +557,48 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "503":
           description: No price archive configured, or no tariff covers the window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /prices/tariffs:
+    get:
+      tags: [prices]
+      summary: What the price archive holds
+      description: >
+        Coverage discovery: which tariff codes are archived, over what span, how
+        many slots, and whether the collector is still syncing them.
+
+
+        It exists because `?tariff_code=` alone is not enough. The collector
+        archives exactly ONE code — the tariff this site is on — so asking by code
+        for a window it never covered would return an empty curve, which is
+        indistinguishable from "there genuinely were no prices then". Those two
+        lead to opposite actions, so the archive has to be able to say which it
+        is.
+
+
+        Useful on its own the day this site switches tariff and wants its own
+        history to stay reachable by code.
+      operationId: getArchivedTariffs
+      responses:
+        "200":
+          description: What is held, per tariff code and payment method
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArchivedTariffsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          description: The archive could not be read.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "503":
+          description: >
+            No price archive is configured on this instance, or its archive cannot
+            report coverage.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -1495,6 +1564,103 @@ components:
           type: array
           description: Empty when `half_hourly` is false. Never absent.
           items: { $ref: "#/components/schemas/PriceDayStats" }
+
+    ArchivedTariff:
+      type: object
+      description: What the archive holds for one tariff code and payment method.
+      properties:
+        tariff_code: { type: string }
+        payment_method:
+          type: string
+          description: >
+            Part of the archive's key: on variable tariffs the same half hour is
+            published twice, once per payment method, at different prices.
+        first_slot:
+          type: string
+          format: date-time
+          description: Start of the oldest slot held.
+        known_to:
+          type: string
+          format: date-time
+          description: End of the newest slot held (its start, when open-ended).
+        slots:
+          type: integer
+          description: >
+            Rows held. NOT the number of half hours between the bounds: an
+            interior hole leaves the bounds untouched, so the two together are
+            what make a gap visible.
+        complete:
+          type: boolean
+          description: Whether the rows held fill their own span without a hole.
+        collected:
+          type: boolean
+          description: >
+            Whether the collector is actively syncing this code, as against the
+            archive merely holding history for one it has stopped following. A
+            consumer polling for tomorrow's publication needs to know which it is
+            looking at.
+      required: [tariff_code, payment_method, first_slot, known_to, slots, complete, collected]
+
+    ArchivedTariffsResponse:
+      type: object
+      properties:
+        unit:         { type: string, example: p/kWh }
+        vat_included: { type: boolean }
+        tariffs:
+          type: array
+          items: { $ref: "#/components/schemas/ArchivedTariff" }
+      required: [tariffs]
+
+    PriceCurveByCodeResponse:
+      type: object
+      description: >
+        The ?tariff_code= shape: the product's curve, with no agreement applied.
+      properties:
+        tariff_code: { type: string }
+        scope:
+          type: string
+          enum: [product]
+          description: >
+            States what was asked. "product" means agreement resolution was
+            bypassed, so this is not necessarily what this site paid.
+        window: { type: string }
+        from:   { type: string, format: date-time }
+        to:     { type: string, format: date-time }
+        unit:   { type: string, example: p/kWh }
+        vat_included: { type: boolean }
+        vat_source:
+          type: string
+          enum: [supplier]
+          description: >
+            The VAT-inclusive figures are the SUPPLIER'S OWN, not the configured
+            vat_rate applied here. Grossing up by this site's rate would answer
+            "what would I have paid", which is the other question.
+        known_to:
+          type: string
+          format: date-time
+          nullable: true
+        slots:
+          type: array
+          items:
+            type: object
+            properties:
+              valid_from:    { type: string, format: date-time }
+              price:         { type: number, description: Pence, inc VAT, as the supplier published it. }
+              price_exc_vat: { type: number }
+        complete:
+          type: boolean
+          description: Whether every half hour of the window holds a price.
+        missing:
+          type: array
+          description: >
+            Contiguous ranges the archive does not hold, present only when there
+            are any. This is what stops an unreachable window arriving as an empty
+            slots[] that reads as "no prices existed".
+          items:
+            type: object
+            properties:
+              from: { type: string, format: date-time }
+              to:   { type: string, format: date-time }
 
     PricePeriodStats:
       type: object

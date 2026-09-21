@@ -540,3 +540,70 @@ func (s *SQLiteStore) ScheduleFor(ctx context.Context, tariffCode string, from, 
 	}
 	return NewSchedule(cs), nil
 }
+
+// TariffCoverage is what the archive holds for one (tariff_code,
+// payment_method) pair.
+//
+// It answers a question that was previously unanswerable from outside: not "what
+// is the price" but "do you even have this, and how far back". Without it an
+// empty curve for a two-year-old window is indistinguishable from a window in
+// which there genuinely were no prices — and those lead to opposite actions.
+type TariffCoverage struct {
+	TariffCode    string
+	PaymentMethod string
+
+	// FirstSlot and KnownTo bound what is held: the start of the oldest slot and
+	// the end of the newest (its start, when open-ended).
+	FirstSlot time.Time
+	KnownTo   time.Time
+
+	// Slots is the row count held for the pair, which is NOT the number of half
+	// hours between the bounds: an interior hole leaves the bounds untouched. The
+	// two together are what make a gap visible.
+	Slots int
+}
+
+// Coverage lists what the archive holds, per tariff code and payment method,
+// oldest first seen.
+//
+// An empty archive yields no rows and no error: holding nothing is a legitimate
+// state at first boot, and has to stay distinguishable from a failure.
+func (s *SQLiteStore) Coverage(ctx context.Context) ([]TariffCoverage, error) {
+	rows, err := s.db.DB().QueryContext(ctx, `
+		SELECT tariff_code,
+		       payment_method,
+		       MIN(valid_from)                       AS first_slot,
+		       MAX(COALESCE(valid_to, valid_from))   AS known_to,
+		       COUNT(*)                              AS slots
+		  FROM unit_price
+		 GROUP BY tariff_code, payment_method
+		 ORDER BY tariff_code ASC, payment_method ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("prices: coverage query: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []TariffCoverage
+	for rows.Next() {
+		var (
+			c              TariffCoverage
+			first, knownTo string
+		)
+		if err := rows.Scan(&c.TariffCode, &c.PaymentMethod, &first, &knownTo, &c.Slots); err != nil {
+			return nil, fmt.Errorf("prices: coverage scan: %w", err)
+		}
+		// A row that will not parse is a corrupt archive, not an empty one, and
+		// saying so beats reporting a zero time that reads as "since forever".
+		if c.FirstSlot, err = time.Parse(timeLayout, first); err != nil {
+			return nil, fmt.Errorf("prices: coverage first_slot %q: %w", first, err)
+		}
+		if c.KnownTo, err = time.Parse(timeLayout, knownTo); err != nil {
+			return nil, fmt.Errorf("prices: coverage known_to %q: %w", knownTo, err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("prices: coverage rows: %w", err)
+	}
+	return out, nil
+}

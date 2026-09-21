@@ -46,7 +46,8 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /bill?window=&from=&to=` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `scope`, plus `household_energy_cost`/`household_total` — see [What `/bill` covers](#what-bill-covers). Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /compare?window=&from=&to=&scope=&alt=` | What this window would have cost under one or more alternatives, with the difference split per component — see [Counterfactuals](#counterfactuals). `scope` is required. `alt` is repeatable. |
 | `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered, when it was fetched, and whether that snapshot is stale. Each agreement carries `available_now`. |
-| `GET /prices` | Half-hourly price curve over a window, past or future. |
+| `GET /prices` | Half-hourly price curve over a window, past or future. `?tariff_code=` asks about the **product** instead of the agreement — see [Asking about the product](#asking-about-the-product). |
+| `GET /prices/tariffs` | What the price archive holds: codes, spans, slot counts, and whether each is still being collected. |
 | `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
 | `GET /prices/cheapest` | The cheapest contiguous window for a deferrable load. |
 | `GET /prices/stats?group_by=&cheap_below=` | Per-day min/max/mean/spread and plunge-slot counts. `group_by=month` rolls them up — see [Seasonal rollups](#seasonal-rollups). |
@@ -988,6 +989,65 @@ genuinely differs either side.
 
 `/prices/stats` emits **both VAT bases**: the unsuffixed keys are inc-VAT, matching the
 other price routes, and `*_exc_vat` siblings carry the analytical figures.
+
+### Asking about the product
+
+Every price route resolves the configured agreements first, so every question is really
+*"what was I buying"*. A consumer wanting the curve for the years **before** this site
+moved onto a half-hourly tariff — to ask how often cheap slots occur in winter versus
+summer — could not express it:
+
+| window | agreement-scoped answer |
+|---|---|
+| under a flat agreement | `200`, `half_hourly: false`, `flat_price`, `slots: []` |
+| before any agreement | `503 no tariff is configured for that window` |
+| spanning a tariff change | `400` naming the boundary |
+
+All three are right for billing. None is about the **product**, whose curve exists
+whether or not this site was buying it.
+
+```
+GET /prices?tariff_code=E-1R-AGILE-24-10-01-C&window=custom&from=…&to=…
+```
+
+Three deliberate differences follow from asking about a product rather than a purchase:
+
+- **the configured `vat_rate` is not applied.** The archive holds the supplier's own
+  inc/exc pair and both are served, so `vat_source` is `"supplier"`. Grossing up by this
+  site's rate would answer *"what would I have paid"*, which is the other question.
+- **a window spanning an agreement change is fine.** Agreements are irrelevant here, so
+  there is no boundary to refuse at.
+- **a window the archive does not reach is a `200`** with `complete: false` and an
+  explicit `missing` range — never an empty `slots: []` that would read as *"no prices
+  existed"*.
+
+That last point is why the companion endpoint matters more than it looks:
+
+```
+GET /prices/tariffs
+```
+
+```json
+{ "tariffs": [
+  { "tariff_code": "E-1R-AGILE-24-10-01-C", "payment_method": "",
+    "first_slot": "2026-03-01T00:00:00Z", "known_to": "2026-09-22T21:00:00+01:00",
+    "slots": 9648, "complete": true, "collected": true }
+] }
+```
+
+The collector archives **exactly one code** — the tariff this site is on — so asking by
+code for a window it never covered would otherwise hand back an empty curve that cannot
+be told apart from a genuine absence of prices. `slots` is reported beside the bounds
+because the bounds alone cannot show an **interior hole**: a gap in the middle leaves
+`first_slot` and `known_to` untouched, so `complete` is computed from the count rather
+than assumed. `collected` distinguishes a code still being synced from one the archive
+merely holds history for — which is what a consumer polling for tomorrow's publication
+needs to know.
+
+This is the **read side only**. Teaching the collector to archive codes this site is not
+on has a real cost in storage and supplier API budget and has not been done; the read
+side is worth having regardless, and becomes useful the day this site switches tariff
+and wants its own history to stay reachable by code.
 
 ### Seasonal rollups
 

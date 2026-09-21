@@ -276,6 +276,7 @@ var dataRoutes = []route{
 	{"GET /compare", func(s *Server) http.HandlerFunc { return s.handleCompare }},
 	{"GET /tariffs", func(s *Server) http.HandlerFunc { return s.handleTariffs }},
 	{"GET /prices", func(s *Server) http.HandlerFunc { return s.handlePrices }},
+	{"GET /prices/tariffs", func(s *Server) http.HandlerFunc { return s.handleArchivedTariffs }},
 	{"GET /prices/upcoming", func(s *Server) http.HandlerFunc { return s.handleUpcomingPrices }},
 	{"GET /prices/cheapest", func(s *Server) http.HandlerFunc { return s.handleCheapestPrice }},
 	{"GET /prices/stats", func(s *Server) http.HandlerFunc { return s.handlePriceStats }},
