@@ -667,8 +667,11 @@ paths:
           in: query
           required: false
           description: >
-            Pence per kWh, INC VAT. Adds `cheap_slots` and `cheap_days` to each
-            period.
+            Pence per kWh, INC VAT — NOT pounds. `cheap_below=0.10` is a legal
+            threshold of a tenth of a penny, not 10p, and nothing will complain:
+            a negative value is meaningful here (below zero is a real question on
+            a half-hourly tariff), so there is no range check that could catch the
+            mistake. Adds `cheap_slots` and `cheap_days` to each period.
 
 
             Caller-supplied and never defaulted, because "cheap" is a POLICY

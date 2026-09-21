@@ -1025,7 +1025,11 @@ afterwards, and the shape is chosen around that:
 `plunge_slots` is at-or-below zero; `negative_slots` is strictly below. They differ by
 the exactly-zero slots, which are free but not paid-to-take.
 
-`cheap_below` is **caller-supplied and never defaulted**, because "cheap" is a policy
+`cheap_below` is in **pence per kWh, inc VAT** — not pounds. `cheap_below=0.10` means a
+tenth of a penny and is accepted silently, because negative thresholds are meaningful
+here and so no range check could tell the two apart.
+
+It is **caller-supplied and never defaulted**, because "cheap" is a policy
 rather than a fact — the same argument the floorplan `category` passthrough makes.
 Picking a number here would let two dashboards disagree about whether last Tuesday was
 cheap, which is exactly what the served `band`/`percentile` derivations exist to
