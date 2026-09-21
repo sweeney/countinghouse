@@ -59,6 +59,11 @@ type RowsResponse struct {
 	// columnar SeriesResponse. See HouseStats.
 	HouseStats
 
+	// Clamp mirrors the columnar response's parts-vs-meter explanation. Carried
+	// here too because shape is a rendering choice: a consumer picking rows must
+	// not lose the reason its numbers overshoot the meter.
+	Clamp *ClampReport `json:"clamp,omitempty"`
+
 	Series []SeriesMeta  `json:"series"`
 	Rows   []SeriesPoint `json:"rows"`
 }
@@ -76,6 +81,7 @@ func (r SeriesResponse) Rows() RowsResponse {
 		GroupBy:    r.GroupBy,
 		Shape:      ShapeRows,
 		HouseStats: r.HouseStats,
+		Clamp:      r.Clamp,
 		Series:     make([]SeriesMeta, 0, len(r.Series)),
 		Rows:       make([]SeriesPoint, 0, len(r.Series)*len(r.Buckets)),
 	}

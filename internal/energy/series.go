@@ -130,6 +130,12 @@ type SeriesResponse struct {
 	Buckets []time.Time `json:"buckets"`
 	Series  []Series    `json:"series"`
 
+	// Clamp explains a parts-vs-meter shortfall, present only when there is one.
+	// Unlike HouseStats it is NOT house-only: the catch-all added by
+	// include_unmonitored is clamped the same way, and that grouping is where the
+	// discrepancy was actually reported from.
+	Clamp *ClampReport `json:"clamp,omitempty"`
+
 	// Drift is operator-facing data-quality info (C3): the negative-residual
 	// (meter < monitored) drift detected while deriving unmonitored. It is NEVER
 	// serialised (json:"-") — the doc is explicit that this signal does not belong
@@ -147,16 +153,72 @@ type DriftStats struct {
 	ClampedBuckets   int       // count of buckets with residual < −driftQuantumKWh
 	WorstResidualKWh float64   // most-negative residual seen (≤ 0; 0 when none)
 	WorstAt          time.Time // bucket start of the worst residual
+
+	// NoiseBuckets counts the OTHER clamped band: residuals between 0 and
+	// −driftQuantumKWh. These are routine quantisation noise and are deliberately
+	// not an alarm — but they are still clamped, so they still inflate the
+	// unmonitored series, and counting them nowhere is what made the
+	// parts-don't-sum discrepancy unexplainable (issue #36 N8).
+	NoiseBuckets int
+
+	// ClampedKWh is the TOTAL energy the clamp added to the unmonitored series,
+	// across both bands. This is the magnitude DriftStats never carried: a count
+	// and the single worst residual cannot tell you how far the parts overshoot
+	// the meter, which is the one question a consumer splitting a bill asks.
+	//
+	// It is exactly the gap: monitored + unmonitored − meter == ClampedKWh.
+	ClampedKWh float64
 }
 
-// HasDrift reports whether any bucket breached the drift threshold.
+// HasDrift reports whether any bucket breached the drift threshold. Unchanged:
+// the OPERATOR alarm is still the supra-quantum band alone, because sub-quantum
+// clamping is expected behaviour rather than a fault to page anyone about.
 func (d DriftStats) HasDrift() bool { return d.ClampedBuckets > 0 }
+
+// ClampedBucketsTotal is the number of buckets clamped at all, both bands.
+func (d DriftStats) ClampedBucketsTotal() int { return d.NoiseBuckets + d.ClampedBuckets }
+
+// HasClamping reports whether the clamp moved any energy, which is the condition
+// under which the parts do not sum to the meter.
+func (d DriftStats) HasClamping() bool { return d.ClampedBucketsTotal() > 0 }
 
 // driftQuantumKWh is the per-bucket negative-residual threshold for C3: one
 // device-counter quantum. Residuals between 0 and −0.1 kWh are routine
 // quantisation/sampling noise (clamped silently); only a residual MORE negative
 // than this is flagged as drift.
 const driftQuantumKWh = 0.1
+
+// ClampReport explains why the parts of a decomposition do not sum exactly to the
+// meter (issue #36 N8).
+//
+// deriveUnmonitored clamps a negative per-bucket residual to zero, so a bucket
+// where monitored exceeds meter contributes its excess to the unmonitored series
+// instead of cancelling. Summed over a window, the grouped parts plus the
+// catch-all therefore OVERSHOOT the meter — by a few pence on a real home, which
+// is small enough to look like float noise and is not.
+//
+// It is present only when the clamp actually moved energy, so its ABSENCE is the
+// positive assertion that the parts sum exactly. Same convention as unpriced_kwh,
+// and for the same reason: a field that is always there is one nobody reads.
+//
+// Both bands are reported because they mean different things. Buckets counts
+// every clamped bucket — the honest denominator for the gap — while DriftBuckets
+// counts only those beyond one counter quantum, which is the data-quality alarm
+// (a monitored device over-counting, a mis-scaled meter, skewed clocks). Merging
+// them would turn routine quantisation noise into a fault report and hide a real
+// fault inside routine noise.
+type ClampReport struct {
+	// KWh is the total energy the clamp added to the unmonitored series. It is
+	// exactly the amount by which the parts exceed the meter.
+	KWh float64 `json:"kwh"`
+
+	// Buckets is how many buckets were clamped at all, either band.
+	Buckets int `json:"buckets"`
+
+	// DriftBuckets is the subset beyond one counter quantum: the alarm. Zero here
+	// with a non-zero Buckets means the gap is entirely routine quantisation.
+	DriftBuckets int `json:"drift_buckets"`
+}
 
 // HouseStats carries the group_by=house confidence signals so a consumer can tell
 // "this much of the home is genuinely unmonitored" from "monitored is
@@ -654,6 +716,14 @@ func houseParts(
 // series regardless of grouping (N1), so a stacked chart of the grouping plus
 // this catch-all sums to the whole-house meter (R2.4). A no-op when no meter is
 // configured (C6) — there is then nothing to attribute.
+//
+// R2.4 holds EXCEPT where the per-bucket clamp fired. A bucket whose residual is
+// negative contributes 0 rather than that negative, so the parts overshoot the
+// meter by the clamped total. That total is reported as SeriesResponse.Clamp
+// whenever it is non-zero, which is what keeps R2.4 a checkable statement rather
+// than an approximate one: parts − meter == clamp.kwh, and an absent clamp means
+// the sum is exact. Until it was reported, the overshoot read as float noise
+// (issue #36 N8).
 func withUnmonitoredCatchAll(
 	grouped []Series,
 	buckets []time.Time,
@@ -799,6 +869,11 @@ func computeHouseStats(series []Series, devices map[string]config.DeviceConfig, 
 // (treated as zero); meter must be non-nil (no meter ⇒ no decomposition ⇒ no
 // drift). Operates on the already-rounded part totals, which is ample resolution
 // for a 0.1 kWh threshold.
+//
+// It also accumulates EVERY negative residual into ClampedKWh, not just the
+// flagged ones. The two bands answer different questions and both are needed:
+// the supra-quantum count is the operator alarm, and the total is what tells a
+// consumer why the grouped parts overshoot the meter.
 func computeDrift(buckets []time.Time, monitored, meter *Series) DriftStats {
 	var d DriftStats
 	if meter == nil {
@@ -810,13 +885,23 @@ func computeDrift(buckets []time.Time, monitored, meter *Series) DriftStats {
 			mon = monitored.KWh[i]
 		}
 		resid := meter.KWh[i] - mon
+		if resid >= 0 {
+			continue
+		}
+		// Every negative residual is clamped to zero downstream, so every one of
+		// them adds |resid| to the unmonitored series. Accumulate the magnitude
+		// before splitting into bands: the total is what explains the gap, and it
+		// does not care which side of the quantum a bucket fell.
+		d.ClampedKWh += -resid
 		if resid < -driftQuantumKWh {
 			d.ClampedBuckets++
 			if resid < d.WorstResidualKWh {
 				d.WorstResidualKWh = resid
 				d.WorstAt = buckets[i]
 			}
+			continue
 		}
+		d.NoiseBuckets++
 	}
 	return d
 }
@@ -865,6 +950,12 @@ func rebuildUnmonitoredUnclamped(series []Series, buckets []time.Time, bucketHou
 // Drift is deliberately kept. It is never serialised (json:"-") and is the
 // operator-facing C3 signal the handler turns into a metric — a property of the
 // computation that produced these numbers, not of the shape they are sent in.
+//
+// Clamp is kept for the same reason, and it IS serialised. The distinction is the
+// one drawn above: coverage and staleness describe the whole-house decomposition,
+// whereas the clamp changed the kwh values in THIS series. Dropping it would hand
+// a consumer clamped numbers with the explanation removed, which is the failure
+// issue #36 N8 reported in the first place.
 func (r SeriesResponse) AsSingleDevice(key string) SeriesResponse {
 	r.Series = OnlySeries(r.Series, key)
 	r.GroupBy = GroupByDevice
@@ -1216,6 +1307,17 @@ func BuildSeries(
 		resp.HouseStats = computeHouseStats(series, devices, powerByDevice)
 	}
 	resp.Drift = drift
+	// The consumer-facing half of the same measurement. Suppressed under
+	// unclamped=true, where the raw signed residual is served and the parts
+	// deliberately do NOT sum — reporting a clamp that was not applied would
+	// describe the wrong response.
+	if drift.HasClamping() && !unclamped {
+		resp.Clamp = &ClampReport{
+			KWh:          round.To(drift.ClampedKWh, round.KWhDP),
+			Buckets:      drift.ClampedBucketsTotal(),
+			DriftBuckets: drift.ClampedBuckets,
+		}
+	}
 	return resp, nil
 }
 

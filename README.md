@@ -41,7 +41,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /devices/{id}/series?window=&interval=&shape=` | Single-device time-series (kWh / cost / avg W per bucket), for any energy-capable device **including the whole-house meter** (excluded from `/series?group_by=device`, but a request for one device cannot double-count). Reserved id `unmonitored` serves the rest-of-home series in the same shape — the *same* shape, so it omits the house-only `coverage`/`stale_monitored_*` signals even though deriving it needs the whole-house decomposition; `group_by=house` carries those beside the identical values (404 when no meter is configured). |
 | `GET /devices/{id}/events?window=` | State-transition events (for vertical-line overlays). |
 | `GET /devices/{id}/intervals?window=` | Derived on/off spans + duty stats. |
-| `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter. `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
+| `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter (see [When the parts do not sum to the meter](#when-the-parts-do-not-sum-to-the-meter) for the one case where they overshoot it). `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
 | `GET /bill?window=&from=&to=` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
 | `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered. |
@@ -976,6 +976,37 @@ half ahead.
 
 `/healthz` carries a `reasons` array naming every failing condition, sorted and omitted
 when healthy.
+
+### When the parts do not sum to the meter
+
+`unmonitored` is `clamp(meter − monitored)` **per bucket**, so a bucket where monitored
+reads above the meter contributes `0` rather than that negative. Real counter
+quantisation produces such buckets routinely, and over a window the grouped parts plus
+the catch-all therefore **overshoot** the meter — by a couple of pence on a real home,
+small enough to look like float noise and not that.
+
+`/series` reports that overshoot as a top-level `clamp` block whenever it is non-zero:
+
+```json
+"clamp": { "kwh": 0.132, "buckets": 7, "drift_buckets": 0 }
+```
+
+`clamp.kwh` is exactly `parts − meter`, so the discrepancy is always accounted for, and
+the block's **absence means the parts sum exactly** — the same convention as
+`unpriced_kwh`. It is carried on `shape=rows` too, because shape is a rendering choice
+and must not change what a response explains, and it is **not** house-only: the
+`include_unmonitored` catch-all is clamped the same way.
+
+The two counts answer different questions. `buckets` counts every clamped bucket and is
+the honest denominator for the gap. `drift_buckets` counts only those beyond one counter
+quantum (0.1 kWh) — the data-quality alarm for a monitored device over-counting, a
+mis-scaled meter, or skewed clocks. `drift_buckets: 0` alongside a non-zero `buckets`
+means the gap is entirely routine quantisation, which is the common case. Merging the
+two would turn routine noise into a fault report and hide a real fault inside routine
+noise.
+
+`unclamped=true` applies no clamp — it serves the raw signed residual, negatives
+preserved — so it carries no `clamp` block, and its parts deliberately do not sum.
 
 `/series` and `/bill` price buckets through **one** shared function, so a chart and a
 bill cannot disagree about what a window cost. Totals accumulate at full precision and
