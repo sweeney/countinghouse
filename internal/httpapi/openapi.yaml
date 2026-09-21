@@ -1363,10 +1363,22 @@ components:
         fetched_at:
           type: string
           format: date-time
-          description: See ConfigFreshness. Omitted when there is nothing to report.
+          description: >-
+            When this namespace was last fetched, successfully or not. Omitted
+            when there is nothing to report — no fetcher wired, or a namespace it
+            has never heard of — rather than sent as a zero time.
         stale:
           type: boolean
-          description: See ConfigFreshness. Omitted when there is nothing to report.
+          description: >-
+            True when the most recent fetch attempt FAILED, so the document being
+            served is the last known good one. The error text stays on /healthz.
+
+
+            This matters more than fetched_at given the fail-open design: "boot
+            needs truth, running keeps the last truth" means a later failure keeps
+            serving an arbitrarily old snapshot and merely degrades /healthz, so a
+            consumer could be handed stale config with a 200 and nothing at the
+            point of use to say so.
         currency:
           type: string
           example: GBP
@@ -1901,34 +1913,6 @@ components:
         total_cost:
           type: number
       required: [key, label, kwh, cost, avg_w, total_kwh, total_cost]
-
-    ConfigFreshness:
-      type: object
-      description: >
-        When the config snapshot behind a response was last fetched, and whether
-        the one being served is stale. Carried by /tariffs, /floors and /rooms.
-
-
-        `stale` matters more than `fetched_at` given the fail-open design. "Boot
-        needs truth, running keeps the last truth" means a later fetch failure
-        keeps serving the last good snapshot and merely degrades /healthz — so a
-        consumer could be handed an arbitrarily old document with nothing at the
-        point of use to say so. Reaching /healthz and cross-referencing is a
-        second call and a join; one boolean is not.
-
-
-        Both omitted when there is nothing to report (no fetcher wired, or a
-        namespace it has never heard of) rather than sent as a zero time.
-      properties:
-        fetched_at:
-          type: string
-          format: date-time
-          description: When this namespace was last fetched SUCCESSFULLY or not.
-        stale:
-          type: boolean
-          description: >
-            True when the most recent fetch attempt failed, so the document being
-            served is the last known good one. The error text stays on /healthz.
 
     Limits:
       type: object
@@ -2592,10 +2576,10 @@ components:
         fetched_at:
           type: string
           format: date-time
-          description: See ConfigFreshness. Omitted when there is nothing to report.
+          description: See TariffsResponse.fetched_at. Omitted when nothing to report.
         stale:
           type: boolean
-          description: See ConfigFreshness. Omitted when there is nothing to report.
+          description: See TariffsResponse.stale. Omitted when nothing to report.
         floors:
           type: array
           items:
@@ -2654,10 +2638,10 @@ components:
         fetched_at:
           type: string
           format: date-time
-          description: See ConfigFreshness. Omitted when there is nothing to report.
+          description: See TariffsResponse.fetched_at. Omitted when nothing to report.
         stale:
           type: boolean
-          description: See ConfigFreshness. Omitted when there is nothing to report.
+          description: See TariffsResponse.stale. Omitted when nothing to report.
         rooms:
           type: array
           items:
