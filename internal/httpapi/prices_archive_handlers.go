@@ -131,7 +131,7 @@ func (s *Server) handleArchivedCurve(w http.ResponseWriter, r *http.Request, cod
 	if !ok {
 		return
 	}
-	if !capWindow(w, win, maxCurveDays, "slots") {
+	if !capWindow(w, win, maxCurveDays, "a slot per half hour", nil) {
 		return
 	}
 	if !s.requirePriceArchive(w) {
@@ -231,26 +231,21 @@ func (s *Server) handleArchivedStats(w http.ResponseWriter, r *http.Request, cod
 	if !ok {
 		return
 	}
-	// The 366-day cap, not /prices' 31: a row per day or per month is bounded by
-	// the window in a way a row per slot is not, which is the whole reason a
-	// seasonal window belongs on this route.
-	if !capWindow(w, win, maxStatsDays, "daily rows") {
+	// The stats cap, not /prices' 31: a row per day or per month is bounded by the
+	// window in a way a row per slot is not, which is the whole reason a seasonal
+	// window belongs on this route. Which stats cap depends on the grouping, so
+	// the shape is parsed first — the same ordering the agreement-scoped route
+	// uses, and for the same reason: 366 days of monthly rows is 12 rows, and
+	// refusing at the daily cap would refuse the seasonal question this route
+	// exists to answer.
+	groupBy, cheapBelow, ok := parseStatsShape(w, r)
+	if !ok {
+		return
+	}
+	if !capStatsWindow(w, win, groupBy) {
 		return
 	}
 	if !s.requirePriceArchive(w) {
-		return
-	}
-
-	groupBy := r.URL.Query().Get("group_by")
-	if groupBy == "" {
-		groupBy = prices.GroupByDay
-	}
-	if !prices.ValidPeriodGrouping(groupBy) {
-		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want day or month)")
-		return
-	}
-	cheapBelow, ok := parseCheapBelow(w, r)
-	if !ok {
 		return
 	}
 

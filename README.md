@@ -1112,8 +1112,9 @@ This is the other half of [`?tariff_code=` on `/prices`](#asking-about-the-produ
 one made the archive **readable** by code; this makes it **aggregable** by code. Without
 both, two years of curve is ~24 paginated `/prices` calls (it caps at 31 days) and a
 client-side rollup — precisely the work the rollup exists to remove. This route returns a
-row per day or per month rather than per slot, which is why it carries the **366-day**
-cap and is where a seasonal window belongs.
+row per day or per month rather than per slot, which is why it carries the stats caps —
+**366 days** at `group_by=day`, **1830** at `month` — and is where a seasonal window
+belongs. Two years of monthly rows is one call here, not two.
 
 The three product semantics carry over unchanged: the supplier's own VAT rather than the
 configured rate (`vat_source: "supplier"`), agreement boundaries irrelevant, and a window

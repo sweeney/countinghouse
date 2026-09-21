@@ -733,7 +733,8 @@ paths:
             two years of curve is ~24 paginated calls and a client-side rollup —
             the work this endpoint exists to remove. This route returns a row per
             day or per month rather than per slot, which is why it carries the
-            366-day cap and is where a seasonal window belongs.
+            stats caps — 366 days at `group_by=day`, 1830 at `month` — and is
+            where a seasonal window belongs.
 
 
             Same three semantics as /prices?tariff_code=: the supplier's own VAT

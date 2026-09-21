@@ -395,6 +395,42 @@ func TestArchivedStats_UsesTheDailyRowCapNotTheSlotCap(t *testing.T) {
 	}
 }
 
+// The grouping-dependent cap has to hold on BOTH scopes. This route is the one
+// where it bites hardest: the seasonal question it exists to answer is a
+// multi-year one, and capping it at the daily rate would mean the route that
+// removed ~24 paginated /prices calls still needed two of its own.
+func TestArchivedStats_MonthGroupingGetsTheMonthCap(t *testing.T) {
+	s := pxFlatConfig(t)
+	s.PriceReader = fakePriceReader{slots: map[string][]prices.Slot{}}
+
+	const twoYears = "window=custom&from=2024-01-01T00:00:00Z&to=2026-01-01T00:00:00Z&tariff_code=E-1R-X"
+
+	// Two years of MONTHLY rows is 24 rows, and answers in one call.
+	if w := doGET(t, s, "/prices/stats?"+twoYears+"&group_by=month"); w.Code != http.StatusOK {
+		t.Errorf("two years at month grouping is 24 rows and must answer, got %d: %s",
+			w.Code, w.Body.String())
+	}
+
+	// Still bounded, by the archive READ rather than the response size.
+	w := doGET(t, s,
+		"/prices/stats?window=custom&from=2000-01-01T00:00:00Z&to=2026-01-01T00:00:00Z&group_by=month&tariff_code=E-1R-X")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("26 years should still be refused, got %d", w.Code)
+	}
+	var body struct {
+		Limits struct {
+			GroupBy string `json:"group_by"`
+			MaxDays int    `json:"max_days"`
+		} `json:"limits"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Limits.GroupBy != "month" || body.Limits.MaxDays != 1830 {
+		t.Errorf("limits should name the grouping the cap applied under, got %+v", body.Limits)
+	}
+}
+
 func TestArchivedStats_RefusesWithoutAnArchive(t *testing.T) {
 	s := pxFlatConfig(t)
 	s.PriceReader = nil
