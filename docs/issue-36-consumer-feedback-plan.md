@@ -43,31 +43,44 @@ it emits `currency`, `source` and `agreements`, and stops.
 
 ## 2. Three corrections to the issue
 
-### 2.1 N8's diagnosis is wrong, and the real cause is a broken invariant
+### 2.1 N8's diagnosis is wrong, and the obvious fix is wrong too
 
 The follow-up attributes the room-shares gap (£61.94 of shares against a £61.92 meter)
 to "per-series rounding". It is not rounding.
 
-`withUnmonitoredCatchAll` computes `clamp(meter − monitored)` **per bucket**. In any
-bucket where monitored exceeds meter, the negative residual is clamped to zero instead
-of cancelling against the buckets that run the other way. The shares therefore *exceed*
+`withUnmonitoredCatchAll` computes `clamp(meter — monitored)` **per bucket**. In any
+bucket where monitored exceeds meter, the negative residual is zeroed instead of
+cancelling against the buckets that run the other way. The shares therefore *exceed*
 the meter by exactly the sum of the clamped residuals — which matches the observed
-direction and magnitude.
+direction. Money is already carried at 4dp (`round.MoneyDP = 4`), so accumulated
+rounding across ~960 buckets cannot produce a 2p gap; 2p at a typical inc-VAT rate is
+~0.13 kWh, about one counter quantum of clamped residual.
 
-Two things make this a defect rather than a nit:
+It also breaks a **documented promise**. `internal/energy/series.go:655` states the
+catch-all exists "so a stacked chart of the grouping plus this catch-all sums to the
+whole-house meter (R2.4)", and the README repeats it. That is a different class of
+finding from float noise.
 
-- It breaks a **documented promise**. `internal/energy/series.go` states the catch-all
-  exists "so a stacked chart of the grouping plus this catch-all sums to the whole-house
-  meter (R2.4)", and the README repeats it. The clamp makes that false.
-- The service **already measures it**. `DriftStats.ClampedBuckets`,
-  `WorstResidualKWh` and `WorstAt` exist and are computed — but the field is
-  `json:"-"`, surfaced only out-of-band. A consumer dividing a bill between housemates
-  has no way to see why the shares do not add up.
+**The obvious fix does not work.** The first instinct — "`DriftStats` already measures
+this, stop hiding it behind `json:"-"`" — fails twice:
 
-This changes the fix. Rounding money to pence would *hide* the discrepancy while
-leaving the invariant broken. The honest options are to surface a clamp signal on the
-`group_by=house` response (preferred — the measurement already exists) or to amend
-R2.4 to state the clamp's effect. Not to round it away.
+- **It sees only half the clamping.** `computeDrift` counts a bucket only when
+  `resid < -driftQuantumKWh`, and `driftQuantumKWh = 0.1`. Residuals between 0 and
+  −0.1 kWh are clamped *silently and counted nowhere* — the code comment calls them
+  "routine quantisation/sampling noise". On a gap this small those silent sub-quantum
+  clamps are the more likely contributor, and they are precisely the half `DriftStats`
+  was designed not to report.
+- **It measures incidence, not magnitude.** `ClampedBuckets` is a count,
+  `WorstResidualKWh` the single worst, `WorstAt` when. There is no total, so even for
+  flagged buckets the size of the gap cannot be reconstructed. Nothing in the service
+  currently knows how big this is — not just nothing on the wire.
+
+The two clamps exist for different reasons: the sub-quantum one is deliberate noise
+suppression that works correctly, the supra-quantum one is a data-quality alarm.
+Collapsing them into one consumer-facing signal would misreport both.
+
+Rounding money to pence would hide the discrepancy while leaving the invariant broken,
+which is the one option to rule out.
 
 ### 2.2 `prices[]` needs a contract the proposal does not state
 
@@ -173,9 +186,13 @@ findings above were reproducible.
 - Cross-reference the window caps where a caller meets them.
 
 **B2 · The two behaviour bugs.**
-- **N8**: root-cause the clamp (per §2.1), then surface a clamp signal on the
-  `group_by=house` response — `DriftStats` is already computed and already carries the
-  number. Reconcile R2.4's wording with whatever ships.
+- **N8**: per §2.1 the cause is the per-bucket clamp, and `DriftStats` cannot be
+  reused as-is. Preferred shape is to accumulate the **clamped kWh total**, reported as
+  two bands so the sub-quantum noise and the supra-quantum alarm stay distinguishable,
+  surfaced on the `group_by=house` response. R2.4's wording changes either way. The
+  alternative of redistributing the residual so the identity holds exactly is rejected:
+  it trades a visible 2p for an invisible per-bucket fudge, which is the trade this
+  service refuses everywhere else.
 - **N5**: `/prices/stats` should mirror `/prices` for a flat-tariff window — `200` with
   the flat shape rather than `503`. The same window answering `200` on one endpoint and
   `503` on its neighbour forces a seasonal-analysis consumer to special-case per
@@ -234,9 +251,14 @@ a declared one. That is an upstream `config.swee.net` schema change, outside thi
 Decide that before building the band, so the band ships scoped as a stopgap with the
 gap recorded as an explicit non-goal.
 
-**Q2 — What B2 does to R2.4.** Surfacing the clamp signal is the preferred fix, but it
-leaves the stated invariant technically false. Does R2.4 become "sums to the meter,
-except for clamped buckets, which are counted"? Wording needs settling with the fix.
+**Q2 — What B2 does to R2.4, and whether the sub-quantum band goes on the wire.**
+Reporting the clamped total leaves the stated invariant technically false either way, so
+R2.4 becomes something like "sums to the meter, except for clamped buckets, whose total
+is reported". The open part is whether the sub-quantum band - deliberately operator-only
+today, on the argument that quantisation noise does not belong in a browser - should now
+be consumer-visible. It is the band that most likely explains a gap this small, so
+withholding it means reporting a number that does not account for the discrepancy the
+consumer is looking at.
 
 **Q3 — Collector backfill (P3c), deferred by D2.** Worth recording the reading that
 deferred it: AGENT_BRIEF §1's "one exception, and only one" constrains the *kind* of
