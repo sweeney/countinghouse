@@ -518,8 +518,15 @@ func chBuild(t *testing.T) *chFixture {
 	//
 	// The devices namespace is deliberately STALE: a fixture where every fetch
 	// succeeded can only ever exercise the happy half.
+	//
+	// Keyed by the namespace each ROUTE actually looks up. This map said
+	// "energy_agreements" while chConfig.TariffNamespace() says "energy_tariffs"
+	// (the name countinghouse defines, per CLAUDE.md), so /tariffs found no status
+	// and omitted freshness entirely — the fixture was wired to exercise that path
+	// and silently did not. Found from the consumer side, which is the point of
+	// having one.
 	s.RemoteConfig = chStatuses{
-		"energy_agreements": {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
+		"energy_tariffs":    {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
 		"floorplan_harness": {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
 		"devices_harness": {OK: false, FetchedAt: chNow.Add(-31 * time.Hour),
 			Error: "config.swee.net: 502 Bad Gateway"},
