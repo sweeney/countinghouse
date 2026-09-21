@@ -113,8 +113,13 @@ func ResolveInterval(win Window, requested string, loc *time.Location) (Interval
 
 	n := bucketCount(win, iv, loc)
 	if n > MaxBuckets {
-		coarser := suggestCoarser(win, loc)
-		return Interval{}, fmt.Errorf("energy: interval %q yields %d buckets over the window, exceeding the cap of %d; request a coarser interval (e.g. %q)", token, n, MaxBuckets, coarser)
+		return Interval{}, &BucketCapError{
+			Interval:         token,
+			Buckets:          n,
+			MaxBuckets:       MaxBuckets,
+			Suggested:        suggestCoarser(win, loc),
+			MaxWindowSeconds: int64(MaxBuckets) * int64(iv.Duration/time.Second),
+		}
 	}
 
 	return iv, nil
@@ -137,4 +142,36 @@ func suggestCoarser(win Window, loc *time.Location) string {
 // the axis can never disagree.
 func bucketCount(win Window, iv Interval, loc *time.Location) int {
 	return len(BucketStarts(win, iv, loc))
+}
+
+// BucketCapError is the refusal for a window that yields too many buckets.
+//
+// Typed rather than a bare fmt.Errorf so the handler can put the NUMBERS on the
+// wire beside the prose (issue #36 N1). The message was already good — it says
+// what is wrong, why the constraint exists and what to do — but it is unusable as
+// data, and a caller chunking a price/consumption join has to reconcile a cap
+// stated in BUCKETS here against one stated in DAYS on /prices. Nothing in the
+// API told them how.
+type BucketCapError struct {
+	// Interval is the token the caller asked for.
+	Interval string
+
+	// Buckets is how many that interval yields over the window; MaxBuckets is the
+	// cap it exceeded.
+	Buckets    int
+	MaxBuckets int
+
+	// Suggested is the finest allowed interval that would fit.
+	Suggested string
+
+	// MaxWindowSeconds is the cap expressed as a WINDOW LENGTH at the requested
+	// interval — the same unit /prices states its cap in, which is what lets one
+	// auto-chunking routine serve both. It is 0 for a calendar interval whose real
+	// length varies.
+	MaxWindowSeconds int64
+}
+
+func (e *BucketCapError) Error() string {
+	return fmt.Sprintf("energy: interval %q yields %d buckets over the window, exceeding the cap of %d; request a coarser interval (e.g. %q)",
+		e.Interval, e.Buckets, e.MaxBuckets, e.Suggested)
 }

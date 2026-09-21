@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -200,6 +201,23 @@ func (s *Server) resolveSeriesParams(w http.ResponseWriter, r *http.Request) (en
 	}
 	iv, err := energy.ResolveInterval(win, r.URL.Query().Get("interval"), s.loc())
 	if err != nil {
+		var cap *energy.BucketCapError
+		if errors.As(err, &cap) {
+			limits := map[string]any{
+				"max_buckets":        cap.MaxBuckets,
+				"buckets":            cap.Buckets,
+				"interval":           cap.Interval,
+				"suggested_interval": cap.Suggested,
+			}
+			// Omitted for a calendar interval, whose real length varies with DST and
+			// month length: a single number would be a lie there, and this field's
+			// whole purpose is to be arithmetic a caller can trust.
+			if cap.MaxWindowSeconds > 0 {
+				limits["max_window_seconds"] = cap.MaxWindowSeconds
+			}
+			writeErrorWithLimits(w, http.StatusBadRequest, err.Error(), limits)
+			return energy.Window{}, energy.Interval{}, false
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return energy.Window{}, energy.Interval{}, false
 	}
@@ -886,11 +904,12 @@ func (s *Server) handleTariffs(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "no tariffs configured")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	ns := s.Config.TariffNamespace()
+	writeJSON(w, http.StatusOK, s.withFreshness(map[string]any{
 		"currency":   "GBP",
-		"source":     s.Config.TariffNamespace(),
-		"agreements": agreements.Agreements,
-	})
+		"source":     ns,
+		"agreements": s.datedAgreements(agreements),
+	}, ns))
 }
 
 // handleMetrics serves GET /metrics: atomic query counters plus runtime info.
@@ -928,4 +947,89 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 // writeError writes a JSON error body with the given status.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeErrorWithLimits writes a refusal that also carries the numbers behind it.
+//
+// The prose messages on this service's caps are good — they say what is wrong,
+// why the constraint exists, and what to do instead — and they are unusable as
+// DATA. A caller chunking one query across /series and /prices meets a cap stated
+// in buckets and a cap stated in days, and nothing in the API tells them how to
+// reconcile the two (issue #36 N1). The message stays exactly as it was; the
+// numbers now ride beside it.
+func writeErrorWithLimits(w http.ResponseWriter, status int, msg string, limits map[string]any) {
+	writeJSON(w, status, map[string]any{"error": msg, "limits": limits})
+}
+
+// namespaceFreshness reports when a config namespace was last fetched and whether
+// the snapshot being served is a stale one.
+//
+// Both nil when there is nothing to report — no fetcher wired, or a namespace it
+// has never heard of — so the fields are omitted rather than sent as a confident
+// zero time.
+//
+// stale matters more than fetched_at given the fail-open design. "Boot needs
+// truth, running keeps the last truth" means a consumer can be served a snapshot
+// from an arbitrarily old successful fetch while /healthz merely degrades, and
+// /healthz is a second call and a cross-reference away. One boolean makes it
+// visible at the point of use.
+func (s *Server) namespaceFreshness(ns string) (*time.Time, *bool) {
+	if s.RemoteConfig == nil || ns == "" {
+		return nil, nil
+	}
+	st, ok := s.RemoteConfig.Statuses()[ns]
+	if !ok {
+		return nil, nil
+	}
+	at, stale := st.FetchedAt, !st.OK
+	return &at, &stale
+}
+
+// withFreshness adds fetched_at/stale to a config-derived response body.
+func (s *Server) withFreshness(body map[string]any, ns string) map[string]any {
+	at, stale := s.namespaceFreshness(ns)
+	if at != nil {
+		body["fetched_at"] = at.UTC()
+	}
+	if stale != nil {
+		body["stale"] = *stale
+	}
+	return body
+}
+
+// datedAgreement is one /tariffs row: the configured agreement plus whether it is
+// on sale RIGHT NOW.
+//
+// available_now is derived from the agreement's own dates against the injected
+// clock, and it exists because comparing against a tariff that has already
+// expired is the easiest baseline error to make — it was one of two the consumer
+// report in issue #36 owned up to. The dates were always on the wire; what was
+// missing was the service doing the comparison, which it is better placed to do
+// than every caller is.
+//
+// Embedded rather than copied field by field so a new agreement field reaches
+// /tariffs without anyone remembering to add it here.
+type datedAgreement struct {
+	config.Agreement
+	AvailableNow bool `json:"available_now"`
+}
+
+// datedAgreements wraps each agreement with its availability at the clock's now.
+//
+// An agreement with no From ("since before our records" — the synthesised legacy
+// single-rate document) is available if it has not ended. Half-open [From, To)
+// throughout, matching every other interval in this service.
+func (s *Server) datedAgreements(a config.EnergyAgreements) map[string][]datedAgreement {
+	now := s.clock().Now()
+	out := make(map[string][]datedAgreement, len(a.Agreements))
+	for fuel, list := range a.Agreements {
+		rows := make([]datedAgreement, 0, len(list))
+		for _, ag := range list {
+			started := ag.From == nil || !now.Before(*ag.From)
+			ended := ag.To != nil && !now.Before(*ag.To)
+			rows = append(rows, datedAgreement{Agreement: ag, AvailableNow: started && !ended})
+		}
+		out[fuel] = rows
+	}
+	return out
 }

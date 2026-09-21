@@ -975,6 +975,12 @@ components:
       properties:
         error:
           type: string
+        limits:
+          allOf:
+            - $ref: "#/components/schemas/Limits"
+          description: >
+            Present on cap refusals only — a window over a bucket or day cap. The
+            prose message is unchanged; these are the same numbers as data.
       required: [error]
 
     Agreement:
@@ -985,6 +991,18 @@ components:
         exclusive. A legacy single-rate configuration is presented as one
         agreement with neither bound.
       properties:
+        available_now:
+          type: boolean
+          description: >
+            Whether this agreement covers the present instant, derived from its
+            own dates against the service clock. The dates were always here; what
+            was missing was the service doing the comparison.
+
+
+            It exists because comparing a window against a tariff that has
+            already EXPIRED is the easiest baseline error to make when building a
+            counterfactual, and an expired baseline is otherwise a silence rather
+            than a labelled field.
         from:
           type: string
           format: date-time
@@ -1342,6 +1360,13 @@ components:
     TariffsResponse:
       type: object
       properties:
+        fetched_at:
+          type: string
+          format: date-time
+          description: See ConfigFreshness. Omitted when there is nothing to report.
+        stale:
+          type: boolean
+          description: See ConfigFreshness. Omitted when there is nothing to report.
         currency:
           type: string
           example: GBP
@@ -1876,6 +1901,73 @@ components:
         total_cost:
           type: number
       required: [key, label, kwh, cost, avg_w, total_kwh, total_cost]
+
+    ConfigFreshness:
+      type: object
+      description: >
+        When the config snapshot behind a response was last fetched, and whether
+        the one being served is stale. Carried by /tariffs, /floors and /rooms.
+
+
+        `stale` matters more than `fetched_at` given the fail-open design. "Boot
+        needs truth, running keeps the last truth" means a later fetch failure
+        keeps serving the last good snapshot and merely degrades /healthz — so a
+        consumer could be handed an arbitrarily old document with nothing at the
+        point of use to say so. Reaching /healthz and cross-referencing is a
+        second call and a join; one boolean is not.
+
+
+        Both omitted when there is nothing to report (no fetcher wired, or a
+        namespace it has never heard of) rather than sent as a zero time.
+      properties:
+        fetched_at:
+          type: string
+          format: date-time
+          description: When this namespace was last fetched SUCCESSFULLY or not.
+        stale:
+          type: boolean
+          description: >
+            True when the most recent fetch attempt failed, so the document being
+            served is the last known good one. The error text stays on /healthz.
+
+    Limits:
+      type: object
+      description: >
+        The numbers behind a cap refusal, carried beside the prose message.
+
+
+        The messages say what is wrong, why the constraint exists and what to do
+        instead — they are not the problem. The problem is that they are unusable
+        as DATA: /series states its cap in BUCKETS (so the window length it allows
+        depends on the interval asked for) while the price routes state theirs in
+        DAYS, and a caller chunking one query across both had no way to reconcile
+        the two. `max_window_seconds` is the same key in the same unit on both, so
+        one auto-chunking routine can read either.
+      properties:
+        max_window_seconds:
+          type: integer
+          description: >
+            The cap as a window LENGTH. Omitted for a calendar interval, whose
+            real length varies with DST and month length — a single number would
+            be a lie, and this field exists to be arithmetic a caller can trust.
+        max_buckets:
+          type: integer
+          description: /series only.
+        buckets:
+          type: integer
+          description: /series only — how many the request would have yielded.
+        interval:
+          type: string
+          description: /series only — the interval asked for.
+        suggested_interval:
+          type: string
+          description: /series only — the finest allowed interval that would fit.
+        max_days:
+          type: integer
+          description: Price routes only.
+        days:
+          type: number
+          description: Price routes only — the window asked for.
 
     ClampReport:
       type: object
@@ -2497,6 +2589,13 @@ components:
     FloorsCatalog:
       type: object
       properties:
+        fetched_at:
+          type: string
+          format: date-time
+          description: See ConfigFreshness. Omitted when there is nothing to report.
+        stale:
+          type: boolean
+          description: See ConfigFreshness. Omitted when there is nothing to report.
         floors:
           type: array
           items:
@@ -2552,6 +2651,13 @@ components:
     RoomsCatalog:
       type: object
       properties:
+        fetched_at:
+          type: string
+          format: date-time
+          description: See ConfigFreshness. Omitted when there is nothing to report.
+        stale:
+          type: boolean
+          description: See ConfigFreshness. Omitted when there is nothing to report.
         rooms:
           type: array
           items:
