@@ -419,6 +419,9 @@ paths:
       responses:
         "200":
           description: The actual cost and each alternative beside it
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/WindowCacheControl"
           content:
             application/json:
               schema:

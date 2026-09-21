@@ -305,3 +305,24 @@ func TestCompare_RejectsAMalformedAltSpec(t *testing.T) {
 		}
 	}
 }
+
+// /compare is defined as a difference from the bill, so it must cache like the
+// bill (issue #36 N7). Two routes that are defined in terms of each other but
+// cache differently can drift apart in a consumer's cache while each stays
+// internally consistent.
+func TestCompare_CachesLikeTheBillItDiffersFrom(t *testing.T) {
+	s := floorSeriesSetup(t)
+	const alt = "&alt=flat:unit_rate=0.30,daily_standing_charge=0.60,vat_rate=0.05"
+
+	cmp := doGET(t, s, "/compare?window=today&scope=monitored"+alt)
+	if cmp.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", cmp.Code, cmp.Body.String())
+	}
+	bill := doGET(t, s, "/bill?window=today")
+	if got, want := cmp.Header().Get("Cache-Control"), bill.Header().Get("Cache-Control"); got != want {
+		t.Errorf("Cache-Control = %q, want the bill's %q", got, want)
+	}
+	if et := cmp.Header().Get("ETag"); et != "" {
+		t.Errorf("unexpected ETag %q — no honest strong validator here either", et)
+	}
+}

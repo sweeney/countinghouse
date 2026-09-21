@@ -82,7 +82,11 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		alts = append(alts, alt)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	// Same cacheability as the bill it is a difference from, for the same reason:
+	// derived from Influx over a window, so max-age and no ETag (issue #36 N7). A
+	// counterfactual that cached differently from /bill would let the two drift in
+	// a consumer's cache even though one is defined in terms of the other.
+	s.writeJSONWindowCacheable(w, win, map[string]any{
 		"window":   win.Label,
 		"from":     win.Start.In(s.loc()),
 		"to":       win.Stop.In(s.loc()),
