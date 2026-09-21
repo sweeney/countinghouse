@@ -538,10 +538,15 @@ paths:
         "304":
           $ref: "#/components/responses/NotModified"
         "200":
-          description: The curve, with per-slot band and rank
+          description: >
+            The curve, with per-slot band and rank — or, with `tariff_code`, the
+            product's curve with no agreement applied.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/PriceCurveResponse" }
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/PriceCurveResponse"
+                  - $ref: "#/components/schemas/PriceCurveByCodeResponse"
         "400":
           description: >
             Malformed window, a window longer than 31 days, or a window spanning a
@@ -1645,8 +1650,14 @@ components:
             type: object
             properties:
               valid_from:    { type: string, format: date-time }
-              price:         { type: number, description: Pence, inc VAT, as the supplier published it. }
-              price_exc_vat: { type: number }
+              price:
+                type: number
+                description: >-
+                  Pence per kWh, inc VAT, exactly as the supplier published it —
+                  not the configured vat_rate applied here.
+              price_exc_vat:
+                type: number
+                description: Pence per kWh, ex VAT, as published.
         complete:
           type: boolean
           description: Whether every half hour of the window holds a price.
