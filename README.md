@@ -933,6 +933,34 @@ slot grid, and the prices themselves. Not `generated_at`, which changes every re
 hashing the rendered body meant the 304 could never fire and a dashboard re-downloaded
 every slot on every poll.
 
+### Why `/series` and `/bill` carry no ETag
+
+`/series`, `/devices/{id}/series`, `/bill` and `/compare` carry a `Cache-Control` and
+**deliberately no `ETag`**. The asymmetry with the price routes is a real distinction,
+not an oversight.
+
+`/prices` can carry a strong validator because it has a **semantic fingerprint**: a
+fixed set of archived slots plus the current one, which two requests can be compared on
+without rendering either. The window-derived routes read from Influx, which moves
+continuously. The only strong validator available there is a hash of the rendered body —
+and that is precisely the bug the price routes already fixed: a tag that changes on
+every request, so the `304` never fires and the caller pays for the conditional round
+trip *and then* re-downloads.
+
+A **weak** validator is the other option and is worse than none: it would tell a polling
+consumer "unchanged" about an answer that late-arriving telemetry has in fact changed.
+`max-age` promises only what it can keep.
+
+| Window | `Cache-Control` | Why |
+|---|---|---|
+| `today` / `week` / `month` / `<N>d` / `<N>h`, or any window ending at or after now | `private, max-age=30` | Ends at "now", so the last bucket is still filling |
+| A `custom` window that has already closed | `private, max-age=300` | Settled — no new telemetry falls inside it |
+
+Five minutes rather than an hour for the settled case, because *settled* is not
+*immutable*: a device that was offline can backfill into a closed window. Long enough to
+make paging historical windows cheap, short enough that a backfill is not hidden for an
+afternoon.
+
 `/prices` and `/prices/stats` **refuse a window spanning a tariff change** (400, naming
 the boundary). A curve belongs to one tariff, and answering about only the first half is
 what `/bill` — which does segment, because a cost can be summed across tariffs where a

@@ -529,7 +529,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	if withPrices {
 		resp.AttachPrices(win.Start, win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
-	writeSeriesShaped(w, shape, resp)
+	s.writeSeriesShaped(w, shape, win, resp)
 }
 
 // tariffCodesFor names every tariff covering [from, to), in order, de-duplicated.
@@ -612,12 +612,15 @@ func parseBoolParam(w http.ResponseWriter, r *http.Request, name string) (val bo
 
 // writeSeriesShaped writes a series response in the requested shape: the columnar
 // SeriesResponse (default) or, for shape=rows, the row-oriented RowsResponse.
-func writeSeriesShaped(w http.ResponseWriter, shape string, resp energy.SeriesResponse) {
+//
+// The Cache-Control header rides on both shapes, because shape is a rendering
+// choice and cacheability is a property of the underlying window (issue #36 N7).
+func (s *Server) writeSeriesShaped(w http.ResponseWriter, shape string, win energy.Window, resp energy.SeriesResponse) {
 	if shape == energy.ShapeRows {
-		writeJSON(w, http.StatusOK, resp.Rows())
+		s.writeJSONWindowCacheable(w, win, resp.Rows())
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	s.writeJSONWindowCacheable(w, win, resp)
 }
 
 // handleDeviceSeries serves GET /devices/{id}/series: the single-device
@@ -682,7 +685,7 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 	if withPrices {
 		resp.AttachPrices(win.Start, win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
-	writeSingleSeries(w, shape, resp, id)
+	s.writeSingleSeries(w, shape, win, resp, id)
 }
 
 // writeSingleSeries writes a single-device response, enforcing the invariant both
@@ -693,13 +696,13 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 // declined it. That must surface as an error rather than as a 200 carrying a full
 // bucket axis and no data, which a consumer reads as "this device reported
 // nothing". Unreachable by construction; it exists so the next divergence is loud.
-func writeSingleSeries(w http.ResponseWriter, shape string, resp energy.SeriesResponse, id string) {
+func (s *Server) writeSingleSeries(w http.ResponseWriter, shape string, win energy.Window, resp energy.SeriesResponse, id string) {
 	if len(resp.Series) != 1 {
 		writeError(w, http.StatusInternalServerError,
 			fmt.Sprintf("assembled %d series for device %q, want exactly 1", len(resp.Series), id))
 		return
 	}
-	writeSeriesShaped(w, shape, resp)
+	s.writeSeriesShaped(w, shape, win, resp)
 }
 
 // handleUnmonitoredSeries serves GET /devices/unmonitored/series: the synthetic
@@ -757,7 +760,7 @@ func (s *Server) handleUnmonitoredSeries(w http.ResponseWriter, r *http.Request)
 	if withPrices {
 		resp.AttachPrices(win.Start, win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
-	writeSingleSeries(w, shape, resp.AsSingleDevice(energy.UnmonitoredID), energy.UnmonitoredID)
+	s.writeSingleSeries(w, shape, win, resp.AsSingleDevice(energy.UnmonitoredID), energy.UnmonitoredID)
 }
 
 // handleBill serves GET /bill. It queries every billable device (metered,
@@ -856,7 +859,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		Attribution:          plan.attribution(),
 		Unmonitored:          unmonitored,
 	})
-	writeJSON(w, http.StatusOK, roundBill(bill))
+	s.writeJSONWindowCacheable(w, win, roundBill(bill))
 }
 
 // roundBill rounds every numeric field of a Bill for presentation. Totals are
@@ -1043,4 +1046,60 @@ func (s *Server) datedAgreements(a config.EnergyAgreements) map[string][]datedAg
 		out[fuel] = rows
 	}
 	return out
+}
+
+// writeJSONWindowCacheable writes a window-derived success response with a
+// Cache-Control header and, deliberately, NO ETag.
+//
+// Issue #36 N7 asked why /prices carries an ETag and /series and /bill do not.
+// The asymmetry is real and it is not an omission, so it is worth stating rather
+// than quietly fixing in the wrong direction.
+//
+// /prices can carry a strong validator because it has a SEMANTIC fingerprint: a
+// fixed set of archived slots plus the current one, which two requests can be
+// compared on without rendering either. /series, /devices/{id}/series and /bill
+// derive from Influx, which moves continuously. There is no honest strong
+// validator here short of hashing the rendered body — and a body hash is exactly
+// the bug writeJSONCached's comment already documents, a tag that moves on every
+// request so the 304 never fires and the client pays for the conditional round
+// trip and then re-downloads anyway.
+//
+// A WEAK validator is the other option and is worse than none: it would let a
+// polling consumer be told "unchanged" about an answer that late-arriving
+// telemetry has in fact changed. This service's whole posture is to refuse
+// rather than serve a plausible wrong answer, and a validator that lies is the
+// same trade. max-age promises only what it can keep.
+func (s *Server) writeJSONWindowCacheable(w http.ResponseWriter, win energy.Window, body any) {
+	w.Header().Set("Cache-Control", cacheControlFor(win, s.clock().Now()))
+	writeJSON(w, http.StatusOK, body)
+}
+
+// Cache lifetimes for window-derived responses.
+//
+// The two differ because the underlying data does. Everything but `custom` ends
+// at "now" (see energy.ResolveWindow), so the last bucket is still filling and a
+// fresh poll can legitimately return a different number; 30s matches the price
+// routes, where the same "a publication can land at any moment" argument is made.
+//
+// A custom window that has already CLOSED is settled: no new telemetry falls
+// inside it. That is the shape the issue #36 reporter was actually issuing —
+// paging historical windows to build a seasonal picture — and serving it the
+// live lifetime made the header nearly pointless for them.
+//
+// Settled is 5 minutes rather than an hour because "settled" is not "immutable":
+// a device that was offline can backfill into a closed window, and `private`
+// caching means the cost of being wrong is per-consumer but the wrongness is
+// still real. Five minutes is long enough to make a multi-window analysis run
+// cheap and short enough that a backfill is not hidden for an afternoon.
+const (
+	cacheLiveSeconds    = 30
+	cacheSettledSeconds = 300
+)
+
+// cacheControlFor picks the lifetime by whether the window can still gain data.
+func cacheControlFor(win energy.Window, now time.Time) string {
+	if win.Stop.After(now) || win.Stop.Equal(now) {
+		return fmt.Sprintf("private, max-age=%d", cacheLiveSeconds)
+	}
+	return fmt.Sprintf("private, max-age=%d", cacheSettledSeconds)
 }

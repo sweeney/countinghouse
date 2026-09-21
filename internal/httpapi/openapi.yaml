@@ -190,6 +190,9 @@ paths:
           description: >
             Energy time-series. shape=columns → SeriesResponse (shared buckets
             axis + per-series arrays); shape=rows → RowsResponse (flat rows).
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/WindowCacheControl"
           content:
             application/json:
               schema:
@@ -250,6 +253,9 @@ paths:
           description: >
             Energy time-series for the device. shape=columns → SeriesResponse;
             shape=rows → RowsResponse.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/WindowCacheControl"
           content:
             application/json:
               schema:
@@ -306,6 +312,9 @@ paths:
       responses:
         "200":
           description: Assembled bill
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/WindowCacheControl"
           content:
             application/json:
               schema:
@@ -720,6 +729,37 @@ paths:
           $ref: "#/components/responses/BadGateway"
 
 components:
+  headers:
+    WindowCacheControl:
+      description: >
+        How long this answer may be reused. `private, max-age=30` for a window
+        that ends at or after now (the last bucket is still filling) and
+        `private, max-age=300` for a `custom` window that has already closed, in
+        which no new telemetry falls.
+
+
+        These routes carry NO `ETag`, and the asymmetry with the price routes is
+        deliberate (issue #36 N7). /prices has a SEMANTIC fingerprint — a fixed
+        set of archived slots plus the current one — that two requests can be
+        compared on without rendering either. The window-derived routes read from
+        Influx, which moves continuously, so the only strong validator available
+        is a hash of the rendered body. That is exactly the bug the price routes
+        already fixed: a tag that changes on every request, so the 304 never fires
+        and the caller pays for the conditional round trip and then re-downloads.
+
+
+        A WEAK validator is the other option and is worse than none, because it
+        would tell a polling consumer "unchanged" about an answer that
+        late-arriving telemetry has changed. `max-age` promises only what it can
+        keep.
+
+
+        300 rather than 3600 for the settled case because settled is not
+        immutable: a device that was offline can backfill into a closed window.
+      schema:
+        type: string
+        example: private, max-age=30
+
   parameters:
     IfNoneMatch:
       name: If-None-Match

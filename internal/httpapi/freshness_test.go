@@ -2,10 +2,12 @@ package httpapi
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/sweeney/countinghouse/internal/config"
+	"github.com/sweeney/countinghouse/internal/energy"
 )
 
 // ---------------------------------------------------------------------------
@@ -288,5 +290,78 @@ func TestSeries_BothIntervalRefusalsCarryLimits(t *testing.T) {
 		if _, ok := body["limits"]; !ok {
 			t.Errorf("%s: no limits block, so a caller still has to parse prose", path)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue #36 N7: why /series and /bill carry Cache-Control but no ETag.
+// ---------------------------------------------------------------------------
+
+// The window-derived routes must say something about cacheability. They said
+// nothing at all, which left a polling consumer with no guidance and made the
+// /prices ETag look like an inconsistency rather than a deliberate asymmetry.
+func TestWindowRoutes_CarryCacheControl(t *testing.T) {
+	s, _ := dataSetup(t)
+
+	for _, path := range []string{
+		"/series?window=today&group_by=house",
+		"/series?window=today&group_by=house&shape=rows",
+		"/devices/winefridge/series?window=today",
+		"/bill?window=today",
+	} {
+		w := doGET(t, s, path)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: want 200, got %d: %s", path, w.Code, w.Body.String())
+		}
+		if cc := w.Header().Get("Cache-Control"); cc == "" {
+			t.Errorf("%s: no Cache-Control", path)
+		}
+		// No ETag, and that is the POINT rather than an oversight: these derive
+		// from Influx, which moves continuously, so the only available strong
+		// validator would be a body hash — a tag that changes every request, so
+		// the 304 never fires and the caller pays for the conditional round trip
+		// before re-downloading anyway.
+		if et := w.Header().Get("ETag"); et != "" {
+			t.Errorf("%s: unexpected ETag %q — there is no honest strong validator here", path, et)
+		}
+	}
+}
+
+// A closed custom window cannot gain data the way a period-to-date one can, and
+// paging closed historical windows is exactly what the issue #36 reporter was
+// doing. Serving both at the live lifetime made the header nearly pointless for
+// them.
+func TestWindowRoutes_SettledWindowCachesLonger(t *testing.T) {
+	s, _ := dataSetup(t)
+
+	live := doGET(t, s, "/bill?window=today").Header().Get("Cache-Control")
+	if live != "private, max-age=30" {
+		t.Errorf("a period-to-date window is still filling: got %q", live)
+	}
+
+	// Wholly in the past relative to dataSetup's fixed clock (2026-06-11).
+	settled := doGET(t, s,
+		"/bill?window=custom&from=2026-05-01T00:00:00Z&to=2026-05-08T00:00:00Z").
+		Header().Get("Cache-Control")
+	if settled != "private, max-age=300" {
+		t.Errorf("a closed window is settled: got %q", settled)
+	}
+}
+
+// The boundary is "can this window still gain data", not "is the label custom" —
+// a custom window ending at or after now is as live as window=today.
+func TestCacheControlFor_TreatsAnOpenCustomWindowAsLive(t *testing.T) {
+	now := time.Date(2026, 6, 11, 13, 0, 0, 0, time.UTC)
+
+	open := energy.Window{
+		Start: now.Add(-24 * time.Hour), Stop: now.Add(time.Hour), Label: energy.WindowCustom,
+	}
+	if got := cacheControlFor(open, now); got != "private, max-age=30" {
+		t.Errorf("a custom window ending in the future is still filling: got %q", got)
+	}
+	// Exactly now counts as live: the current bucket is open.
+	atNow := energy.Window{Start: now.Add(-24 * time.Hour), Stop: now, Label: energy.WindowCustom}
+	if got := cacheControlFor(atNow, now); got != "private, max-age=30" {
+		t.Errorf("a window ending exactly at now is still filling: got %q", got)
 	}
 }
