@@ -603,6 +603,33 @@ func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// group_by=month rolls the days up. The DEFAULT stays day, and the days[]
+	// shape is untouched, because the question this endpoint already answered well
+	// — "was shifting load worth it yesterday" — is a daily one.
+	groupBy := r.URL.Query().Get("group_by")
+	if groupBy == "" {
+		groupBy = prices.GroupByDay
+	}
+	if !prices.ValidPeriodGrouping(groupBy) {
+		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want day or month)")
+		return
+	}
+	cheapBelow, ok := parseCheapBelow(w, r)
+	if !ok {
+		return
+	}
+	if groupBy == prices.GroupByMonth {
+		writeJSONCachedWindow(w, r, code, win, curve.Fingerprint(), map[string]any{
+			"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
+			"tariff_code": code, "half_hourly": true,
+			"unit": "p/kWh", "vat_included": true,
+			"group_by":    groupBy,
+			"cheap_below": cheapBelow,
+			"periods":     roundPeriods(curve.PeriodStatsOver(loc, groupBy, cheapBelow)),
+		})
+		return
+	}
+
 	stats := curve.DailyStats(loc)
 	days := make([]map[string]any, 0, len(stats))
 	for _, d := range stats {
@@ -831,4 +858,48 @@ func ifNoneMatch(header, etag string) bool {
 		}
 	}
 	return false
+}
+
+// parseCheapBelow reads the optional inc-VAT pence threshold for the cheap
+// counts.
+//
+// Caller-supplied and never defaulted, because "cheap" is a POLICY rather than a
+// fact — the same argument the floorplan `category` passthrough already makes.
+// Picking a number here would make two dashboards disagree about whether last
+// Tuesday was cheap, which is precisely what the served band/percentile
+// derivations exist to prevent elsewhere.
+//
+// Negative thresholds are legal: on a half-hourly tariff "below zero" is a real
+// and interesting question.
+func parseCheapBelow(w http.ResponseWriter, r *http.Request) (*float64, bool) {
+	raw := r.URL.Query().Get("cheap_below")
+	if raw == "" {
+		return nil, true
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest,
+			"invalid 'cheap_below' (want pence per kWh, inc VAT, e.g. cheap_below=10)")
+		return nil, false
+	}
+	return &v, true
+}
+
+// roundPeriods rounds a month rollup for the wire at the price precision the
+// sibling routes use.
+func roundPeriods(in []prices.PeriodStats) []prices.PeriodStats {
+	out := make([]prices.PeriodStats, 0, len(in))
+	for _, p := range in {
+		p.Min = round.To(p.Min, priceDP)
+		p.Max = round.To(p.Max, priceDP)
+		p.Mean = round.To(p.Mean, priceDP)
+		p.Median = round.To(p.Median, priceDP)
+		p.MinExcVAT = round.To(p.MinExcVAT, priceDP)
+		p.MaxExcVAT = round.To(p.MaxExcVAT, priceDP)
+		p.MeanExcVAT = round.To(p.MeanExcVAT, priceDP)
+		p.MedianExcVAT = round.To(p.MedianExcVAT, priceDP)
+		p.MeanSpread = round.To(p.MeanSpread, priceDP)
+		out = append(out, p)
+	}
+	return out
 }

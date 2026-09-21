@@ -645,14 +645,55 @@ paths:
         - { $ref: "#/components/parameters/Window" }
         - { $ref: "#/components/parameters/From" }
         - { $ref: "#/components/parameters/To" }
+        - name: group_by
+          in: query
+          required: false
+          description: >
+            `day` (default) keeps the existing `days[]` shape, untouched. `month`
+            rolls the days up and returns `periods[]` instead.
+
+
+            The rollup exists because the aggregates worth serving are the ones a
+            consumer CANNOT derive from the daily rows afterwards: a median over a
+            month is not the median of the daily medians, and "days with at least
+            one cheap slot" cannot be recovered from daily min/max/mean at all.
+            Asking "how often do cheap slots occur in winter versus summer" needs
+            about 24 numbers and previously got about 730 rows.
+          schema:
+            type: string
+            enum: [day, month]
+            default: day
+        - name: cheap_below
+          in: query
+          required: false
+          description: >
+            Pence per kWh, INC VAT. Adds `cheap_slots` and `cheap_days` to each
+            period.
+
+
+            Caller-supplied and never defaulted, because "cheap" is a POLICY
+            rather than a fact — the same argument the floorplan `category`
+            passthrough makes. Picking a number here would let two dashboards
+            disagree about whether last Tuesday was cheap, which is what the
+            served band/percentile derivations exist to prevent.
+
+
+            Negative values are legal: on a half-hourly tariff "below zero" is a
+            real question.
+          schema:
+            type: number
       responses:
         "304":
           $ref: "#/components/responses/NotModified"
         "200":
-          description: Per-day aggregates
+          description: >
+            Per-day aggregates, or per-period when group_by=month.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/PriceStatsResponse" }
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/PriceStatsResponse"
+                  - $ref: "#/components/schemas/PricePeriodStatsResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
         "503":
           description: >
@@ -1445,6 +1486,85 @@ components:
           type: array
           description: Empty when `half_hourly` is false. Never absent.
           items: { $ref: "#/components/schemas/PriceDayStats" }
+
+    PricePeriodStats:
+      type: object
+      description: >
+        One rollup bucket of half-hourly prices. Pence; unsuffixed figures are
+        INC VAT, with _exc_vat siblings for the analytical basis.
+      properties:
+        period:
+          type: string
+          description: '"2026-06" for a month, "2026-06-14" for a day.'
+        days:
+          type: integer
+          description: >
+            Local calendar days the bucket actually HOLDS PRICES for — not the
+            length of the month. A partial month at either end of the window would
+            otherwise look like a full one.
+        slots:   { type: integer }
+        min:     { type: number }
+        max:     { type: number }
+        mean:    { type: number }
+        median:  { type: number }
+        min_exc_vat:    { type: number }
+        max_exc_vat:    { type: number }
+        mean_exc_vat:   { type: number }
+        median_exc_vat: { type: number }
+        mean_spread:
+          type: number
+          description: >
+            The mean of the DAILY spreads, not max − min over the period. The
+            daily spread says whether shifting load that day was worth the bother,
+            so averaging it answers "how worthwhile was shifting load this month".
+            A period-wide max − min answers something else: it is dominated by the
+            single most extreme day and says nothing about a typical one.
+        plunge_slots:
+          type: integer
+          description: Half hours at or below zero.
+        negative_slots:
+          type: integer
+          description: >
+            Half hours STRICTLY below zero. Differs from plunge_slots by the
+            exactly-zero slots, which are free but not paid-to-take.
+        cheap_slots:
+          type: integer
+          description: >
+            Half hours at or below `cheap_below`. Present only when that threshold
+            was supplied.
+        cheap_days:
+          type: integer
+          description: >
+            Days holding at least one such slot. Present only when `cheap_below`
+            was supplied.
+
+
+            This is the figure that cannot be recovered from daily rows, and
+            usually the one wanted: "how many days in January could I have run the
+            dishwasher under 10p" is a different question from "how many half
+            hours were under 10p", and the second can be one freak night.
+      required: [period, days, slots, min, max, mean, median, mean_spread]
+
+    PricePeriodStatsResponse:
+      type: object
+      description: The group_by=month shape. Carries periods[] instead of days[].
+      properties:
+        window:      { type: string }
+        from:        { type: string, format: date-time }
+        to:          { type: string, format: date-time }
+        tariff_code: { type: string }
+        half_hourly: { type: boolean }
+        unit:        { type: string, example: p/kWh }
+        vat_included: { type: boolean }
+        group_by:
+          type: string
+          enum: [month]
+        cheap_below:
+          type: number
+          description: The threshold echoed back; null when none was supplied.
+        periods:
+          type: array
+          items: { $ref: "#/components/schemas/PricePeriodStats" }
 
     PriceHealth:
       type: object
