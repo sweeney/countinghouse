@@ -1829,6 +1829,28 @@ components:
           type: array
           items: { $ref: "#/components/schemas/PricePeriodStats" }
 
+    RateWarning:
+      type: object
+      description: One plausibility finding about a configured tariff rate.
+      properties:
+        fuel:  { type: string }
+        where:
+          type: string
+          description: The agreement's name, or "(document)" for a set-level finding.
+        kind:
+          type: string
+          enum:
+            - unit_rate_out_of_band
+            - standing_charge_out_of_band
+            - vat_rate_unexpected
+            - unit_rate_jump
+            - no_current_agreement
+          description: Stable string, usable as a metric label.
+        detail:
+          type: string
+          description: What was seen, and what was expected.
+      required: [fuel, where, kind, detail]
+
     PriceHealth:
       type: object
       description: >-
@@ -3340,6 +3362,31 @@ components:
     HealthResponse:
       type: object
       properties:
+        config_warnings:
+          type: array
+          description: >
+            Gate B/C findings about the CONTENT of the tariff document, as against
+            remote_config's findings about FETCHING it. A rate can arrive
+            perfectly and still be implausible, and that is the case this exists
+            for: nothing downstream can tell a mis-scaled rate from a real one,
+            because every response stays well-formed and internally consistent.
+
+
+            NEVER degrades `status`. A rate outside a band is far more likely to
+            be an unusual tariff than a corrupt document, and a permanently
+            degraded health signal over one is a signal operators learn to ignore
+            — the same posture internal/prices/validate.go takes with its own
+            Gate B. Omitted when there is nothing to say.
+
+
+            EXPLICIT NON-GOAL: a band cannot catch a WRONG VAT BASIS. An archive
+            price is cross-checkable against its own inc/exc pair; a config rate
+            arrives as a single number with nothing to check it against, and a 5%
+            error sits inside any band wide enough not to fire on real market
+            moves. Closing that needs an inc/exc pair in the namespace document or
+            a reconciliation against a real bill.
+          items:
+            $ref: "#/components/schemas/RateWarning"
         reasons:
           type: array
           items:

@@ -369,6 +369,18 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		Prices          []PriceHealth                     `json:"prices,omitempty"`
 		Backup          *BackupHealth                     `json:"backup,omitempty"`
 
+		// ConfigWarnings carries Gate B/C findings about the CONTENT of the tariff
+		// document, as against remote_config's findings about FETCHING it. A rate
+		// can arrive perfectly and still be implausible, and that is the case this
+		// exists for: nothing downstream can tell a mis-scaled rate from a real
+		// one, because every response stays well-formed and internally consistent.
+		//
+		// Fail-open, and never a reason for "unavailable": a rate outside a band is
+		// far more likely to be an unusual tariff than a corrupt document, and
+		// refusing to serve a home's energy history over a suspicious number would
+		// be the worse failure. Omitted when there is nothing to say.
+		ConfigWarnings []config.RateWarning `json:"config_warnings,omitempty"`
+
 		// Reasons says WHY the status is not ok, in the words the verdict functions
 		// already produce. Both verdicts computed a reason and both callers threw it
 		// away, so an operator saw "degraded" and had to go and work out which of four
@@ -399,6 +411,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	}
 	if s.Prices != nil {
 		h.Prices = s.Prices.PriceHealth()
+	}
+	if s.Config != nil {
+		h.ConfigWarnings = s.Config.Agreements().PlausibilityWarnings(s.clock().Now())
 	}
 	if s.Backups != nil {
 		h.Backup = s.Backups.BackupHealth()

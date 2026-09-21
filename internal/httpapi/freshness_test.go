@@ -365,3 +365,52 @@ func TestCacheControlFor_TreatsAnOpenCustomWindowAsLive(t *testing.T) {
 		t.Errorf("a window ending exactly at now is still filling: got %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue #36 finding 8: config rates through the gate model.
+// ---------------------------------------------------------------------------
+
+// A plausible document says nothing, and a health block that is noisy on correct
+// config is one operators learn to ignore.
+func TestHealthz_NoConfigWarningsOnAGoodDocument(t *testing.T) {
+	s := floorSeriesSetup(t)
+	m := decode(t, doGET(t, s, "/healthz"))
+	if _, present := m["config_warnings"]; present {
+		t.Errorf("a plausible document should warn about nothing: %v", m["config_warnings"])
+	}
+}
+
+// A mis-scaled rate is flagged, and — deliberately — does NOT degrade the
+// top-level status.
+func TestHealthz_FlagsAnImplausibleRateWithoutDegrading(t *testing.T) {
+	s, _ := dataSetup(t)
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	ag := config.EnergyAgreements{Agreements: map[string][]config.Agreement{"electricity": {
+		// 20.89 where £0.2089 was meant.
+		{From: &from, Name: "Wrong scale", Type: config.TariffTypeFixed,
+			UnitRate: 20.89, DailyStandingCharge: 0.53, VATRate: 0.05},
+	}}}
+	s.Config = fakeConfig{devices: testDevices(), tariffs: testTariffs(), agreements: &ag}
+
+	m := decode(t, doGET(t, s, "/healthz"))
+	warnings, ok := m["config_warnings"].([]any)
+	if !ok || len(warnings) == 0 {
+		t.Fatalf("an implausible rate should be flagged: %v", m)
+	}
+	w := warnings[0].(map[string]any)
+	if w["kind"] != "unit_rate_out_of_band" {
+		t.Errorf("kind = %v, want unit_rate_out_of_band", w["kind"])
+	}
+	if w["detail"] == "" || w["detail"] == nil {
+		t.Error("a warning should say what was seen and what was expected")
+	}
+
+	// Gate B is FLAG, not refuse. A rate outside a band is far more likely to be
+	// an unusual tariff than a corrupt document, and a permanently-degraded health
+	// signal over one is a signal nobody reads — the same posture
+	// internal/prices/validate.go takes with its own Gate B.
+	if m["status"] != "ok" {
+		t.Errorf("status = %v, want ok: a plausibility flag must not degrade health",
+			m["status"])
+	}
+}
