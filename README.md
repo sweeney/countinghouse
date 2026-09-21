@@ -63,9 +63,10 @@ on Monday / the 1st. **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default p
 (rolling windows default by span) and a ~1000-bucket cap. That cap is stated in
 **buckets**, so the window length it allows depends on the interval asked for — at `30m`
 it is about 20 days, at `1h` about 41. The price routes cap in **days** instead (31 for
-`/prices`, 366 for `/prices/stats` — see [How spend is calculated](#how-spend-is-calculated)),
-so a caller chunking a price/consumption join across both needs two chunk sizes, and the
-boundaries do not line up.
+`/prices`, 366 for `/prices/stats` at its default daily grouping — see
+[How spend is calculated](#how-spend-is-calculated)), so a caller chunking a
+price/consumption join across both needs two chunk sizes, and the boundaries do not line
+up.
 
 ### Series response shapes (`shape=columns|rows`)
 
@@ -969,6 +970,14 @@ curve cannot — would then contradict. They also cap the window: 31 days for `/
 (a row per half hour) and 366 for `/prices/stats` (a row per day). Note these are stated
 in **days**, while `/series` caps in **buckets** (~1000) — a join across both is chunked
 by two different rules.
+
+On `/prices/stats` the cap **moves with `group_by`**, because the rationale does. A daily
+grouping returns a row per day, so an unbounded window really is an unbounded response;
+`group_by=month` over the same 700 days is 24 rows, and the bound there is the archive
+read rather than the response — 1830 days (five years, ~87k slots). A cap refusal names
+the grouping it applied under in `limits.group_by`, so a caller refused at 366 days can
+tell that the same window answers one grouping over instead of chunking a question that
+did not need chunking.
 
 What counts as "a tariff change" is the **curve identity**, not the number of agreement
 blocks. An agreement split that leaves the tariff code unchanged — see the VAT runbook

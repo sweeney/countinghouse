@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -156,5 +157,88 @@ func TestStats_AcceptsANegativeThreshold(t *testing.T) {
 	}
 	if p := got.Periods[0]; p.CheapSlots == nil || *p.CheapSlots != p.PlungeSlots {
 		t.Errorf("cheap_below=0 should count exactly the plunge slots: %+v", p)
+	}
+}
+
+// The cap message used to splice a noun into a fixed sentence, which read
+// correctly for /prices and garbled here: "one of its daily rows per half hour
+// or per day". These messages were singled out in issue #36 as unusually good.
+func TestStats_CapMessageReadsCleanly(t *testing.T) {
+	now := pxNow(t)
+	s := pxSetup(t, pxSlots(now, 20, 21))
+
+	w := doGET(t, s, "/prices/stats?window=custom&from=2020-01-01T00:00:00Z&to=2024-01-01T00:00:00Z")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 over the cap, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "daily rows per half hour") {
+		t.Errorf("the spliced-noun garble is back: %s", body)
+	}
+	if !strings.Contains(body, "a row per day") {
+		t.Errorf("want the day-grouping clause, got: %s", body)
+	}
+}
+
+// The cap is grouping-dependent, because the rationale is. 700 days at month
+// grouping is 24 rows, so "an unbounded window is an unbounded response" is true
+// of the day grouping and false of the month one — and a caller refused at the
+// day cap has no way to learn the same window answers one grouping over unless
+// the wire says the constraint depends on it.
+func TestStats_MonthGroupingHasItsOwnCap(t *testing.T) {
+	now := pxNow(t)
+	s := pxSetup(t, pxSlots(now, 20, 21))
+
+	const twoYears = "window=custom&from=2024-01-01T00:00:00Z&to=2026-01-01T00:00:00Z"
+
+	// Refused at day grouping: 731 rows.
+	w := doGET(t, s, "/prices/stats?"+twoYears)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("two years of daily rows should exceed the cap, got %d", w.Code)
+	}
+	var body struct {
+		Limits struct {
+			GroupBy string `json:"group_by"`
+			MaxDays int    `json:"max_days"`
+		} `json:"limits"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// The wire says which grouping the cap applied to, so the refusal is
+	// actionable rather than final.
+	if body.Limits.GroupBy != "day" {
+		t.Errorf("limits.group_by = %q, want day", body.Limits.GroupBy)
+	}
+	if body.Limits.MaxDays != 366 {
+		t.Errorf("limits.max_days = %d, want 366 at day grouping", body.Limits.MaxDays)
+	}
+
+	// The same window gets PAST the cap at month grouping: 24 rows, not 731.
+	//
+	// It then meets this fixture's own agreement boundary (the configured tariff
+	// starts in 2026), which is a different and correct refusal — so the
+	// assertion is that the CAP no longer fires, not that the request succeeds.
+	// Asserting 200 here would be asserting something about the fixture's
+	// agreements rather than about the cap.
+	w2 := doGET(t, s, "/prices/stats?"+twoYears+"&group_by=month")
+	if w2.Code == http.StatusBadRequest && strings.Contains(w2.Body.String(), "over the cap") {
+		t.Errorf("two years of MONTHLY rows is 24 rows and must clear the cap, got: %s",
+			w2.Body.String())
+	}
+}
+
+// Still bounded, just by the archive read rather than the response.
+func TestStats_MonthGroupingIsStillCapped(t *testing.T) {
+	now := pxNow(t)
+	s := pxSetup(t, pxSlots(now, 20, 21))
+
+	w := doGET(t, s,
+		"/prices/stats?window=custom&from=2000-01-01T00:00:00Z&to=2026-01-01T00:00:00Z&group_by=month")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("26 years should still be refused, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "a row per month") {
+		t.Errorf("want the month-grouping clause, got: %s", w.Body.String())
 	}
 }

@@ -659,6 +659,12 @@ paths:
             one cheap slot" cannot be recovered from daily min/max/mean at all.
             Asking "how often do cheap slots occur in winter versus summer" needs
             about 24 numbers and previously got about 730 rows.
+
+
+            The window CAP moves with this parameter: 366 days at `day`, where the
+            response grows a row per day, and 1830 at `month`, where it does not
+            and the bound is the archive read instead. A cap refusal names the
+            grouping it applied under in `limits.group_by`.
           schema:
             type: string
             enum: [day, month]
@@ -2262,10 +2268,26 @@ components:
             block exists to stop.
         max_days:
           type: integer
-          description: Price routes only.
+          description: >
+            Price routes only. On /prices/stats it is the cap for the grouping
+            that was asked for, which `group_by` names — the two differ by more
+            than an order of magnitude, so this number alone does not describe
+            the endpoint.
         days:
           type: number
           description: Price routes only — the window asked for.
+        group_by:
+          type: string
+          description: >
+            /prices/stats only — the grouping the cap was applied under, because
+            the cap DEPENDS on it and nothing else on the wire would say so.
+
+
+            A day grouping really does return a row per day, so an unbounded
+            window is an unbounded response. A month grouping does not: 700 days
+            is 24 rows. Without this key a caller refused at 366 days has no way
+            to learn that the same window answers one grouping over, and would
+            chunk a question that did not need chunking.
 
     Costed:
       type: object
