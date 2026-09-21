@@ -70,7 +70,7 @@ func (s *Server) handleFloors(w http.ResponseWriter, _ *http.Request) {
 		return floorPrecedes(records, out[i].ID, out[j].ID)
 	})
 
-	writeJSON(w, http.StatusOK, map[string]any{"floors": out})
+	writeJSON(w, http.StatusOK, s.withFreshness(map[string]any{"floors": out}, s.FloorplanNamespace))
 }
 
 // roomEntry is one row in the /rooms catalog: a room id plus whatever the
@@ -160,7 +160,7 @@ func (s *Server) handleRooms(w http.ResponseWriter, _ *http.Request) {
 		return a.ID < b.ID
 	})
 
-	writeJSON(w, http.StatusOK, map[string]any{"rooms": out})
+	writeJSON(w, http.StatusOK, s.withFreshness(map[string]any{"rooms": out}, s.FloorplanNamespace))
 }
 
 // floorPrecedes reports whether floor a sorts before floor b: declared storey

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -200,6 +201,34 @@ func (s *Server) resolveSeriesParams(w http.ResponseWriter, r *http.Request) (en
 	}
 	iv, err := energy.ResolveInterval(win, r.URL.Query().Get("interval"), s.loc())
 	if err != nil {
+		var notAllowed *energy.IntervalNotAllowedError
+		if errors.As(err, &notAllowed) {
+			// The adjacent rejection from the same endpoint, carrying its
+			// constraint as data too — so "every 400 from these routes states its
+			// limit" is true rather than nearly true.
+			writeErrorWithLimits(w, http.StatusBadRequest, err.Error(), map[string]any{
+				"interval":          notAllowed.Interval,
+				"allowed_intervals": notAllowed.Allowed,
+			})
+			return energy.Window{}, energy.Interval{}, false
+		}
+		var cap *energy.BucketCapError
+		if errors.As(err, &cap) {
+			limits := map[string]any{
+				"max_buckets":        cap.MaxBuckets,
+				"buckets":            cap.Buckets,
+				"interval":           cap.Interval,
+				"suggested_interval": cap.Suggested,
+			}
+			// Omitted for a calendar interval, whose real length varies with DST and
+			// month length: a single number would be a lie there, and this field's
+			// whole purpose is to be arithmetic a caller can trust.
+			if cap.MaxWindowSeconds > 0 {
+				limits["max_window_seconds"] = cap.MaxWindowSeconds
+			}
+			writeErrorWithLimits(w, http.StatusBadRequest, err.Error(), limits)
+			return energy.Window{}, energy.Interval{}, false
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return energy.Window{}, energy.Interval{}, false
 	}
@@ -500,7 +529,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	if withPrices {
 		resp.AttachPrices(win.Start, win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
-	writeSeriesShaped(w, shape, resp)
+	s.writeSeriesShaped(w, shape, win, resp)
 }
 
 // tariffCodesFor names every tariff covering [from, to), in order, de-duplicated.
@@ -583,12 +612,15 @@ func parseBoolParam(w http.ResponseWriter, r *http.Request, name string) (val bo
 
 // writeSeriesShaped writes a series response in the requested shape: the columnar
 // SeriesResponse (default) or, for shape=rows, the row-oriented RowsResponse.
-func writeSeriesShaped(w http.ResponseWriter, shape string, resp energy.SeriesResponse) {
+//
+// The Cache-Control header rides on both shapes, because shape is a rendering
+// choice and cacheability is a property of the underlying window (issue #36 N7).
+func (s *Server) writeSeriesShaped(w http.ResponseWriter, shape string, win energy.Window, resp energy.SeriesResponse) {
 	if shape == energy.ShapeRows {
-		writeJSON(w, http.StatusOK, resp.Rows())
+		s.writeJSONWindowCacheable(w, win, resp.Rows())
 		return
 	}
-	writeJSON(w, http.StatusOK, resp)
+	s.writeJSONWindowCacheable(w, win, resp)
 }
 
 // handleDeviceSeries serves GET /devices/{id}/series: the single-device
@@ -653,7 +685,7 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 	if withPrices {
 		resp.AttachPrices(win.Start, win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
-	writeSingleSeries(w, shape, resp, id)
+	s.writeSingleSeries(w, shape, win, resp, id)
 }
 
 // writeSingleSeries writes a single-device response, enforcing the invariant both
@@ -664,13 +696,13 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 // declined it. That must surface as an error rather than as a 200 carrying a full
 // bucket axis and no data, which a consumer reads as "this device reported
 // nothing". Unreachable by construction; it exists so the next divergence is loud.
-func writeSingleSeries(w http.ResponseWriter, shape string, resp energy.SeriesResponse, id string) {
+func (s *Server) writeSingleSeries(w http.ResponseWriter, shape string, win energy.Window, resp energy.SeriesResponse, id string) {
 	if len(resp.Series) != 1 {
 		writeError(w, http.StatusInternalServerError,
 			fmt.Sprintf("assembled %d series for device %q, want exactly 1", len(resp.Series), id))
 		return
 	}
-	writeSeriesShaped(w, shape, resp)
+	s.writeSeriesShaped(w, shape, win, resp)
 }
 
 // handleUnmonitoredSeries serves GET /devices/unmonitored/series: the synthetic
@@ -728,7 +760,7 @@ func (s *Server) handleUnmonitoredSeries(w http.ResponseWriter, r *http.Request)
 	if withPrices {
 		resp.AttachPrices(win.Start, win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
-	writeSingleSeries(w, shape, resp.AsSingleDevice(energy.UnmonitoredID), energy.UnmonitoredID)
+	s.writeSingleSeries(w, shape, win, resp.AsSingleDevice(energy.UnmonitoredID), energy.UnmonitoredID)
 }
 
 // handleBill serves GET /bill. It queries every billable device (metered,
@@ -827,7 +859,7 @@ func (s *Server) handleBill(w http.ResponseWriter, r *http.Request) {
 		Attribution:          plan.attribution(),
 		Unmonitored:          unmonitored,
 	})
-	writeJSON(w, http.StatusOK, roundBill(bill))
+	s.writeJSONWindowCacheable(w, win, roundBill(bill))
 }
 
 // roundBill rounds every numeric field of a Bill for presentation. Totals are
@@ -886,11 +918,12 @@ func (s *Server) handleTariffs(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "no tariffs configured")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	ns := s.Config.TariffNamespace()
+	writeJSON(w, http.StatusOK, s.withFreshness(map[string]any{
 		"currency":   "GBP",
-		"source":     s.Config.TariffNamespace(),
-		"agreements": agreements.Agreements,
-	})
+		"source":     ns,
+		"agreements": s.datedAgreements(agreements),
+	}, ns))
 }
 
 // handleMetrics serves GET /metrics: atomic query counters plus runtime info.
@@ -928,4 +961,145 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 // writeError writes a JSON error body with the given status.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// writeErrorWithLimits writes a refusal that also carries the numbers behind it.
+//
+// The prose messages on this service's caps are good — they say what is wrong,
+// why the constraint exists, and what to do instead — and they are unusable as
+// DATA. A caller chunking one query across /series and /prices meets a cap stated
+// in buckets and a cap stated in days, and nothing in the API tells them how to
+// reconcile the two (issue #36 N1). The message stays exactly as it was; the
+// numbers now ride beside it.
+func writeErrorWithLimits(w http.ResponseWriter, status int, msg string, limits map[string]any) {
+	writeJSON(w, status, map[string]any{"error": msg, "limits": limits})
+}
+
+// namespaceFreshness reports when a config namespace was last fetched and whether
+// the snapshot being served is a stale one.
+//
+// Both nil when there is nothing to report — no fetcher wired, or a namespace it
+// has never heard of — so the fields are omitted rather than sent as a confident
+// zero time.
+//
+// stale matters more than fetched_at given the fail-open design. "Boot needs
+// truth, running keeps the last truth" means a consumer can be served a snapshot
+// from an arbitrarily old successful fetch while /healthz merely degrades, and
+// /healthz is a second call and a cross-reference away. One boolean makes it
+// visible at the point of use.
+func (s *Server) namespaceFreshness(ns string) (*time.Time, *bool) {
+	if s.RemoteConfig == nil || ns == "" {
+		return nil, nil
+	}
+	st, ok := s.RemoteConfig.Statuses()[ns]
+	if !ok {
+		return nil, nil
+	}
+	at, stale := st.FetchedAt, !st.OK
+	return &at, &stale
+}
+
+// withFreshness adds fetched_at/stale to a config-derived response body.
+func (s *Server) withFreshness(body map[string]any, ns string) map[string]any {
+	at, stale := s.namespaceFreshness(ns)
+	if at != nil {
+		body["fetched_at"] = at.UTC()
+	}
+	if stale != nil {
+		body["stale"] = *stale
+	}
+	return body
+}
+
+// datedAgreement is one /tariffs row: the configured agreement plus whether it is
+// on sale RIGHT NOW.
+//
+// available_now is derived from the agreement's own dates against the injected
+// clock, and it exists because comparing against a tariff that has already
+// expired is the easiest baseline error to make — it was one of two the consumer
+// report in issue #36 owned up to. The dates were always on the wire; what was
+// missing was the service doing the comparison, which it is better placed to do
+// than every caller is.
+//
+// Embedded rather than copied field by field so a new agreement field reaches
+// /tariffs without anyone remembering to add it here.
+type datedAgreement struct {
+	config.Agreement
+	AvailableNow bool `json:"available_now"`
+}
+
+// datedAgreements wraps each agreement with its availability at the clock's now.
+//
+// An agreement with no From ("since before our records" — the synthesised legacy
+// single-rate document) is available if it has not ended. Half-open [From, To)
+// throughout, matching every other interval in this service.
+func (s *Server) datedAgreements(a config.EnergyAgreements) map[string][]datedAgreement {
+	now := s.clock().Now()
+	out := make(map[string][]datedAgreement, len(a.Agreements))
+	for fuel, list := range a.Agreements {
+		rows := make([]datedAgreement, 0, len(list))
+		for _, ag := range list {
+			started := ag.From == nil || !now.Before(*ag.From)
+			ended := ag.To != nil && !now.Before(*ag.To)
+			rows = append(rows, datedAgreement{Agreement: ag, AvailableNow: started && !ended})
+		}
+		out[fuel] = rows
+	}
+	return out
+}
+
+// writeJSONWindowCacheable writes a window-derived success response with a
+// Cache-Control header and, deliberately, NO ETag.
+//
+// Issue #36 N7 asked why /prices carries an ETag and /series and /bill do not.
+// The asymmetry is real and it is not an omission, so it is worth stating rather
+// than quietly fixing in the wrong direction.
+//
+// /prices can carry a strong validator because it has a SEMANTIC fingerprint: a
+// fixed set of archived slots plus the current one, which two requests can be
+// compared on without rendering either. /series, /devices/{id}/series and /bill
+// derive from Influx, which moves continuously. There is no honest strong
+// validator here short of hashing the rendered body — and a body hash is exactly
+// the bug writeJSONCached's comment already documents, a tag that moves on every
+// request so the 304 never fires and the client pays for the conditional round
+// trip and then re-downloads anyway.
+//
+// A WEAK validator is the other option and is worse than none: it would let a
+// polling consumer be told "unchanged" about an answer that late-arriving
+// telemetry has in fact changed. This service's whole posture is to refuse
+// rather than serve a plausible wrong answer, and a validator that lies is the
+// same trade. max-age promises only what it can keep.
+func (s *Server) writeJSONWindowCacheable(w http.ResponseWriter, win energy.Window, body any) {
+	w.Header().Set("Cache-Control", cacheControlFor(win, s.clock().Now()))
+	writeJSON(w, http.StatusOK, body)
+}
+
+// Cache lifetimes for window-derived responses.
+//
+// The two differ because the underlying data does. Everything but `custom` ends
+// at "now" (see energy.ResolveWindow), so the last bucket is still filling and a
+// fresh poll can legitimately return a different number; 30s matches the price
+// routes, where the same "a publication can land at any moment" argument is made.
+//
+// A custom window that has already CLOSED is settled: no new telemetry falls
+// inside it. That is the shape the issue #36 reporter was actually issuing —
+// paging historical windows to build a seasonal picture — and serving it the
+// live lifetime made the header nearly pointless for them.
+//
+// Settled is 5 minutes rather than an hour because "settled" is not "immutable":
+// a device that was offline can backfill into a closed window, and `private`
+// caching means the cost of being wrong is per-consumer but the wrongness is
+// still real. Five minutes is long enough to make a multi-window analysis run
+// cheap and short enough that a backfill is not hidden for an afternoon.
+const (
+	cacheLiveSeconds    = 30
+	cacheSettledSeconds = 300
+)
+
+// cacheControlFor picks the lifetime by whether the window can still gain data.
+func cacheControlFor(win energy.Window, now time.Time) string {
+	if win.Stop.After(now) || win.Stop.Equal(now) {
+		return fmt.Sprintf("private, max-age=%d", cacheLiveSeconds)
+	}
+	return fmt.Sprintf("private, max-age=%d", cacheSettledSeconds)
 }

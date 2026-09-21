@@ -44,7 +44,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /series?window=&interval=&group_by=&rooms=&floors=&include_unmonitored=&shape=&prices=` | Multi-series time-series. `group_by`: `device` (default), `room`, `floor` (the sum of its rooms), `class`, `house` (three series: `monitored` + `unmonitored` + `meter`, where `unmonitored` = clamp(meter − monitored) per bucket). `house` also returns top-level `coverage` (monitored ÷ meter) and `stale_monitored_count`/`stale_monitored_ids` (monitored devices with no telemetry in the window) as confidence signals — only this grouping does, `/devices/unmonitored/series` included. `include_unmonitored=true` adds the rest-of-home as one catch-all series to `device`/`room`/`floor`/`class` groupings so the parts sum to the meter (see [When the parts do not sum to the meter](#when-the-parts-do-not-sum-to-the-meter) for the one case where they overshoot it). `rooms=`/`floors=` (CSV) narrow which devices the response covers; an id holding no billed device is a `400`, and neither may be combined with `include_unmonitored=true` or `group_by=house`. `unclamped=true` is a diagnostic mode that returns the raw signed `meter − monitored` (negatives preserved) instead of clamping at 0. `prices=true` adds the per-bucket price array — see [The price behind each bucket](#the-price-behind-each-bucket). |
 | `GET /events?devices=&class=&window=&group_by=` | Multi-device event overlay. `group_by`: `device` (default) / `class`. |
 | `GET /bill?window=&from=&to=` | Per-device cost breakdown + standing charge + total + reconciliation vs the whole-house meter. Carries `scope`, plus `household_energy_cost`/`household_total` — see [What `/bill` covers](#what-bill-covers). Carries `attribution`, `effective_rate` and `unpriced_kwh` as above; per-device costs sum exactly to `energy_cost`. When no meter is configured, `reconciliation.meter_present` is `false` and `meter_kwh`/`unmonitored_kwh`/`coverage` are omitted. |
-| `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered. |
+| `GET /tariffs` | Dated tariff agreements keyed by fuel, oldest first, plus which namespace answered, when it was fetched, and whether that snapshot is stale. Each agreement carries `available_now`. |
 | `GET /prices` | Half-hourly price curve over a window, past or future. |
 | `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
 | `GET /prices/cheapest` | The cheapest contiguous window for a deferrable load. |
@@ -933,6 +933,34 @@ slot grid, and the prices themselves. Not `generated_at`, which changes every re
 hashing the rendered body meant the 304 could never fire and a dashboard re-downloaded
 every slot on every poll.
 
+### Why `/series` and `/bill` carry no ETag
+
+`/series`, `/devices/{id}/series`, `/bill` and `/compare` carry a `Cache-Control` and
+**deliberately no `ETag`**. The asymmetry with the price routes is a real distinction,
+not an oversight.
+
+`/prices` can carry a strong validator because it has a **semantic fingerprint**: a
+fixed set of archived slots plus the current one, which two requests can be compared on
+without rendering either. The window-derived routes read from Influx, which moves
+continuously. The only strong validator available there is a hash of the rendered body —
+and that is precisely the bug the price routes already fixed: a tag that changes on
+every request, so the `304` never fires and the caller pays for the conditional round
+trip *and then* re-downloads.
+
+A **weak** validator is the other option and is worse than none: it would tell a polling
+consumer "unchanged" about an answer that late-arriving telemetry has in fact changed.
+`max-age` promises only what it can keep.
+
+| Window | `Cache-Control` | Why |
+|---|---|---|
+| `today` / `week` / `month` / `<N>d` / `<N>h`, or any window ending at or after now | `private, max-age=30` | Ends at "now", so the last bucket is still filling |
+| A `custom` window that has already closed | `private, max-age=300` | Settled — no new telemetry falls inside it |
+
+Five minutes rather than an hour for the settled case, because *settled* is not
+*immutable*: a device that was offline can backfill into a closed window. Long enough to
+make paging historical windows cheap, short enough that a backfill is not hidden for an
+afternoon.
+
 `/prices` and `/prices/stats` **refuse a window spanning a tariff change** (400, naming
 the boundary). A curve belongs to one tariff, and answering about only the first half is
 what `/bill` — which does segment, because a cost can be summed across tariffs where a
@@ -976,6 +1004,74 @@ half ahead.
 
 `/healthz` carries a `reasons` array naming every failing condition, sorted and omitted
 when healthy.
+
+### Knowing whether config is stale
+
+`/tariffs`, `/floors` and `/rooms` each carry two fields about the snapshot behind
+them:
+
+```json
+{ "source": "energy_tariffs", "fetched_at": "2026-09-21T06:15:02Z", "stale": false }
+```
+
+`stale` matters more than `fetched_at`, and it is the one worth reading. **Boot needs
+truth, running keeps the last truth**: a namespace that has never been fetched aborts
+startup, but every later failure is fail-open and merely degrades `/healthz`. So a
+consumer can be served an arbitrarily old document with a `200` and nothing at the point
+of use to say so. Detecting that previously meant a second call to `/healthz` and a
+cross-reference; `stale` is one boolean in the response you already have.
+
+Both are **omitted** when there is nothing to report — no fetcher wired, or a namespace
+it has never heard of — rather than sent as a zero time. The fetch error text stays on
+`/healthz`.
+
+Each agreement on `/tariffs` also carries **`available_now`**, derived from its own dates
+against the service clock. The dates were always on the wire; what was missing was the
+service doing the comparison. Comparing a window against a tariff that has already
+expired is the easiest baseline error to make when building a counterfactual, and
+without this it is a silence rather than a labelled field.
+
+### Window caps, as data
+
+Both cap refusals now carry the numbers beside the prose:
+
+```json
+{
+  "error": "energy: interval \"30m\" yields 1488 buckets over the window, exceeding the cap of 1000; request a coarser interval (e.g. \"1h\")",
+  "limits": {
+    "max_buckets": 1000,
+    "buckets": 1488,
+    "interval": "30m",
+    "suggested_interval": "1h",
+    "max_window_seconds": 1800000
+  }
+}
+```
+
+The messages are unchanged — they were never the problem. The problem was that they
+could not be *computed with*: `/series` caps in **buckets**, so the window length it
+allows depends on the interval asked for, while the price routes cap in **days**. A
+caller chunking one price/consumption join across both had to derive the relationship
+themselves, and the chunk boundaries never line up.
+
+**`max_window_seconds` is the key field**: the same name in the same unit on both
+families, so one auto-chunking routine can read either. It is omitted for a calendar
+interval (`1d`), whose real length varies with DST and month length — a single number
+would be a lie there, and this field exists to be arithmetic you can trust.
+
+The **other** interval rejection carries its constraint too, since both arrive from the
+same endpoint:
+
+```json
+{
+  "error": "energy: interval \"1m\" not allowed; choose one of [5m 15m 30m 1h 6h 1d]",
+  "limits": { "interval": "1m", "allowed_intervals": ["5m","15m","30m","1h","6h","1d"] }
+}
+```
+
+Without it, a caller writing one retry loop gets structure from the cap breach and a
+sentence from the enum rejection, and has to parse prose after all — so "every `400`
+from these routes states its limit as data" would be nearly true rather than true.
 
 ### What `/bill` covers
 
@@ -1124,7 +1220,15 @@ small enough to look like float noise and not that.
 
 `clamp.kwh` is exactly `parts − meter`, so the discrepancy is always accounted for, and
 the block's **absence means the parts sum exactly** — the same convention as
-`unpriced_kwh`. It is carried on `shape=rows` too, because shape is a rendering choice
+`unpriced_kwh`.
+
+**Check it on the per-bucket arrays, not on `total_kwh`.** The identity is
+`Σ kwh[] over the parts == Σ kwh[] of the meter + clamp.kwh`, and it is exact. Each
+series' `total_kwh` accumulates the *raw* values and rounds once, deliberately — so over
+a few hundred buckets it sits a hair away from the sum of its own rounded array, and the
+identity checked on totals is out by that much rather than by anything real. A few
+hundredths of a kWh across a week is per-bucket rounding; `clamp.kwh` is the number that
+tells you about actual clamping. It is carried on `shape=rows` too, because shape is a rendering choice
 and must not change what a response explains, and it is **not** house-only: the
 `include_unmonitored` catch-all is clamped the same way.
 

@@ -727,10 +727,18 @@ func capWindow(w http.ResponseWriter, win energy.Window, maxDays int, unit strin
 	if days <= float64(maxDays) {
 		return true
 	}
-	writeError(w, http.StatusBadRequest, fmt.Sprintf(
+	writeErrorWithLimits(w, http.StatusBadRequest, fmt.Sprintf(
 		"window spans %.0f days, over the cap of %d for this endpoint (it returns one of its "+
 			"%s per half hour or per day, and an unbounded window is an unbounded response); "+
-			"request a shorter range", days, maxDays, unit))
+			"request a shorter range", days, maxDays, unit),
+		map[string]any{
+			"max_days": maxDays,
+			"days":     round.To(days, 2),
+			// The same key /series' bucket cap reports, in the same unit, which is
+			// the point: one auto-chunking routine can read both without knowing
+			// which endpoint stated its cap in buckets and which in days.
+			"max_window_seconds": int64(maxDays) * 86400,
+		})
 	return false
 }
 

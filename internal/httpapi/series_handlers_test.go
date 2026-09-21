@@ -1130,7 +1130,7 @@ func TestWriteSingleSeries_RejectsAnythingButOneSeries(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			writeSingleSeries(w, energy.ShapeColumns, energy.SeriesResponse{Series: tc.series}, "winefridge")
+			(&Server{}).writeSingleSeries(w, energy.ShapeColumns, energy.Window{}, energy.SeriesResponse{Series: tc.series}, "winefridge")
 			if w.Code != tc.status {
 				t.Fatalf("status = %d, want %d: %s", w.Code, tc.status, w.Body.String())
 			}

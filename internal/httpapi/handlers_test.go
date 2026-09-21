@@ -18,15 +18,25 @@ import (
 type fakeConfig struct {
 	devices map[string]config.DeviceConfig
 	tariffs config.EnergyTariffs
+
+	// agreements overrides the derived dated-block presentation. Set it when a
+	// test needs real dated agreements rather than the legacy document's
+	// synthesised single open-ended block.
+	agreements *config.EnergyAgreements
 }
 
 func (f fakeConfig) Devices() map[string]config.DeviceConfig { return f.devices }
 
 // The fake holds a LEGACY document and derives the rest, so these tests also
 // exercise the legacy-to-agreements presentation end to end.
-func (f fakeConfig) Tariffs() config.TariffSource        { return f.tariffs }
-func (f fakeConfig) Agreements() config.EnergyAgreements { return f.tariffs.AsAgreements() }
-func (f fakeConfig) TariffNamespace() string             { return "energy_tariffs" }
+func (f fakeConfig) Tariffs() config.TariffSource { return f.tariffs }
+func (f fakeConfig) Agreements() config.EnergyAgreements {
+	if f.agreements != nil {
+		return *f.agreements
+	}
+	return f.tariffs.AsAgreements()
+}
+func (f fakeConfig) TariffNamespace() string { return "energy_tariffs" }
 
 const (
 	testUnitRate = 0.2089

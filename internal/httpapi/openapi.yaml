@@ -190,6 +190,9 @@ paths:
           description: >
             Energy time-series. shape=columns → SeriesResponse (shared buckets
             axis + per-series arrays); shape=rows → RowsResponse (flat rows).
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/WindowCacheControl"
           content:
             application/json:
               schema:
@@ -250,6 +253,9 @@ paths:
           description: >
             Energy time-series for the device. shape=columns → SeriesResponse;
             shape=rows → RowsResponse.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/WindowCacheControl"
           content:
             application/json:
               schema:
@@ -306,6 +312,9 @@ paths:
       responses:
         "200":
           description: Assembled bill
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/WindowCacheControl"
           content:
             application/json:
               schema:
@@ -720,6 +729,37 @@ paths:
           $ref: "#/components/responses/BadGateway"
 
 components:
+  headers:
+    WindowCacheControl:
+      description: >
+        How long this answer may be reused. `private, max-age=30` for a window
+        that ends at or after now (the last bucket is still filling) and
+        `private, max-age=300` for a `custom` window that has already closed, in
+        which no new telemetry falls.
+
+
+        These routes carry NO `ETag`, and the asymmetry with the price routes is
+        deliberate (issue #36 N7). /prices has a SEMANTIC fingerprint — a fixed
+        set of archived slots plus the current one — that two requests can be
+        compared on without rendering either. The window-derived routes read from
+        Influx, which moves continuously, so the only strong validator available
+        is a hash of the rendered body. That is exactly the bug the price routes
+        already fixed: a tag that changes on every request, so the 304 never fires
+        and the caller pays for the conditional round trip and then re-downloads.
+
+
+        A WEAK validator is the other option and is worse than none, because it
+        would tell a polling consumer "unchanged" about an answer that
+        late-arriving telemetry has changed. `max-age` promises only what it can
+        keep.
+
+
+        300 rather than 3600 for the settled case because settled is not
+        immutable: a device that was offline can backfill into a closed window.
+      schema:
+        type: string
+        example: private, max-age=30
+
   parameters:
     IfNoneMatch:
       name: If-None-Match
@@ -975,6 +1015,12 @@ components:
       properties:
         error:
           type: string
+        limits:
+          allOf:
+            - $ref: "#/components/schemas/Limits"
+          description: >
+            Present on cap refusals only — a window over a bucket or day cap. The
+            prose message is unchanged; these are the same numbers as data.
       required: [error]
 
     Agreement:
@@ -985,6 +1031,18 @@ components:
         exclusive. A legacy single-rate configuration is presented as one
         agreement with neither bound.
       properties:
+        available_now:
+          type: boolean
+          description: >
+            Whether this agreement covers the present instant, derived from its
+            own dates against the service clock. The dates were always here; what
+            was missing was the service doing the comparison.
+
+
+            It exists because comparing a window against a tariff that has
+            already EXPIRED is the easiest baseline error to make when building a
+            counterfactual, and an expired baseline is otherwise a silence rather
+            than a labelled field.
         from:
           type: string
           format: date-time
@@ -1342,6 +1400,25 @@ components:
     TariffsResponse:
       type: object
       properties:
+        fetched_at:
+          type: string
+          format: date-time
+          description: >-
+            When this namespace was last fetched, successfully or not. Omitted
+            when there is nothing to report — no fetcher wired, or a namespace it
+            has never heard of — rather than sent as a zero time.
+        stale:
+          type: boolean
+          description: >-
+            True when the most recent fetch attempt FAILED, so the document being
+            served is the last known good one. The error text stays on /healthz.
+
+
+            This matters more than fetched_at given the fail-open design: "boot
+            needs truth, running keeps the last truth" means a later failure keeps
+            serving an arbitrarily old snapshot and merely degrades /healthz, so a
+            consumer could be handed stale config with a 200 and nothing at the
+            point of use to say so.
         currency:
           type: string
           example: GBP
@@ -1877,6 +1954,59 @@ components:
           type: number
       required: [key, label, kwh, cost, avg_w, total_kwh, total_cost]
 
+    Limits:
+      type: object
+      description: >
+        The numbers behind a cap refusal, carried beside the prose message.
+
+
+        The messages say what is wrong, why the constraint exists and what to do
+        instead — they are not the problem. The problem is that they are unusable
+        as DATA: /series states its cap in BUCKETS (so the window length it allows
+        depends on the interval asked for) while the price routes state theirs in
+        DAYS, and a caller chunking one query across both had no way to reconcile
+        the two. `max_window_seconds` is the same key in the same unit on both, so
+        one auto-chunking routine can read either.
+      properties:
+        max_window_seconds:
+          type: integer
+          description: >
+            The cap as a window LENGTH. Omitted for a calendar interval, whose
+            real length varies with DST and month length — a single number would
+            be a lie, and this field exists to be arithmetic a caller can trust.
+        max_buckets:
+          type: integer
+          description: /series only.
+        buckets:
+          type: integer
+          description: /series only — how many the request would have yielded.
+        interval:
+          type: string
+          description: /series only — the interval asked for.
+        suggested_interval:
+          type: string
+          description: /series only — the finest allowed interval that would fit.
+        allowed_intervals:
+          type: array
+          items: { type: string }
+          description: >
+            /series only, and present on the OTHER interval rejection: the whole
+            accepted set, smallest first, so a client can pick without knowing the
+            vocabulary in advance.
+
+
+            It is here because both refusals arrive from the same endpoint. A
+            caller discovering constraints programmatically meets the cap breach
+            and the enum rejection, and getting structure from one and a sentence
+            from the other means it still has to parse prose — which is what this
+            block exists to stop.
+        max_days:
+          type: integer
+          description: Price routes only.
+        days:
+          type: number
+          description: Price routes only — the window asked for.
+
     ClampReport:
       type: object
       description: >
@@ -1911,6 +2041,15 @@ components:
           description: >
             Total energy the clamp added to the "unmonitored" series. Exactly the
             amount by which the parts exceed the meter.
+
+
+            Exactly, on the PER-BUCKET arrays: sum(kwh[]) over the parts equals
+            sum(kwh[]) of the meter plus this. Not on `total_kwh`, which
+            accumulates raw values and rounds once (deliberately), so over a few
+            hundred buckets it sits a hair from the sum of its own rounded array.
+            Checking the identity on totals is out by that much and by nothing
+            real — worth knowing before a few hundredths of a kWh gets read as a
+            hole in the decomposition.
         buckets:
           type: integer
           description: Buckets clamped at all, either band.
@@ -2497,6 +2636,13 @@ components:
     FloorsCatalog:
       type: object
       properties:
+        fetched_at:
+          type: string
+          format: date-time
+          description: See TariffsResponse.fetched_at. Omitted when nothing to report.
+        stale:
+          type: boolean
+          description: See TariffsResponse.stale. Omitted when nothing to report.
         floors:
           type: array
           items:
@@ -2552,6 +2698,13 @@ components:
     RoomsCatalog:
       type: object
       properties:
+        fetched_at:
+          type: string
+          format: date-time
+          description: See TariffsResponse.fetched_at. Omitted when nothing to report.
+        stale:
+          type: boolean
+          description: See TariffsResponse.stale. Omitted when nothing to report.
         rooms:
           type: array
           items:
