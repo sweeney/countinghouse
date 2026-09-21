@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -305,7 +306,8 @@ func parseAltSpec(spec string) (kind string, params map[string]string, err error
 	kind, rest, hasParams := strings.Cut(spec, ":")
 	kind = strings.TrimSpace(kind)
 	if kind == "" {
-		return "", nil, fmt.Errorf("empty 'alt'; want e.g. alt=window_mean or alt=tariff:id=...")
+		return "", nil, errors.New("empty 'alt'; want e.g. alt=window_mean, " +
+			"alt=tariff:id=E-1R-VAR-22-11-01-C or alt=flat:unit_rate=…")
 	}
 	if !hasParams {
 		return kind, params, nil
