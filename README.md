@@ -951,6 +951,15 @@ genuinely differs either side.
 `/prices/stats` emits **both VAT bases**: the unsuffixed keys are inc-VAT, matching the
 other price routes, and `*_exc_vat` siblings carry the analytical figures.
 
+A **flat-rate** tariff is a valid state on the price routes, not a service failure.
+`/prices`, `/prices/stats` and `/prices/upcoming` all answer `200` with
+`half_hourly: false` and a `flat_price`, their curve array (`slots`/`days`) present and
+empty — the same window must not be a `200` on one of these and a `503` on its
+neighbour. `/prices/cheapest` is the deliberate exception: it still refuses, because
+every window ties under a flat rate, so naming one would read as a recommendation.
+A window that **no agreement covers** is a `503` on all four, and says so in those
+words rather than blaming half-hourliness.
+
 `/prices` carries **`known_to`** (the archive horizon, independent of the window asked
 for) and **`summary.current`** (the price of the slot covering now, absent when none
 does). Both exist so a live dashboard can draw retrospective context *and* watch for the

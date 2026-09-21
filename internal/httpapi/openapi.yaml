@@ -454,7 +454,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "503":
-          description: No price archive configured, or the tariff is not half-hourly
+          description: >
+            No price archive configured, no tariff covers the window, or the tariff
+            is flat-rate. Unlike /prices and /prices/stats this route DOES refuse a
+            flat tariff: every window ties, so there is no cheapest one, and a 200
+            naming an arbitrary window would read as a recommendation.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -470,6 +474,14 @@ paths:
         the bother. Figures are VAT-INCLUSIVE like every sibling price route, with
         ex-VAT values alongside under _exc_vat keys. Note `window=today` covers the
         WHOLE local day on the price routes, not the elapsed part.
+
+
+        A FLAT-RATE tariff answers `200` with `half_hourly: false`, a `flat_price`
+        and an EMPTY `days` array — the same shape /prices and /prices/upcoming
+        give, because a flat tariff is a valid state rather than a service failure.
+        This route used to answer 503 there, so one window could be a 200 on two
+        sibling routes and a 503 on the third, forcing a seasonal analysis to
+        special-case per endpoint rather than per window.
       operationId: getPriceStats
       parameters:
         - { $ref: "#/components/parameters/IfNoneMatch" }
@@ -486,7 +498,10 @@ paths:
               schema: { $ref: "#/components/schemas/PriceStatsResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "503":
-          description: No price archive configured, or the tariff is not half-hourly
+          description: >
+            No price archive configured, or no tariff covers the window. NOT
+            returned for a flat-rate tariff, which is a 200 carrying
+            `half_hourly: false` and a `flat_price`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -1179,6 +1194,20 @@ components:
         from:        { type: string, format: date-time }
         to:          { type: string, format: date-time }
         tariff_code: { type: string }
+        half_hourly:
+          type: boolean
+          description: >
+            False when the tariff covering the window is flat-rate. `days` is then
+            empty and `flat_price` carries the rate — a flat tariff has no daily
+            spread, which an empty array of daily spreads states exactly. Present on
+            BOTH branches: a flag appearing only in the flat case would have to be
+            tested for absence rather than read.
+        flat_price:
+          type: number
+          description: Present only when `half_hourly` is false. Pence per kWh, inc-VAT.
+        note:
+          type: string
+          description: Present only when `half_hourly` is false.
         unit:        { type: string, example: p/kWh }
         vat_included:
           type: boolean
@@ -1187,6 +1216,7 @@ components:
             price route. The ex-VAT figures are carried under explicit _exc_vat keys.
         days:
           type: array
+          description: Empty when `half_hourly` is false. Never absent.
           items: { $ref: "#/components/schemas/PriceDayStats" }
 
     PriceHealth:
