@@ -229,3 +229,34 @@ func TestSeries_ReportsTheTariffCode(t *testing.T) {
 		t.Errorf("tariff_codes = %v, want [%s]", r.TariffCodes, pxTariff)
 	}
 }
+
+// A custom window whose start falls inside the first bucket must still price
+// that bucket.
+//
+// The bucket axis is built on calendar boundaries, so a window starting at
+// 01:15Z at interval=1h yields a first bucket LABELLED 01:00Z — before the
+// window. kwh and cost are clipped to the window and describe only the covered
+// part; the price array was computed from the bucket's nominal start, which the
+// curve holds no rate for because it was built over the window.
+//
+// The result was `price: null` and `unpriced_buckets: 1` on a fully priced
+// bucket — a null sitting beside a non-zero cost, and a count whose documented
+// meaning is "0 asserts the window is complete".
+func TestSeries_PricesAClippedFirstBucket(t *testing.T) {
+	s, _, _ := scSetup(t, len(scBuckets(t)))
+
+	r := decodeSeries(t, doGET(t, s,
+		"/series?window=custom&from=2026-06-11T01:15:00Z&to=2026-06-11T04:00:00Z"+
+			"&interval=1h&group_by=house&prices=true"))
+
+	if len(r.Prices) != len(r.Buckets) {
+		t.Fatalf("len(prices)=%d, len(buckets)=%d", len(r.Prices), len(r.Buckets))
+	}
+	if *r.UnpricedBuckets != 0 {
+		t.Errorf("unpriced_buckets = %d, want 0: the archive covers this whole window",
+			*r.UnpricedBuckets)
+	}
+	if r.Prices[0] == nil {
+		t.Error("prices[0] is null, but the part of that bucket the window covers is priced")
+	}
+}

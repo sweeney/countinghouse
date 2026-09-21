@@ -496,7 +496,7 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if withPrices {
-		resp.AttachPrices(win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
+		resp.AttachPrices(win.Start, win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
 	writeSeriesShaped(w, shape, resp)
 }
@@ -649,7 +649,7 @@ func (s *Server) handleDeviceSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if withPrices {
-		resp.AttachPrices(win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
+		resp.AttachPrices(win.Start, win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
 	writeSingleSeries(w, shape, resp, id)
 }
@@ -724,7 +724,7 @@ func (s *Server) handleUnmonitoredSeries(w http.ResponseWriter, r *http.Request)
 	// Attached BEFORE the reshape: prices describe the bucket axis, which
 	// AsSingleDevice does not touch, so they survive it and must.
 	if withPrices {
-		resp.AttachPrices(win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
+		resp.AttachPrices(win.Start, win.Stop, pricer, s.tariffCodesFor(win.Start, win.Stop))
 	}
 	writeSingleSeries(w, shape, resp.AsSingleDevice(energy.UnmonitoredID), energy.UnmonitoredID)
 }

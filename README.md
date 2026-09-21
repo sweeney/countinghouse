@@ -1009,6 +1009,12 @@ against. A `null` means **no rate is held** for that bucket, never free — the 
 distinction `unpriced_kwh` draws — and `unpriced_buckets` counts them, so `0` is a
 positive assertion that the window is fully priced.
 
+Each bucket is priced over **the part of it the window covers**, not over its nominal
+span. The axis is built on calendar boundaries, so a `custom` window starting mid-bucket
+has a first bucket labelled *before* the window begins — and since its `kwh` and `cost`
+already describe only the covered part, its price has to as well, or the three do not
+belong in one row.
+
 **Pounds, not pence.** The price family speaks `p/kWh`; this array speaks `GBP/kWh`,
 because it sits beside `cost[]` and `kwh[]` in the same response and self-consistency
 inside one payload beats consistency with a different endpoint. `price_unit` says so

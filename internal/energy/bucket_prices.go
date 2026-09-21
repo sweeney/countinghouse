@@ -49,10 +49,26 @@ const PriceUnitGBPPerKWh = "GBP/kWh"
 // BucketPrices returns the VAT-inclusive £/kWh behind each bucket, the basis
 // those values were computed on, and how many buckets no rate is held for.
 //
-// stop is the window end, needed because the bucket axis carries STARTS only and
-// the last bucket's length cannot otherwise be known. Bucket i runs to
-// buckets[i+1], which is also what makes a 23- or 25-hour DST day weight
-// correctly without special-casing.
+// start and stop are the WINDOW bounds, and both are needed because the bucket
+// axis carries starts only and is built on calendar boundaries rather than on the
+// window. stop gives the last bucket its length. start clips the FIRST one, which
+// can begin before the window does: a custom window from 00:00Z in a +01:00 zone
+// at interval=1d yields a first bucket labelled 23:00Z the previous day.
+//
+// Clipping is not a detail. kwh and cost for that bucket describe only the part
+// the window covers, so the price must describe the same part or the three do not
+// belong in one row. Pricing it from the nominal start asked the pricer about an
+// instant OUTSIDE the window it was built over, which it holds no rate for — so a
+// fully priced bucket came back null with unpriced_buckets: 1. That inverts this
+// field's contract (0 is meant to be a positive assertion of completeness, which
+// a false 1 makes worthless) and puts a null beside a non-zero cost, which reads
+// as "we charged you at a rate we do not hold".
+//
+// The clip narrows WHICH span is asked about; it never narrows it until the
+// question has an answer. A covered span with no rate still reports null.
+//
+// Bucket i otherwise runs to buckets[i+1], which is what makes a 23- or 25-hour
+// DST day weight correctly without special-casing.
 //
 // A nil entry means NO RATE IS HELD, never free — the same distinction
 // Pricer.RateAt's bool carries, preserved rather than flattened to zero. The
@@ -60,7 +76,7 @@ const PriceUnitGBPPerKWh = "GBP/kWh"
 // window is priced.
 //
 // len(out) == len(buckets), always. That is the contract consumers zip against.
-func BucketPrices(buckets []time.Time, stop time.Time, p Pricer) (prices []*float64, basis string, unpriced int) {
+func BucketPrices(buckets []time.Time, start, stop time.Time, p Pricer) (prices []*float64, basis string, unpriced int) {
 	prices = make([]*float64, len(buckets))
 	if p == nil {
 		// No pricer is not a flat rate of zero. Every bucket is unknown, and the
@@ -71,18 +87,21 @@ func BucketPrices(buckets []time.Time, stop time.Time, p Pricer) (prices []*floa
 	ri := rateInterval(p)
 	basis = basisFor(buckets, stop, ri)
 
-	for i, start := range buckets {
-		end := bucketEnd(buckets, stop, i)
+	for i := range buckets {
+		from, end := bucketSpan(buckets, start, stop, i)
 		var (
 			rate float64
 			ok   bool
 		)
 		if basis == PriceBasisMeanOverBucket {
-			rate, ok = meanRateOver(start, end, ri, p)
+			rate, ok = meanRateOver(from, end, ri, p)
 		} else {
 			// The bucket lies inside one rate interval (or the rate never changes),
-			// so its start instant identifies the rate exactly.
-			rate, ok = p.RateAt(start)
+			// so one instant inside it identifies the rate exactly. `from` rather
+			// than the bucket's label, for the clipped first bucket: they name the
+			// same rate whenever both are inside the window, and only `from` is
+			// guaranteed to be.
+			rate, ok = p.RateAt(from)
 		}
 		if !ok {
 			unpriced++
@@ -127,6 +146,19 @@ func bucketEnd(buckets []time.Time, stop time.Time, i int) time.Time {
 		return buckets[i+1]
 	}
 	return stop
+}
+
+// bucketSpan returns the part of bucket i the WINDOW covers: [max(label, start),
+// end). Only the first bucket can be clipped — the axis is built from the
+// window's own start downward to a calendar boundary — but the max is taken
+// unconditionally rather than special-casing i == 0, so the rule stays true of
+// any axis rather than of this one.
+func bucketSpan(buckets []time.Time, start, stop time.Time, i int) (from, end time.Time) {
+	from, end = buckets[i], bucketEnd(buckets, stop, i)
+	if from.Before(start) {
+		from = start
+	}
+	return from, end
 }
 
 // meanRateOver returns the TIME-weighted mean rate across [start, end).

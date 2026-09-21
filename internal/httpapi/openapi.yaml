@@ -1976,6 +1976,15 @@ components:
           description: >
             Count of null entries in prices[]. Sent even when 0, because 0 is the
             assertion a consumer wants: this window is fully priced.
+
+
+            A bucket is priced over the part of it the WINDOW covers, not over
+            its nominal span. The axis is built on calendar boundaries, so a
+            custom window starting mid-bucket has a first bucket labelled before
+            the window begins — and its kwh and cost already describe only the
+            covered part, so its price must too. Pricing the nominal span asked
+            about an instant outside the window, which reported a fully priced
+            bucket as null and counted it here.
         tariff_codes:
           type: array
           items:

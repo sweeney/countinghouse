@@ -1678,9 +1678,12 @@ func foldAll(series []Series, fine, display []time.Time, fineHours []float64) []
 // actually receives, after any folding — so len(prices) == len(buckets) cannot
 // drift from the axis it is meant to align to.
 //
-// stop is the window end; see BucketPrices.
-func (r *SeriesResponse) AttachPrices(stop time.Time, p Pricer, tariffCodes []string) {
-	prices, basis, unpriced := BucketPrices(r.Buckets, stop, p)
+// start and stop are the window bounds; see BucketPrices. start is not optional:
+// the axis is built on calendar boundaries, so the first bucket can begin before
+// the window does, and pricing it from its label asks about an instant the window
+// never covered.
+func (r *SeriesResponse) AttachPrices(start, stop time.Time, p Pricer, tariffCodes []string) {
+	prices, basis, unpriced := BucketPrices(r.Buckets, start, stop, p)
 	vatIncluded := true
 	r.Prices = prices
 	r.PriceUnit = PriceUnitGBPPerKWh
