@@ -1005,6 +1005,15 @@ means the gap is entirely routine quantisation, which is the common case. Mergin
 two would turn routine noise into a fault report and hide a real fault inside routine
 noise.
 
+One consequence of `omitempty` worth knowing before you depend on it: **absence means
+"nothing was clamped" only on a server that has this field at all.** A server predating
+it omits the block for a different reason, and the two are the same bytes on the wire.
+That is true of every additive field, and the general answer is the same — ask
+`/openapi.json`, which lists `clamp` only where it exists. It is called out here rather
+than left implicit because this particular absence is load-bearing: a consumer reading
+it as "the parts sum exactly" on an older server would draw precisely the wrong
+conclusion, which is the failure the block was added to prevent.
+
 `unclamped=true` applies no clamp — it serves the raw signed residual, negatives
 preserved — so it carries no `clamp` block, and its parts deliberately do not sum.
 

@@ -1821,7 +1821,10 @@ components:
 
         PRESENT ONLY WHEN THE CLAMP MOVED ENERGY, so its absence is the positive
         assertion that the parts sum exactly — the same convention as
-        `unpriced_kwh`. Carried on both `shape=columns` and `shape=rows`, because
+        `unpriced_kwh`. That reading holds only on a server that HAS this field:
+        one predating it omits the block for a different reason, and the two are
+        the same bytes. Check this document rather than a response to tell them
+        apart. Carried on both `shape=columns` and `shape=rows`, because
         shape is a rendering choice and must not change what a response explains.
 
 
