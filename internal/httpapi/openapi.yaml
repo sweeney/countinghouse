@@ -2041,6 +2041,15 @@ components:
           description: >
             Total energy the clamp added to the "unmonitored" series. Exactly the
             amount by which the parts exceed the meter.
+
+
+            Exactly, on the PER-BUCKET arrays: sum(kwh[]) over the parts equals
+            sum(kwh[]) of the meter plus this. Not on `total_kwh`, which
+            accumulates raw values and rounds once (deliberately), so over a few
+            hundred buckets it sits a hair from the sum of its own rounded array.
+            Checking the identity on totals is out by that much and by nothing
+            real — worth knowing before a few hundredths of a kWh gets read as a
+            hole in the decomposition.
         buckets:
           type: integer
           description: Buckets clamped at all, either band.
