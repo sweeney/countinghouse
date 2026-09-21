@@ -449,7 +449,7 @@ func (s *Server) handlePrices(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !capWindow(w, win, maxCurveDays, "slots") {
+	if !capWindow(w, win, maxCurveDays, "a slot per half hour", nil) {
 		return
 	}
 	if !s.refuseIfSpansBoundary(w, win) {
@@ -557,7 +557,11 @@ func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !capWindow(w, win, maxStatsDays, "daily rows") {
+	groupBy, cheapBelow, ok := parseStatsShape(w, r)
+	if !ok {
+		return
+	}
+	if !capStatsWindow(w, win, groupBy) {
 		return
 	}
 	if !s.refuseIfSpansBoundary(w, win) {
@@ -600,6 +604,18 @@ func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
 	curve, err := s.curveFor(r.Context(), code, win.Start.UTC(), win.Stop.UTC())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "could not read the price archive: "+err.Error())
+		return
+	}
+
+	if groupBy == prices.GroupByMonth {
+		writeJSONCachedWindow(w, r, code, win, curve.Fingerprint(), map[string]any{
+			"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
+			"tariff_code": code, "half_hourly": true,
+			"unit": "p/kWh", "vat_included": true,
+			"group_by":    groupBy,
+			"cheap_below": cheapBelow,
+			"periods":     roundPeriods(curve.PeriodStatsOver(loc, groupBy, cheapBelow)),
+		})
 		return
 	}
 
@@ -718,27 +734,55 @@ func (s *Server) resolveWindow(w http.ResponseWriter, r *http.Request) (energy.W
 // 365 and perfectly reasonable.
 const (
 	maxCurveDays = 31
+
+	// maxStatsDays caps the DAY grouping, where the response really does grow a
+	// row per day and the message's "an unbounded window is an unbounded
+	// response" holds literally.
 	maxStatsDays = 366
+
+	// maxStatsMonthDays caps the MONTH grouping, where it does not: 700 days at
+	// month grouping is 24 rows, so response size constrains nothing and the
+	// endpoint's own stated rationale would not hold at the grouping it was
+	// extended to serve. A caller asking the two-year seasonal question this
+	// route exists for was splitting it in half for no reason on the wire.
+	//
+	// Still bounded, just by the other cost: the archive READ. Five years is
+	// ~87k half-hourly slots, the same order a consumer was already pulling
+	// client-side before this endpoint could answer by code at all.
+	maxStatsMonthDays = 5 * 366
 )
 
 // capWindow refuses a window longer than maxDays, naming the cap and what it protects.
-func capWindow(w http.ResponseWriter, win energy.Window, maxDays int, unit string) bool {
+//
+// `returns` is the WHOLE clause describing what the endpoint emits per unit of
+// window ("a slot per half hour", "a row per month"), not a noun spliced into a
+// fixed sentence. It used to be the latter, which read correctly for /prices and
+// garbled on /prices/stats: "one of its daily rows per half hour or per day".
+// These messages were singled out in issue #36 as unusually good, so they are
+// worth keeping clean.
+//
+// `extra` merges into the limits block, for constraints that are not simply a
+// day count — see the grouping-dependent stats cap.
+func capWindow(w http.ResponseWriter, win energy.Window, maxDays int, returns string, extra map[string]any) bool {
 	days := win.Stop.Sub(win.Start).Hours() / 24
 	if days <= float64(maxDays) {
 		return true
 	}
+	limits := map[string]any{
+		"max_days": maxDays,
+		"days":     round.To(days, 2),
+		// The same key /series' bucket cap reports, in the same unit, which is
+		// the point: one auto-chunking routine can read both without knowing
+		// which endpoint stated its cap in buckets and which in days.
+		"max_window_seconds": int64(maxDays) * 86400,
+	}
+	for k, v := range extra {
+		limits[k] = v
+	}
 	writeErrorWithLimits(w, http.StatusBadRequest, fmt.Sprintf(
-		"window spans %.0f days, over the cap of %d for this endpoint (it returns one of its "+
-			"%s per half hour or per day, and an unbounded window is an unbounded response); "+
-			"request a shorter range", days, maxDays, unit),
-		map[string]any{
-			"max_days": maxDays,
-			"days":     round.To(days, 2),
-			// The same key /series' bucket cap reports, in the same unit, which is
-			// the point: one auto-chunking routine can read both without knowing
-			// which endpoint stated its cap in buckets and which in days.
-			"max_window_seconds": int64(maxDays) * 86400,
-		})
+		"window spans %.0f days, over the cap of %d for this endpoint (it returns %s, and an "+
+			"unbounded window is an unbounded response); request a shorter range",
+		days, maxDays, returns), limits)
 	return false
 }
 
@@ -831,4 +875,86 @@ func ifNoneMatch(header, etag string) bool {
 		}
 	}
 	return false
+}
+
+// parseCheapBelow reads the optional inc-VAT pence threshold for the cheap
+// counts.
+//
+// Caller-supplied and never defaulted, because "cheap" is a POLICY rather than a
+// fact — the same argument the floorplan `category` passthrough already makes.
+// Picking a number here would make two dashboards disagree about whether last
+// Tuesday was cheap, which is precisely what the served band/percentile
+// derivations exist to prevent elsewhere.
+//
+// Negative thresholds are legal: on a half-hourly tariff "below zero" is a real
+// and interesting question.
+func parseCheapBelow(w http.ResponseWriter, r *http.Request) (*float64, bool) {
+	raw := r.URL.Query().Get("cheap_below")
+	if raw == "" {
+		return nil, true
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest,
+			"invalid 'cheap_below' (want pence per kWh, inc VAT, e.g. cheap_below=10)")
+		return nil, false
+	}
+	return &v, true
+}
+
+// roundPeriods rounds a month rollup for the wire at the price precision the
+// sibling routes use.
+func roundPeriods(in []prices.PeriodStats) []prices.PeriodStats {
+	out := make([]prices.PeriodStats, 0, len(in))
+	for _, p := range in {
+		p.Min = round.To(p.Min, priceDP)
+		p.Max = round.To(p.Max, priceDP)
+		p.Mean = round.To(p.Mean, priceDP)
+		p.Median = round.To(p.Median, priceDP)
+		p.MinExcVAT = round.To(p.MinExcVAT, priceDP)
+		p.MaxExcVAT = round.To(p.MaxExcVAT, priceDP)
+		p.MeanExcVAT = round.To(p.MeanExcVAT, priceDP)
+		p.MedianExcVAT = round.To(p.MedianExcVAT, priceDP)
+		p.MeanSpread = round.To(p.MeanSpread, priceDP)
+		out = append(out, p)
+	}
+	return out
+}
+
+// parseStatsShape reads the two parameters that decide what /prices/stats emits.
+//
+// Parsed BEFORE the window cap because the cap depends on the grouping: a row per
+// day and a row per month are bounded very differently by the same window.
+//
+// group_by=month rolls the days up. The DEFAULT stays day, and the days[] shape
+// is untouched, because the question this endpoint already answered well — "was
+// shifting load worth it yesterday" — is a daily one.
+func parseStatsShape(w http.ResponseWriter, r *http.Request) (groupBy string, cheapBelow *float64, ok bool) {
+	groupBy = r.URL.Query().Get("group_by")
+	if groupBy == "" {
+		groupBy = prices.GroupByDay
+	}
+	if !prices.ValidPeriodGrouping(groupBy) {
+		writeError(w, http.StatusBadRequest, "invalid 'group_by' (want day or month)")
+		return "", nil, false
+	}
+	cheapBelow, ok = parseCheapBelow(w, r)
+	if !ok {
+		return "", nil, false
+	}
+	return groupBy, cheapBelow, true
+}
+
+// capStatsWindow applies the cap that fits the requested grouping.
+//
+// The cap is grouping-DEPENDENT and the limits block says so, because nothing
+// else on the wire would hint at it: a caller refused at 700 days has no way to
+// learn that the same window is answerable one grouping over.
+func capStatsWindow(w http.ResponseWriter, win energy.Window, groupBy string) bool {
+	if groupBy == prices.GroupByMonth {
+		return capWindow(w, win, maxStatsMonthDays, "a row per month",
+			map[string]any{"group_by": groupBy})
+	}
+	return capWindow(w, win, maxStatsDays, "a row per day",
+		map[string]any{"group_by": groupBy})
 }

@@ -49,7 +49,7 @@ Auth: every route except `/healthz` and `/openapi.json` requires a Bearer JWT fr
 | `GET /prices` | Half-hourly price curve over a window, past or future. |
 | `GET /prices/upcoming` | The near future with bands, ranks and cheapest-run windows. |
 | `GET /prices/cheapest` | The cheapest contiguous window for a deferrable load. |
-| `GET /prices/stats` | Per-day min/max/mean/spread and plunge-slot counts. |
+| `GET /prices/stats?group_by=&cheap_below=` | Per-day min/max/mean/spread and plunge-slot counts. `group_by=month` rolls them up — see [Seasonal rollups](#seasonal-rollups). |
 | `GET /metrics` | Query counters, Influx latency, `drift_buckets_total` (negative meter−monitored drift beyond the 0.1 kWh quantum), uptime, goroutines. |
 
 **Windows:** `today`, `week` (starts Monday), `month` — all period-to-date — and `custom`
@@ -63,9 +63,10 @@ on Monday / the 1st. **Intervals:** `5m,15m,30m,1h,6h,1d` with a smart default p
 (rolling windows default by span) and a ~1000-bucket cap. That cap is stated in
 **buckets**, so the window length it allows depends on the interval asked for — at `30m`
 it is about 20 days, at `1h` about 41. The price routes cap in **days** instead (31 for
-`/prices`, 366 for `/prices/stats` — see [How spend is calculated](#how-spend-is-calculated)),
-so a caller chunking a price/consumption join across both needs two chunk sizes, and the
-boundaries do not line up.
+`/prices`, 366 for `/prices/stats` at its default daily grouping — see
+[How spend is calculated](#how-spend-is-calculated)), so a caller chunking a
+price/consumption join across both needs two chunk sizes, and the boundaries do not line
+up.
 
 ### Series response shapes (`shape=columns|rows`)
 
@@ -970,6 +971,14 @@ curve cannot — would then contradict. They also cap the window: 31 days for `/
 in **days**, while `/series` caps in **buckets** (~1000) — a join across both is chunked
 by two different rules.
 
+On `/prices/stats` the cap **moves with `group_by`**, because the rationale does. A daily
+grouping returns a row per day, so an unbounded window really is an unbounded response;
+`group_by=month` over the same 700 days is 24 rows, and the bound there is the archive
+read rather than the response — 1830 days (five years, ~87k slots). A cap refusal names
+the grouping it applied under in `limits.group_by`, so a caller refused at 366 days can
+tell that the same window answers one grouping over instead of chunking a question that
+did not need chunking.
+
 What counts as "a tariff change" is the **curve identity**, not the number of agreement
 blocks. An agreement split that leaves the tariff code unchanged — see the VAT runbook
 above — is served normally, because the archive holds the supplier's own inc-VAT prices
@@ -979,6 +988,61 @@ genuinely differs either side.
 
 `/prices/stats` emits **both VAT bases**: the unsuffixed keys are inc-VAT, matching the
 other price routes, and `*_exc_vat` siblings carry the analytical figures.
+
+### Seasonal rollups
+
+`/prices/stats` answers per day, which is the right grain for *"was shifting load worth
+it yesterday"* and the wrong one for *"how often do cheap slots occur in winter versus
+summer"* — that needs about 24 numbers and gets about 730 rows. `group_by=month` rolls
+them up:
+
+```
+GET /prices/stats?window=custom&from=…&to=…&group_by=month&cheap_below=10
+```
+
+```json
+{
+  "group_by": "month", "cheap_below": 10.0, "unit": "p/kWh",
+  "periods": [
+    { "period": "2026-06", "days": 30, "slots": 1440,
+      "min": -8.21, "max": 34.90, "mean": 15.07, "median": 14.22,
+      "mean_spread": 24.31,
+      "plunge_slots": 44, "negative_slots": 32,
+      "cheap_slots": 212, "cheap_days": 19 }
+  ]
+}
+```
+
+`group_by=day` stays the **default** and the `days[]` shape is untouched.
+
+The aggregates worth serving are the ones you cannot derive from the daily rows
+afterwards, and the shape is chosen around that:
+
+- **`median`** over a month is not the median of the daily medians.
+- **`mean_spread`** is the mean of the *daily* spreads, not `max − min` over the period.
+  The daily spread is what says whether shifting load that day was worth the bother, so
+  averaging it answers "how worthwhile was shifting load this month". A period-wide
+  `max − min` is dominated by the single most extreme day and says nothing about a
+  typical one.
+- **`cheap_days`** cannot be recovered from daily min/max/mean at all, and is usually
+  the figure actually wanted: *"how many days in January could I have run the dishwasher
+  under 10p"* is a different question from *"how many half hours were under 10p"*, and
+  the second can be one freak night.
+- **`days`** counts days that actually hold prices, not the length of the month, so a
+  partial month at either end of the window does not look like a full one.
+
+`plunge_slots` is at-or-below zero; `negative_slots` is strictly below. They differ by
+the exactly-zero slots, which are free but not paid-to-take.
+
+`cheap_below` is in **pence per kWh, inc VAT** — not pounds. `cheap_below=0.10` means a
+tenth of a penny and is accepted silently, because negative thresholds are meaningful
+here and so no range check could tell the two apart.
+
+It is **caller-supplied and never defaulted**, because "cheap" is a policy
+rather than a fact — the same argument the floorplan `category` passthrough makes.
+Picking a number here would let two dashboards disagree about whether last Tuesday was
+cheap, which is exactly what the served `band`/`percentile` derivations exist to
+prevent. Negative thresholds are legal.
 
 A **flat-rate** tariff is a valid state on the price routes, not a service failure.
 `/prices`, `/prices/stats` and `/prices/upcoming` all answer `200` with
