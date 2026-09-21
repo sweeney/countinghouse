@@ -310,3 +310,102 @@ func TestSeries_BareEmptyFilterIsNoFilter(t *testing.T) {
 		t.Errorf("series = %d, want the unfiltered set", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue #36 N8, end to end on the grouping the report actually used.
+//
+// A home whose meter reads BELOW the sum of its monitored devices — which real
+// counter quantisation produces routinely — has every negative residual clamped
+// to zero, so the grouped parts plus the catch-all overshoot the meter. That
+// overshoot used to be unexplained and, in the sub-quantum band, uncounted
+// anywhere in the service.
+// ---------------------------------------------------------------------------
+
+// clampedSetup gives a meter reading below its monitored devices in every bucket.
+func clampedSetup(t *testing.T) *Server {
+	t.Helper()
+	s, _ := dataSetup(t)
+	s.Config = fakeConfig{devices: floorplanDevices(), tariffs: testTariffs()}
+	s.Floorplan = floorplanRecords()
+	s.Influx = seriesFakeQuerier(todayHourBuckets(t),
+		map[string]float64{
+			"winefridge":     0.05,
+			"washingmachine": 0.10,
+			"immersion":      0.20,
+			// Monitored comes to 0.45/bucket: 0.35 of plugs plus 0.1 kWh from the
+			// 100 W UPS over an hour. A 0.40 meter therefore leaves a −0.05
+			// residual — the sub-quantum band, which is routine, silent, and the
+			// likelier cause of a small reconciliation gap.
+			"electricity_meter": 0.40,
+		},
+		map[string]float64{"network-ups": 100.0},
+	)
+	return s
+}
+
+func TestSeries_ClampReportExplainsTheSumGap(t *testing.T) {
+	s := clampedSetup(t)
+	w := doGET(t, s, "/series?window=today&group_by=room&include_unmonitored=true")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	r := decodeSeries(t, w)
+
+	if r.Clamp == nil {
+		t.Fatal("parts overshoot the meter and nothing on the wire says why")
+	}
+	if r.Clamp.KWh <= 0 {
+		t.Errorf("clamp.kwh = %v, want the positive overshoot", r.Clamp.KWh)
+	}
+	// This fixture's residual is inside one counter quantum, so it is routine
+	// noise and must NOT be reported as a data-quality alarm.
+	if r.Clamp.DriftBuckets != 0 {
+		t.Errorf("drift_buckets = %d, want 0: a −0.05 residual is quantisation noise",
+			r.Clamp.DriftBuckets)
+	}
+	if r.Clamp.Buckets == 0 {
+		t.Error("buckets = 0 while kwh > 0: the gap has to come from somewhere")
+	}
+
+	// The reported figure must account for the whole discrepancy.
+	var parts, meter float64
+	for _, ser := range r.Series {
+		for _, v := range ser.KWh {
+			parts += v
+		}
+	}
+	mw := doGET(t, s, "/series?window=today&group_by=house")
+	for _, ser := range decodeSeries(t, mw).Series {
+		if ser.Key != "meter" {
+			continue
+		}
+		for _, v := range ser.KWh {
+			meter += v
+		}
+	}
+	gap := parts - meter
+	if diff := gap - r.Clamp.KWh; diff > 0.01 || diff < -0.01 {
+		t.Errorf("parts exceed meter by %.4f but clamp.kwh reports %.4f", gap, r.Clamp.KWh)
+	}
+}
+
+// A home whose meter sits above its monitored devices clamps nothing, and the
+// absence of the block is the assertion that the parts sum exactly.
+func TestSeries_NoClampReportWhenNothingIsClamped(t *testing.T) {
+	s := floorSeriesSetup(t) // meter 1.0, comfortably above monitored
+	w := doGET(t, s, "/series?window=today&group_by=room&include_unmonitored=true")
+	if r := decodeSeries(t, w); r.Clamp != nil {
+		t.Errorf("nothing was clamped but a clamp block was sent: %+v", *r.Clamp)
+	}
+}
+
+// unclamped=true serves the raw signed residual, where the parts deliberately do
+// not sum. Reporting a clamp that was not applied would describe the wrong
+// response.
+func TestSeries_UnclampedModeReportsNoClamp(t *testing.T) {
+	s := clampedSetup(t)
+	w := doGET(t, s, "/series?window=today&group_by=house&unclamped=true")
+	if r := decodeSeries(t, w); r.Clamp != nil {
+		t.Errorf("unclamped mode applied no clamp but reported one: %+v", *r.Clamp)
+	}
+}

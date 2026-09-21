@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -561,5 +562,135 @@ func TestPriceETagStillTracksRestatements(t *testing.T) {
 			t.Errorf("%s: a changed price produced the same ETag — the tag keys on metadata "+
 				"only, so a restatement would be served stale indefinitely", path)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue #36 N5: /prices and /prices/stats disagreed about the same window.
+//
+// A flat-tariff window answered 200 on /prices (and on /prices/upcoming) but 503
+// on /prices/stats, so a seasonal-analysis consumer had to special-case per
+// ENDPOINT rather than per window. A flat tariff is a valid state, not a service
+// failure, and the sibling routes already said so.
+// ---------------------------------------------------------------------------
+
+// pxFlatConfig is a server whose only agreement is an open-ended fixed tariff.
+func pxFlatConfig(t *testing.T) *Server {
+	t.Helper()
+	s, _ := dataSetup(t)
+	s.Clock = fixedClock{pxNow(t)}
+	from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.Config = pxConfig{agreements: config.EnergyAgreements{
+		Agreements: map[string][]config.Agreement{"electricity": {{
+			From: &from, Name: "Fixed 12M", Type: config.TariffTypeFixed,
+			Unit: "kWh", VATRate: 0.05, UnitRate: 0.208948, DailyStandingCharge: 0.53,
+		}}},
+	}}
+	s.PriceReader = fakePriceReader{}
+	return s
+}
+
+func TestStatsOnAFlatTariffMirrorsPrices(t *testing.T) {
+	s := pxFlatConfig(t)
+
+	w := doGET(t, s, "/prices/stats?window=7d")
+	if w.Code != http.StatusOK {
+		t.Fatalf("a flat tariff is a valid state, got %d: %s", w.Code, w.Body.String())
+	}
+	m := decode(t, w)
+	if m["half_hourly"] != false {
+		t.Errorf("half_hourly = %v, want false", m["half_hourly"])
+	}
+	if m["flat_price"] == nil {
+		t.Errorf("a flat tariff should report its rate: %v", m)
+	}
+	// Empty rather than absent: a consumer ranging over days[] needs it to exist.
+	days, ok := m["days"].([]any)
+	if !ok {
+		t.Fatalf("days must be present and an array, got %T: %v", m["days"], m)
+	}
+	if len(days) != 0 {
+		t.Errorf("a flat tariff has no daily spread; got %d days", len(days))
+	}
+}
+
+// The same window must not be a 200 on one price route and a 503 on its
+// neighbour. This is the finding stated directly.
+func TestFlatWindowAgreesAcrossPriceRoutes(t *testing.T) {
+	for _, path := range []string{
+		"/prices?window=7d",
+		"/prices/stats?window=7d",
+		"/prices/upcoming?hours=3",
+	} {
+		s := pxFlatConfig(t)
+		if w := doGET(t, s, path); w.Code != http.StatusOK {
+			t.Errorf("%s = %d, want 200 (flat tariff is a valid state): %s",
+				path, w.Code, w.Body.String())
+		}
+	}
+}
+
+// "no tariff at all" and "a tariff that is not half-hourly" are different states
+// with different fixes, and /prices/stats reported both with the not-half-hourly
+// message. Reaching the no-tariff branch means the message must name THAT.
+func TestStatsDistinguishesNoTariffFromFlatTariff(t *testing.T) {
+	s, _ := dataSetup(t)
+	s.Clock = fixedClock{pxNow(t)}
+	// An agreement that starts well after the window asked about: a configured
+	// tariff exists, but none covers this window.
+	from := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	s.Config = pxConfig{agreements: config.EnergyAgreements{
+		Agreements: map[string][]config.Agreement{"electricity": {{
+			From: &from, Name: "Future", Type: config.TariffTypeFixed,
+			Unit: "kWh", VATRate: 0.05, UnitRate: 0.21, DailyStandingCharge: 0.53,
+		}}},
+	}}
+	s.PriceReader = fakePriceReader{}
+
+	w := doGET(t, s, "/prices/stats?window=7d")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no covering tariff should be 503, got %d: %s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "not half-hourly") {
+		t.Errorf("no tariff is configured, but the refusal blames half-hourliness: %s", body)
+	}
+	if !strings.Contains(body, "no tariff is configured") {
+		t.Errorf("refusal should name the real cause, got: %s", body)
+	}
+}
+
+// /prices/cheapest keeps its 503 on a flat tariff — every half hour ties, so
+// there genuinely is no cheapest window — but it shared the same conflated branch
+// and so misnamed the no-tariff case too.
+func TestCheapestDistinguishesNoTariffFromFlatTariff(t *testing.T) {
+	// Flat tariff: still a 503, and the message may name flatness, because that is
+	// the real reason there is no answer.
+	s := pxFlatConfig(t)
+	w := doGET(t, s, "/prices/cheapest?duration=1h")
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a flat tariff has no cheapest window, want 503, got %d: %s",
+			w.Code, w.Body.String())
+	}
+
+	// No covering tariff: also a 503, but blaming half-hourliness points at the
+	// wrong fix.
+	s2, _ := dataSetup(t)
+	s2.Clock = fixedClock{pxNow(t)}
+	from := time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC)
+	s2.Config = pxConfig{agreements: config.EnergyAgreements{
+		Agreements: map[string][]config.Agreement{"electricity": {{
+			From: &from, Name: "Future", Type: config.TariffTypeFixed,
+			Unit: "kWh", VATRate: 0.05, UnitRate: 0.21, DailyStandingCharge: 0.53,
+		}}},
+	}}
+	s2.PriceReader = fakePriceReader{}
+
+	w2 := doGET(t, s2, "/prices/cheapest?duration=1h")
+	if w2.Code != http.StatusServiceUnavailable {
+		t.Fatalf("no covering tariff should be 503, got %d: %s", w2.Code, w2.Body.String())
+	}
+	if body := w2.Body.String(); !strings.Contains(body, "no tariff is configured") {
+		t.Errorf("refusal should name the real cause, got: %s", body)
 	}
 }

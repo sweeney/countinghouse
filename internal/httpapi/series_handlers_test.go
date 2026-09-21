@@ -30,6 +30,21 @@ type seriesResp struct {
 	StaleMonitoredIDs   []string  `json:"stale_monitored_ids"`
 	Buckets             []string  `json:"buckets"`
 	Series              []seriesS `json:"series"`
+	Clamp               *clampS   `json:"clamp"`
+
+	Prices           []*float64 `json:"prices"`
+	PriceUnit        string     `json:"price_unit"`
+	PriceVATIncluded *bool      `json:"price_vat_included"`
+	PriceBasis       string     `json:"price_basis"`
+	UnpricedBuckets  *int       `json:"unpriced_buckets"`
+	TariffCodes      []string   `json:"tariff_codes"`
+}
+
+// clampS mirrors energy.ClampReport for the wire assertions.
+type clampS struct {
+	KWh          float64 `json:"kwh"`
+	Buckets      int     `json:"buckets"`
+	DriftBuckets int     `json:"drift_buckets"`
 }
 
 type seriesS struct {

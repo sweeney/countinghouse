@@ -909,3 +909,90 @@ func TestBuildSeriesUPSPartialFinalBucket(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue #36 N8: the grouped parts plus the unmonitored catch-all did not sum to
+// the meter, and nothing on the wire explained the gap.
+//
+// The reported cause was "per-series rounding". It is not: money is carried at
+// 4dp, and the real cause is that deriveUnmonitored clamps the per-bucket
+// residual at zero, so a bucket where monitored exceeds meter contributes its
+// excess to the catch-all instead of cancelling.
+//
+// DriftStats could not be reused as-is for this. It counts only buckets MORE
+// negative than one counter quantum, so the sub-quantum clamps — the likelier
+// contributor to a small gap — were counted nowhere; and it records a count and
+// the single worst residual, never a total, so the SIZE of the gap was not
+// reconstructible even internally.
+// ---------------------------------------------------------------------------
+
+// The total clamped energy is accumulated across BOTH bands, and the two bands
+// stay separately countable: the sub-quantum one is routine quantisation noise,
+// the supra-quantum one is a data-quality alarm, and reporting them as one number
+// would misrepresent both.
+func TestComputeDriftAccumulatesClampedEnergy(t *testing.T) {
+	loc := mustLondon(t)
+	buckets := threeBuckets(loc)
+	// Residuals: −0.05 (noise), −0.30 (drift), +0.40 (no clamp).
+	monitored := &Series{KWh: []float64{0.55, 0.80, 0.10}}
+	meter := &Series{KWh: []float64{0.50, 0.50, 0.50}}
+
+	d := computeDrift(buckets, monitored, meter)
+
+	if math.Abs(d.ClampedKWh-0.35) > 1e-9 {
+		t.Errorf("ClampedKWh = %v, want 0.35 (0.05 noise + 0.30 drift)", d.ClampedKWh)
+	}
+	if d.NoiseBuckets != 1 {
+		t.Errorf("NoiseBuckets = %d, want 1 (the −0.05 bucket)", d.NoiseBuckets)
+	}
+	// Unchanged: the alarm still counts only the supra-quantum band.
+	if d.ClampedBuckets != 1 {
+		t.Errorf("ClampedBuckets = %d, want 1 (only the −0.30 bucket)", d.ClampedBuckets)
+	}
+	if d.ClampedBucketsTotal() != 2 {
+		t.Errorf("ClampedBucketsTotal() = %d, want 2", d.ClampedBucketsTotal())
+	}
+}
+
+// The number reported must actually ACCOUNT for the discrepancy — that is the
+// whole point of reporting it. monitored + unmonitored − meter == ClampedKWh,
+// exactly.
+func TestClampedKWhExplainsTheSumGap(t *testing.T) {
+	loc := mustLondon(t)
+	buckets := threeBuckets(loc)
+	hrs := []float64{1, 1, 1}
+	monitored := &Series{KWh: []float64{0.55, 0.80, 0.10}}
+	meter := Series{KWh: []float64{0.50, 0.50, 0.50}}
+
+	unmon := deriveUnmonitored(buckets, hrs, monitored, meter, testPricer(), false)
+	d := computeDrift(buckets, monitored, &meter)
+
+	var sumMon, sumUnmon, sumMeter float64
+	for i := range buckets {
+		sumMon += monitored.KWh[i]
+		sumUnmon += unmon.KWh[i]
+		sumMeter += meter.KWh[i]
+	}
+	gap := sumMon + sumUnmon - sumMeter
+	if math.Abs(gap-d.ClampedKWh) > 1e-9 {
+		t.Errorf("parts exceed the meter by %v but ClampedKWh reports %v; "+
+			"the reported figure must explain the whole gap", gap, d.ClampedKWh)
+	}
+	if gap <= 0 {
+		t.Fatalf("fixture should produce a real gap, got %v", gap)
+	}
+}
+
+// Nothing clamped ⇒ nothing to report. Absence is the signal that the parts sum
+// exactly, matching how unpriced_kwh is treated.
+func TestNoClampingReportsNothing(t *testing.T) {
+	loc := mustLondon(t)
+	buckets := threeBuckets(loc)
+	monitored := &Series{KWh: []float64{0.10, 0.20, 0.30}}
+	meter := &Series{KWh: []float64{0.50, 0.50, 0.50}}
+
+	d := computeDrift(buckets, monitored, meter)
+	if d.ClampedKWh != 0 || d.NoiseBuckets != 0 || d.ClampedBucketsTotal() != 0 {
+		t.Errorf("no negative residual should clamp nothing, got %+v", d)
+	}
+}

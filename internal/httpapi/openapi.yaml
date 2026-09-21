@@ -183,6 +183,7 @@ paths:
         - $ref: "#/components/parameters/FloorsFilter"
         - $ref: "#/components/parameters/IncludeUnmonitored"
         - $ref: "#/components/parameters/Unclamped"
+        - $ref: "#/components/parameters/WithPrices"
         - $ref: "#/components/parameters/Shape"
       responses:
         "200":
@@ -242,6 +243,7 @@ paths:
         - $ref: "#/components/parameters/To"
         - $ref: "#/components/parameters/Interval"
         - $ref: "#/components/parameters/Unclamped"
+        - $ref: "#/components/parameters/WithPrices"
         - $ref: "#/components/parameters/Shape"
       responses:
         "200":
@@ -454,7 +456,11 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
         "503":
-          description: No price archive configured, or the tariff is not half-hourly
+          description: >
+            No price archive configured, no tariff covers the window, or the tariff
+            is flat-rate. Unlike /prices and /prices/stats this route DOES refuse a
+            flat tariff: every window ties, so there is no cheapest one, and a 200
+            naming an arbitrary window would read as a recommendation.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -470,6 +476,14 @@ paths:
         the bother. Figures are VAT-INCLUSIVE like every sibling price route, with
         ex-VAT values alongside under _exc_vat keys. Note `window=today` covers the
         WHOLE local day on the price routes, not the elapsed part.
+
+
+        A FLAT-RATE tariff answers `200` with `half_hourly: false`, a `flat_price`
+        and an EMPTY `days` array — the same shape /prices and /prices/upcoming
+        give, because a flat tariff is a valid state rather than a service failure.
+        This route used to answer 503 there, so one window could be a 200 on two
+        sibling routes and a 503 on the third, forcing a seasonal analysis to
+        special-case per endpoint rather than per window.
       operationId: getPriceStats
       parameters:
         - { $ref: "#/components/parameters/IfNoneMatch" }
@@ -486,7 +500,10 @@ paths:
               schema: { $ref: "#/components/schemas/PriceStatsResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "503":
-          description: No price archive configured, or the tariff is not half-hourly
+          description: >
+            No price archive configured, or no tariff covers the window. NOT
+            returned for a flat-rate tariff, which is a 200 carrying
+            `half_hourly: false` and a `flat_price`.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -832,6 +849,27 @@ components:
       schema:
         type: boolean
         default: false
+    WithPrices:
+      name: prices
+      in: query
+      required: false
+      description: >
+        Opt in to the per-bucket price array: `prices[]` aligned to `buckets[]`,
+        plus `price_unit`, `price_vat_included`, `price_basis`,
+        `unpriced_buckets` and `tariff_codes`. Default false, so no existing
+        payload grows.
+
+
+        It exists because `cost` is kwh × price and the price cannot be recovered
+        from a bucket where kwh is zero — which are exactly the buckets that
+        answer "it was cheap and we did NOT use it". Joining /series to /prices on
+        an RFC3339 string instead works only while both are 30m: at interval=15m
+        it silently matched half the buckets. The server resolves by containment,
+        so it can answer at any interval.
+      schema:
+        type: boolean
+        default: false
+
     Unclamped:
       name: unclamped
       in: query
@@ -1179,6 +1217,20 @@ components:
         from:        { type: string, format: date-time }
         to:          { type: string, format: date-time }
         tariff_code: { type: string }
+        half_hourly:
+          type: boolean
+          description: >
+            False when the tariff covering the window is flat-rate. `days` is then
+            empty and `flat_price` carries the rate — a flat tariff has no daily
+            spread, which an empty array of daily spreads states exactly. Present on
+            BOTH branches: a flag appearing only in the flat case would have to be
+            tested for absence rather than read.
+        flat_price:
+          type: number
+          description: Present only when `half_hourly` is false. Pence per kWh, inc-VAT.
+        note:
+          type: string
+          description: Present only when `half_hourly` is false.
         unit:        { type: string, example: p/kWh }
         vat_included:
           type: boolean
@@ -1187,6 +1239,7 @@ components:
             price route. The ex-VAT figures are carried under explicit _exc_vat keys.
         days:
           type: array
+          description: Empty when `half_hourly` is false. Never absent.
           items: { $ref: "#/components/schemas/PriceDayStats" }
 
     PriceHealth:
@@ -1776,6 +1829,49 @@ components:
           type: number
       required: [key, label, kwh, cost, avg_w, total_kwh, total_cost]
 
+    ClampReport:
+      type: object
+      description: >
+        Why the parts of a decomposition do not sum exactly to the meter.
+
+
+        The "unmonitored" series is clamp(meter − monitored) PER BUCKET, so a
+        bucket where monitored exceeds the meter contributes its excess to the
+        catch-all instead of cancelling. Over a window the grouped parts plus the
+        catch-all therefore overshoot the meter — by a few pence on a real home,
+        small enough to look like float noise and not that.
+
+
+        PRESENT ONLY WHEN THE CLAMP MOVED ENERGY, so its absence is the positive
+        assertion that the parts sum exactly — the same convention as
+        `unpriced_kwh`. That reading holds only on a server that HAS this field:
+        one predating it omits the block for a different reason, and the two are
+        the same bytes. Check this document rather than a response to tell them
+        apart. Carried on both `shape=columns` and `shape=rows`, because
+        shape is a rendering choice and must not change what a response explains.
+
+
+        The two bucket counts are separate on purpose. `buckets` counts every
+        clamped bucket and is the honest denominator for the gap; `drift_buckets`
+        counts only those beyond one counter quantum (0.1 kWh), which is the
+        data-quality alarm — a monitored device over-counting, a mis-scaled meter,
+        skewed clocks. `drift_buckets: 0` with a non-zero `buckets` means the gap
+        is entirely routine quantisation.
+      properties:
+        kwh:
+          type: number
+          description: >
+            Total energy the clamp added to the "unmonitored" series. Exactly the
+            amount by which the parts exceed the meter.
+        buckets:
+          type: integer
+          description: Buckets clamped at all, either band.
+        drift_buckets:
+          type: integer
+          description: >
+            Subset of `buckets` beyond one counter quantum: the alarm band.
+      required: [kwh, buckets, drift_buckets]
+
     SeriesResponse:
       type: object
       description: >
@@ -1826,6 +1922,95 @@ components:
           items:
             type: string
           description: Ids of the stale monitored devices; omitted when none.
+        clamp:
+          allOf:
+            - $ref: "#/components/schemas/ClampReport"
+          description: >
+            Present only when clamping moved energy, i.e. when the parts do NOT
+            sum to the meter. Unlike coverage and stale_monitored_*, this is NOT
+            house-only: the catch-all added by include_unmonitored is clamped the
+            same way. Absent under unclamped=true, where no clamp is applied.
+        prices:
+          type: array
+          description: >
+            VAT-inclusive price behind each bucket, ALIGNED TO buckets[]:
+            len(prices) == len(buckets), same order, always. Present only with
+            prices=true.
+
+
+            A null entry means NO RATE IS HELD for that bucket, never free — the
+            same distinction the cost path draws when it reports unpriced_kwh.
+
+
+            CONTRACT: `cost[i] == kwh[i] × prices[i]` holds only when
+            `price_basis` is "slot". At coarser buckets the cost accumulates on
+            the rate grid while the reported price is a time-weighted mean, so the
+            identity is deliberately false there.
+          items:
+            type: number
+            nullable: true
+        price_unit:
+          type: string
+          example: GBP/kWh
+          description: >
+            Pounds per kWh — NOT the pence the /prices family speaks. This array
+            sits beside cost[] and kwh[] in the same response, and consistency
+            inside one payload beats consistency with a different endpoint.
+        price_vat_included:
+          type: boolean
+        price_basis:
+          type: string
+          enum: [slot, mean_over_bucket, flat]
+          description: >
+            How each value was arrived at. "slot": the bucket sits inside one rate
+            interval, so the value is that interval's own rate, exact.
+            "mean_over_bucket": the bucket spans several, so the value is the
+            TIME-weighted mean across them — not energy-weighted, which is
+            cost÷kwh and undefined in a zero-kWh bucket. "flat": one rate covers
+            all time. A bucket is priced under mean_over_bucket only when EVERY
+            interval inside it is priced; otherwise it is null, because a mean
+            over the slots that happen to be held is a plausible-looking wrong
+            number.
+        unpriced_buckets:
+          type: integer
+          description: >
+            Count of null entries in prices[]. Sent even when 0, because 0 is the
+            assertion a consumer wants: this window is fully priced.
+
+
+            A bucket is priced over the part of it the WINDOW covers, not over
+            its nominal span. The axis is built on calendar boundaries, so a
+            custom window starting mid-bucket has a first bucket labelled before
+            the window begins — and its kwh and cost already describe only the
+            covered part, so its price must too. Pricing the nominal span asked
+            about an instant outside the window, which reported a fully priced
+            bucket as null and counted it here.
+        tariff_codes:
+          type: array
+          items:
+            type: string
+          description: >
+            Every tariff the window touches, in order, de-duplicated. Plural
+            because a /series window MAY span a switchover: /prices refuses one,
+            since a curve is a property of a single tariff, but a per-bucket array
+            is not a curve — each bucket belongs to exactly one tariff, so every
+            value is honest.
+
+
+            FIXED agreements are named too. Each entry is the supplier tariff code
+            where there is one, the agreement's own id otherwise, and its name when
+            a fixed block carries neither — so `len(tariff_codes)` can be trusted
+            as the number of tariffs in the window, which is the natural reading of
+            a plural array.
+
+
+            De-duplicated by that label, so a VAT-only agreement split — two blocks
+            describing one tariff, as in the zero-rate runbook — collapses to one
+            entry. Curve identity is what makes a tariff change, not block count.
+
+
+            Absent only for a legacy single-rate document carrying neither a code
+            nor a name, where there is genuinely no identity to report.
         buckets:
           type: array
           items:
@@ -1955,6 +2140,84 @@ components:
           items:
             type: string
           description: Ids of the stale monitored devices; omitted when none.
+        clamp:
+          allOf:
+            - $ref: "#/components/schemas/ClampReport"
+          description: >
+            Mirrors SeriesResponse.clamp — shape must not change what a response
+            explains.
+        prices:
+          type: array
+          description: >
+            Mirrors SeriesResponse.prices. Still aligned to the BUCKET axis, not
+            to rows: a row is one (series, bucket) pair, so per-row prices would
+            repeat each value once per series.
+
+
+            A null entry means NO RATE IS HELD for that bucket, never free — the
+            same distinction the cost path draws when it reports unpriced_kwh.
+
+
+            CONTRACT: `cost[i] == kwh[i] × prices[i]` holds only when
+            `price_basis` is "slot". At coarser buckets the cost accumulates on
+            the rate grid while the reported price is a time-weighted mean, so the
+            identity is deliberately false there.
+          items:
+            type: number
+            nullable: true
+        price_unit:
+          type: string
+          example: GBP/kWh
+          description: >
+            Pounds per kWh — NOT the pence the /prices family speaks. This array
+            sits beside cost[] and kwh[] in the same response, and consistency
+            inside one payload beats consistency with a different endpoint.
+        price_vat_included:
+          type: boolean
+        price_basis:
+          type: string
+          enum: [slot, mean_over_bucket, flat]
+          description: >
+            How each value was arrived at. "slot": the bucket sits inside one rate
+            interval, so the value is that interval's own rate, exact.
+            "mean_over_bucket": the bucket spans several, so the value is the
+            TIME-weighted mean across them — not energy-weighted, which is
+            cost÷kwh and undefined in a zero-kWh bucket. "flat": one rate covers
+            all time. A bucket is priced under mean_over_bucket only when EVERY
+            interval inside it is priced; otherwise it is null, because a mean
+            over the slots that happen to be held is a plausible-looking wrong
+            number.
+        unpriced_buckets:
+          type: integer
+          description: >
+            Count of null entries in prices[]. Sent even when 0, because 0 is the
+            assertion a consumer wants: this window is fully priced.
+        tariff_codes:
+          type: array
+          items:
+            type: string
+          description: >
+            Every tariff the window touches, in order, de-duplicated. Plural
+            because a /series window MAY span a switchover: /prices refuses one,
+            since a curve is a property of a single tariff, but a per-bucket array
+            is not a curve — each bucket belongs to exactly one tariff, so every
+            value is honest.
+
+
+            FIXED agreements are named too. Each entry is the supplier tariff code
+            where there is one, the agreement's own id otherwise, and its name when
+            a fixed block carries neither — so `len(tariff_codes)` can be trusted
+            as the number of tariffs in the window, which is the natural reading of
+            a plural array.
+
+
+            De-duplicated by that label, so a VAT-only agreement split — two blocks
+            describing one tariff, as in the zero-rate runbook — collapses to one
+            entry. Curve identity is what makes a tariff change, not block count.
+
+
+            Absent only for a legacy single-rate document carrying neither a code
+            nor a name, where there is genuinely no identity to report.
         series:
           type: array
           items:

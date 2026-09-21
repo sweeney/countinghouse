@@ -88,3 +88,25 @@ func TestSeriesResponse_Rows_ShortArrayZeroFills(t *testing.T) {
 		t.Errorf("zero-fill failed: %+v", rr.Rows)
 	}
 }
+
+// shape is a rendering choice, so it must not change what a response explains:
+// the clamp report has to survive the reshape (issue #36 N8).
+func TestRowsCarriesTheClampReport(t *testing.T) {
+	r := SeriesResponse{
+		Buckets: []time.Time{},
+		Series:  []Series{},
+		Clamp:   &ClampReport{KWh: 0.35, Buckets: 2, DriftBuckets: 1},
+	}
+	got := r.Rows()
+	if got.Clamp == nil {
+		t.Fatal("shape=rows dropped the clamp report")
+	}
+	if *got.Clamp != *r.Clamp {
+		t.Errorf("clamp = %+v, want %+v", *got.Clamp, *r.Clamp)
+	}
+	// Absent stays absent.
+	empty := SeriesResponse{Buckets: []time.Time{}, Series: []Series{}}
+	if empty.Rows().Clamp != nil {
+		t.Error("no clamp should reshape to no clamp")
+	}
+}

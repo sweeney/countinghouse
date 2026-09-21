@@ -389,7 +389,20 @@ func (s *Server) handleCheapestPrice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code, _, found, halfHourly := s.halfHourlyTariff(now)
-	if !found || !halfHourly {
+	if !found {
+		// Split from the flat-tariff refusal below: these were one branch, so a
+		// deployment with NO covering agreement was told its tariff "is not
+		// half-hourly", which names the wrong cause and points at the wrong fix.
+		writeError(w, http.StatusServiceUnavailable,
+			"no tariff is configured for that window")
+		return
+	}
+	if !halfHourly {
+		// Unlike /prices and /prices/stats, this route KEEPS its 503 on a flat
+		// tariff. There, a flat rate is still an answer — one price, repeated. Here
+		// the question is which window is cheapest, and under a flat tariff every
+		// window ties, so there is no answer to give. A 200 naming an arbitrary
+		// window would read as a recommendation.
 		writeError(w, http.StatusServiceUnavailable,
 			"the tariff in force is not half-hourly, so there is no cheapest window to find")
 		return
@@ -552,10 +565,32 @@ func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
 	}
 	loc := s.loc()
 
-	code, _, found, halfHourly := s.halfHourlyTariff(win.Start)
-	if !found || !halfHourly {
+	code, flat, found, halfHourly := s.halfHourlyTariff(win.Start)
+	if !found {
+		// The same refusal /prices gives, word for word. These were one branch, so a
+		// window with NO configured tariff was told its tariff "is not half-hourly" —
+		// a message naming the wrong cause, and pointing at the wrong fix.
 		writeError(w, http.StatusServiceUnavailable,
-			"the tariff covering that window is not half-hourly, so it has no daily spread")
+			"no tariff is configured for that window")
+		return
+	}
+	if !halfHourly {
+		// A flat tariff is a valid state, not a service failure — which /prices and
+		// /prices/upcoming already said, and this route did not. The same window
+		// answering 200 on two sibling routes and 503 on the third forced a seasonal
+		// analysis to special-case per ENDPOINT rather than per window (issue #36 N5).
+		//
+		// days[] is present and EMPTY rather than absent: a consumer ranging over it
+		// needs it to exist, and "no daily spread" is exactly what an empty array of
+		// daily spreads says.
+		writeJSONCachedWindow(w, r, code, win, fmt.Sprintf("flat:%.6f", flat), map[string]any{
+			"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
+			"half_hourly": false, "flat_price": round.To(flat, priceDP),
+			"unit": "p/kWh", "vat_included": true, "days": []any{},
+			"note": "the tariff covering this window is flat-rate, so it has no " +
+				"half-hourly curve and therefore no daily spread; every half hour " +
+				"costs flat_price",
+		})
 		return
 	}
 	if !s.requirePriceArchive(w) {
@@ -600,6 +635,9 @@ func (s *Server) handlePriceStats(w http.ResponseWriter, r *http.Request) {
 	writeJSONCachedWindow(w, r, code, win, curve.Fingerprint(), map[string]any{
 		"window": win.Label, "from": win.Start.In(loc), "to": win.Stop.In(loc),
 		"tariff_code": code,
+		// Always present, both branches: a flag that appears only in the flat case is
+		// one a consumer has to test for absence rather than read.
+		"half_hourly": true,
 		// Inc-VAT, matching every sibling price route. Stated either way so nobody
 		// has to guess, and the ex-VAT figures are carried per day under explicit
 		// _exc_vat keys.
