@@ -9,10 +9,19 @@ feedback from someone holding only the API, and the only honest way to weigh it
 is to work under the same limit.
 
 ```sh
-CH_HARNESS=1 CH_PORT=8787 CH_SECONDS=600 \
+CH_HARNESS=1 CH_PORT=8787 \
   go test ./internal/httpapi -run TestConsumerHarness -count=1 -v &
 
 cd scripts/consumers && python3 c1_shift.py
+```
+
+The harness serves for 300s by default. Asking for longer needs a matching
+`-timeout`, because `go test`'s own default is 600s and it ends a run that
+reaches it with a goroutine dump rather than a clean exit:
+
+```sh
+CH_HARNESS=1 CH_SECONDS=1800 \
+  go test -timeout 31m ./internal/httpapi -run TestConsumerHarness -count=1 -v &
 ```
 
 | Script | The end-user question it is trying to answer |

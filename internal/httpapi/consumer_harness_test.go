@@ -505,9 +505,23 @@ func chBuild(t *testing.T) *chFixture {
 
 // --- the harness itself -----------------------------------------------------
 
+// chDefaultSeconds is how long the harness serves for when CH_SECONDS is unset.
+//
+// Deliberately UNDER go test's own 600s default timeout. It used to be exactly
+// 600, so the documented invocation raced the timeout it was equal to and ended
+// in a five-minute goroutine dump rather than a clean exit — which reads as the
+// harness crashing when it has in fact just finished.
+const chDefaultSeconds = 300
+
 // TestConsumerHarness serves the fixture on a real port for the consumer scripts.
 //
-//	CH_HARNESS=1 CH_PORT=8787 CH_SECONDS=600 go test ./internal/httpapi -run TestConsumerHarness
+//	CH_HARNESS=1 CH_PORT=8787 go test ./internal/httpapi -run TestConsumerHarness
+//
+// Serves for chDefaultSeconds unless CH_SECONDS says otherwise. Asking for
+// LONGER than that needs a matching -timeout, since go test's own default is
+// 600s and it panics with a goroutine dump rather than exiting cleanly:
+//
+//	CH_HARNESS=1 CH_SECONDS=1800 go test -timeout 31m ./internal/httpapi -run TestConsumerHarness
 //
 // Skipped otherwise, so CI neither binds a port nor waits.
 func TestConsumerHarness(t *testing.T) {
@@ -518,7 +532,7 @@ func TestConsumerHarness(t *testing.T) {
 	if port == "" {
 		port = "8787"
 	}
-	seconds := 600
+	seconds := chDefaultSeconds
 	if v := os.Getenv("CH_SECONDS"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil {
