@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net"
@@ -410,7 +411,17 @@ func chBuild(t *testing.T) *chFixture {
 		houseW += chWatts("unmonitored", ts, loc, ch)
 
 		meterCum += houseW * hours / 1000
-		meter = append(meter, meterCum)
+		// The meter is a SEPARATE physical counter and advances in discrete steps,
+		// so what it reports lags the true cumulative figure by up to one quantum.
+		// The plugs quantise independently, which means the per-bucket residual
+		// (meter − monitored) can come out slightly NEGATIVE even though the house
+		// really did use more than the plugs did.
+		//
+		// Building the meter as the exact arithmetic sum made that impossible, so
+		// the fixture could never exercise the clamp — and a fixture that clamps
+		// nothing cannot guard the invariant #40 exists to make true. Observed on
+		// the live service at 0.137 kWh over 3 buckets in one day.
+		meter = append(meter, chQuantise(meterCum))
 	}
 
 	for _, id := range chCounterDevices {
@@ -499,8 +510,44 @@ func chBuild(t *testing.T) *chFixture {
 	s.Config = chConfig{devices: chDevices(), agreements: chAgreements(t, loc)}
 	s.Floorplan = chFloorplan{}
 	s.PriceReader = store
+	// A remote-config fetcher, so the config-derived routes have a fetch history
+	// behind them rather than none. Without one they cannot report freshness at
+	// all, and a consumer checking for it reads absence as "this server is old"
+	// rather than "this deployment has no fetcher" — the distinction the whole
+	// signal exists to draw.
+	//
+	// The devices namespace is deliberately STALE: a fixture where every fetch
+	// succeeded can only ever exercise the happy half.
+	s.RemoteConfig = chStatuses{
+		"energy_agreements": {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
+		"floorplan_harness": {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
+		"devices_harness": {OK: false, FetchedAt: chNow.Add(-31 * time.Hour),
+			Error: "config.swee.net: 502 Bad Gateway"},
+	}
 
 	return &chFixture{Server: s, Store: store, From: from, To: to}
+}
+
+// chStatuses is a config.ConfigStatus over a fixed per-namespace map.
+type chStatuses map[string]config.NamespaceStatus
+
+func (c chStatuses) Statuses() map[string]config.NamespaceStatus {
+	return map[string]config.NamespaceStatus(c)
+}
+
+// chMeterQuantumKWh is the step a real whole-house counter advances in, and the
+// same 0.1 kWh the drift threshold in internal/energy is expressed against.
+//
+// Deliberately equal to it: the residual this produces lands in the SUB-QUANTUM
+// band, which is the half that computeDrift counts nowhere and the likelier
+// contributor to a small reconciliation gap. A fixture that only produced
+// supra-quantum drift would exercise the alarm and miss the case that motivated
+// reporting a clamped total at all.
+const chMeterQuantumKWh = 0.1
+
+// chQuantise snaps a cumulative counter DOWN to the quantum below it.
+func chQuantise(kwh float64) float64 {
+	return math.Floor(kwh/chMeterQuantumKWh) * chMeterQuantumKWh
 }
 
 // --- the harness itself -----------------------------------------------------
@@ -594,8 +641,13 @@ func TestConsumerFixtureIsPlausible(t *testing.T) {
 		t.Errorf("coverage = %.3f, want a realistic partial-coverage home (0.2..0.75)", cov)
 	}
 
-	// 3. group_by=house sums: monitored + unmonitored == meter, and the meter
-	//    total agrees with the bill's reconciliation.
+	// 3. group_by=house sums: monitored + unmonitored == meter to within the
+	//    clamped total, and the meter total agrees with the bill's reconciliation.
+	//
+	//    NOT exactly equal, deliberately. The clamp zeroes a negative per-bucket
+	//    residual, so the parts OVERSHOOT the meter by whatever it absorbed —
+	//    which the fixture now produces on purpose (see chQuantise). The slack
+	//    below covers that; TestConsumerFixtureClamps pins the phenomenon itself.
 	w = doGET(t, s, "/series?window=7d&group_by=house&interval=1h")
 	if w.Code != http.StatusOK {
 		t.Fatalf("/series house: %d %s", w.Code, w.Body.String())
@@ -688,4 +740,66 @@ func chDishwasherNightShare(t *testing.T, s *Server, from, to string) float64 {
 		t.Fatalf("dishwasher drew nothing in %s..%s", from, to)
 	}
 	return night / all
+}
+
+// TestConsumerFixtureClamps pins that the fixture actually exercises the clamp.
+//
+// It is a property of the FIXTURE, not of the service, and it is the one this
+// harness was missing: a meter built as the exact arithmetic sum of its parts
+// can never read below them, so the per-bucket clamp never fires and the
+// invariant it breaks can never be observed from outside. Reported in review
+// against the live service, which showed 0.137 kWh over 3 buckets in one day.
+//
+// Asserted through unclamped=true — the diagnostic that serves the RAW signed
+// residual — because that is the only way to see the pre-clamp truth from a
+// consumer's position.
+func TestConsumerFixtureClamps(t *testing.T) {
+	fx := chBuild(t)
+
+	w := doGET(t, fx.Server, "/series?window=7d&interval=30m&group_by=house&unclamped=true")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var r struct {
+		Series []struct {
+			Key string    `json:"key"`
+			KWh []float64 `json:"kwh"`
+		} `json:"series"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &r); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var negBuckets int
+	var clamped, worst float64
+	for _, ser := range r.Series {
+		if ser.Key != "unmonitored" {
+			continue
+		}
+		for _, v := range ser.KWh {
+			if v < 0 {
+				negBuckets++
+				clamped += -v
+				if v < worst {
+					worst = v
+				}
+			}
+		}
+	}
+
+	if negBuckets == 0 {
+		t.Fatal("the fixture produces no negative residual, so the clamp never fires " +
+			"and nothing downstream of it can be guarded from outside")
+	}
+	// Every one should sit INSIDE one counter quantum. That band is the half
+	// computeDrift counts nowhere, and the likelier contributor to a small
+	// reconciliation gap — so it is the case worth having, and a fixture drifting
+	// into the supra-quantum alarm band would be exercising something else.
+	if worst < -chMeterQuantumKWh {
+		t.Errorf("worst residual %.4f kWh is beyond one quantum (%.1f): the fixture has "+
+			"drifted into the data-quality alarm band rather than the routine one",
+			worst, chMeterQuantumKWh)
+	}
+	t.Logf("fixture clamps %d buckets, %.4f kWh over 7 days (worst %.4f)",
+		negBuckets, clamped, worst)
 }
