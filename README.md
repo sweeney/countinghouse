@@ -1233,6 +1233,49 @@ days, so a part-day window does not flatter or penalise an alternative for a rea
 unrelated to the tariff. A window spanning a tariff change is fine here, as on `/bill`:
 a cost can be summed across tariffs where a curve cannot.
 
+### Plausibility of configured rates
+
+Unit rates arrive from remote config in one VAT basis and the service applies `vat_rate`
+on top. If a rate ever lands in the wrong basis, or with the decimal point in the wrong
+place, **nothing downstream can tell**: every response stays well-formed and internally
+consistent, just uniformly wrong.
+
+`internal/prices/validate.go` already had the right model for this, so the agreements
+document now goes through the same three gates rather than a second vocabulary:
+
+| gate | level | action |
+|---|---|---|
+| **A** structural | per block | **refuse at boot** — the value cannot be money |
+| **B** plausibility | per block | **flag, serve** — the value is surprising, not wrong |
+| **C** set level | per document | **report** — the blocks are fine, the document is odd |
+
+Gate A already existed: a non-positive fixed `unit_rate`, a negative `vat_rate` or a
+negative `daily_standing_charge` refuses at load. Gates B and C are new and appear as
+`config_warnings[]` on `/healthz`:
+
+| check | band | catches |
+|---|---|---|
+| `unit_rate` ex-VAT | `0.01 .. 1.50` £/kWh | pence-for-pounds, a factor of ten |
+| `daily_standing_charge` ex-VAT | `0.05 .. 3.00` £/day | the same |
+| `vat_rate` | ∈ `{0, 0.05, 0.20}` | a typo. **Zero is legitimate** — the statutory zero rate, 1 Oct 2026 – 31 Mar 2027 |
+| jump vs the previous dated block | flag outside `0.7×`–`1.4×` | a rate that moved implausibly |
+| Gate C: no block covers *now* | — | a document that cannot price today |
+
+These **flag rather than refuse**, and deliberately **do not degrade** `/healthz`'s
+top-level status. A rate outside a band is far more likely to be an unusual tariff than
+a corrupt document, and a permanently-degraded health signal over one is a signal
+operators learn to ignore — the same posture `validate.go` takes with its own Gate B. It
+also matches how remote config already behaves, where a later fetch failure degrades
+rather than aborts.
+
+**Explicit non-goal, and the honest limit of the idea: a band cannot catch a wrong VAT
+basis.** An archive price can be cross-checked against its own inc/exc pair
+(`|inc − exc×(1+vat)| ≤ ε`); a config rate arrives as a single number with nothing to
+check it against, and a 5% error sits comfortably inside any band wide enough not to
+fire on real price-cap movements. Closing that needs either an inc/exc pair in the
+namespace document or a reconciliation against a real supplier bill. There is a test
+named for this so nobody later assumes it is covered.
+
 ### Knowing whether config is stale
 
 `/tariffs`, `/floors` and `/rooms` each carry two fields about the snapshot behind
