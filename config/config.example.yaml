@@ -139,4 +139,7 @@ prices:
   #   hour: 3
 
 house:
+  # Must be a zone whose UTC offset is always a whole number of hours; a
+  # half-hour zone (e.g. Asia/Kolkata) is refused at startup. See README
+  # "Clock changes" (issue #49).
   timezone: "Europe/London"

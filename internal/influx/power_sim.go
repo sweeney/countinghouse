@@ -94,11 +94,6 @@ import (
 // Scope: power_w only. A query for any other field (energy_kwh) returns no rows,
 // so a test needing a counter alongside should compose this with CounterSim.
 type PowerSim struct {
-	// Loc is the timezone whose local midnight anchors the aggregation grid,
-	// matching aggregateWindow(location: timezone.location(...)). Defaults to
-	// UTC when nil.
-	Loc *time.Location
-
 	ids    []string // registration order, so rows are returned deterministically
 	series map[string]powerSeries
 }
@@ -109,10 +104,12 @@ type powerSeries struct {
 	w  []float64
 }
 
-// NewPowerSim returns an empty sim whose aggregation grid is anchored at local
-// midnight in loc.
-func NewPowerSim(loc *time.Location) *PowerSim {
-	return &PowerSim{Loc: loc, series: map[string]powerSeries{}}
+// NewPowerSim returns an empty sim. It takes no timezone: the aggregation grid is
+// whatever each query's flux asks for (see simWindowing), exactly as it is for
+// Influx. It used to take one, which read as if it controlled the grid and,
+// after issue #49, controlled nothing (PR #50 review).
+func NewPowerSim() *PowerSim {
+	return &PowerSim{series: map[string]powerSeries{}}
 }
 
 // AddSteady registers deviceID drawing a constant `watts`, sampled every
@@ -195,16 +192,13 @@ func (p *PowerSim) Answer(flux string) ([]Row, error) {
 	integrating := strings.Contains(flux, "integral(")
 
 	var every time.Duration
+	grid := time.UTC
 	if bucketed {
-		m := simEveryRe.FindStringSubmatch(flux)
-		if m == nil {
-			return nil, fmt.Errorf("influx: PowerSim: aggregateWindow with no every: in flux:\n%s", flux)
+		// The grid comes from the flux, as it does for Influx; a local sub-day
+		// window is refused (issue #49, see simWindowing).
+		if every, grid, err = simWindowing(flux, "PowerSim"); err != nil {
+			return nil, err
 		}
-		d, ok := intervalDuration(m[1])
-		if !ok {
-			return nil, fmt.Errorf("influx: PowerSim: unsupported interval %q", m[1])
-		}
-		every = d
 	}
 
 	var rows []Row
@@ -230,16 +224,9 @@ func (p *PowerSim) Answer(flux string) ([]Row, error) {
 			})
 			continue
 		}
-		rows = append(rows, in.windows(id, p.location(), every, start, stop, integrating)...)
+		rows = append(rows, in.windows(id, grid, every, start, stop, integrating)...)
 	}
 	return rows, nil
-}
-
-func (p *PowerSim) location() *time.Location {
-	if p.Loc == nil {
-		return time.UTC
-	}
-	return p.Loc
 }
 
 // inRange narrows a series to the samples inside the half-open [start, stop),
@@ -303,7 +290,7 @@ func (s powerSeries) mean() (float64, bool) {
 	return sum / float64(len(s.w)), true
 }
 
-// windows walks the local aggregation grid across [start, stop) and reduces each
+// windows walks the aggregation grid (see simWindowing) across [start, stop) and reduces each
 // window, reproducing aggregateWindow for whichever fn the flux asked for.
 //
 // Stamps are the window's _start TRUNCATED TO THE RANGE, exactly as CounterSim

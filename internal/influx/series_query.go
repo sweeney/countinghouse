@@ -44,6 +44,49 @@ func intervalDuration(token string) (time.Duration, bool) {
 	return d, ok
 }
 
+// windowLocation renders the aggregateWindow location: argument for a series
+// query at `interval` in the house timezone `tz` (issue #49).
+//
+// Only a CALENDAR interval (1d) is windowed on local time. Every sub-day
+// interval is windowed on the UTC grid, and that is deliberate:
+//
+//   - Influx's location-aware aggregateWindow lays sub-day windows on LOCAL
+//     WALL CLOCK. On the autumn clock change (Europe/London, 02:00 BST →
+//     01:00 GMT) the window that opens just before the change runs to the next
+//     wall time that only happens once, 02:00 GMT. At 30m the 01:30 BST window
+//     was 90 minutes long, nothing was stamped inside the repeated hour, and
+//     /series put three half hours of energy in one bucket and zero in the two
+//     after it. That was observed in prod on 2026-10-25, and it fed /bill's
+//     counter_slot pricing too, which runs the same 30m build.
+//   - The UTC grid has no repeated or missing hour to mishandle: every window
+//     is exactly `every` long. For a zone whose offset is always a whole number
+//     of hours (config refuses any other; see config.checkWholeHourZone) the
+//     UTC grid at 1h and finer IS the local grid, so the bucket labels do not
+//     move — only the clock-change hours stop being stretched.
+//   - A calendar day is the one place stretching is right: the London day is
+//     23h or 25h across a change and should still be ONE bucket from local
+//     midnight to local midnight. Flux gets that right, so 1d keeps location:.
+//
+// Coarser sub-day displays (6h) are never queried at their own width: the
+// energy package queries them at 1h and folds onto a local wall-clock axis in
+// Go, because a 6h UTC grid is not the 00/06/12/18 local grid in BST. A 6h
+// token passed here is therefore windowed on UTC like any sub-day interval —
+// correct as UTC windows, and never what /series asks for.
+//
+// The UTC case is spelled out (timezone.utc) rather than left to Flux's
+// default so a script-level `option location` can never change it.
+//
+// UTC is also the DEFAULT here: only an interval known to be a calendar day or
+// longer gets the named location. A token missing from intervalDurations (say,
+// one added to energy.intervals and not mirrored) therefore windows on UTC
+// rather than silently taking the stretched local shape this exists to avoid.
+func windowLocation(interval, tz string) string {
+	if d, ok := intervalDuration(interval); ok && d >= 24*time.Hour {
+		return fmt.Sprintf("timezone.location(name: %q)", tz)
+	}
+	return "timezone.utc"
+}
+
 // BuildCounterSeriesFlux builds the per-bucket CLOSING RUNNING TOTAL of the
 // cumulative energy_kwh counter, for a SET of counter-class devices (plug
 // classes + the energy meter). It is reset-safe and timezone-aware:
@@ -54,7 +97,8 @@ func intervalDuration(token string) (time.Duration, bool) {
 //     /devices/{id}/energy. It also runs FIRST, before aggregateWindow, so
 //     device-side counter resets are absorbed into the monotonic running total.
 //   - aggregateWindow(every:, fn: last, timeSrc: "_start", location:) collapses
-//     each bucket to its closing running total on DST-aware local boundaries.
+//     each bucket to its closing running total: on the UTC grid for a sub-day
+//     interval, on local calendar days for 1d (see windowLocation, issue #49).
 //
 // It deliberately does NOT difference() — the caller does that in Go, walking
 // the canonical axis and carrying the last known total across buckets with no
@@ -87,14 +131,14 @@ from(bucket: %q)
   |> filter(fn: (r) => contains(value: r.device_id, set: %s))
 %s
   |> increase()
-  |> aggregateWindow(every: %s, fn: last, timeSrc: "_start", location: timezone.location(name: %q), createEmpty: false)`,
+  |> aggregateWindow(every: %s, fn: last, timeSrc: "_start", location: %s, createEmpty: false)`,
 		bucket,
 		fluxTime(start),
 		fluxTime(stop),
 		deviceSet(deviceIDs),
 		regroupByDevice,
 		interval,
-		tz,
+		windowLocation(interval, tz),
 	)
 }
 
@@ -137,7 +181,7 @@ from(bucket: %q)
   |> filter(fn: (r) => r._measurement == "device_power" and r._field == "power_w")
   |> filter(fn: (r) => contains(value: r.device_id, set: %s))
 %s
-  |> aggregateWindow(every: %s, fn: (column, tables=<-) => tables |> integral(unit: 1h, interpolate: "linear"), timeSrc: "_start", location: timezone.location(name: %q), createEmpty: false)
+  |> aggregateWindow(every: %s, fn: (column, tables=<-) => tables |> integral(unit: 1h, interpolate: "linear"), timeSrc: "_start", location: %s, createEmpty: false)
   |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))`,
 		bucket,
 		fluxTime(start),
@@ -145,12 +189,14 @@ from(bucket: %q)
 		deviceSet(deviceIDs),
 		regroupByDevice,
 		interval,
-		tz,
+		windowLocation(interval, tz),
 	)
 }
 
 // BuildPowerMeanSeriesFlux builds the per-bucket mean instantaneous power
-// series (power_w) for a SET of devices, on DST-aware local buckets. It serves
+// series (power_w) for a SET of devices, on the same grid as the other two
+// series builders (UTC for sub-day, local calendar days for 1d — see
+// windowLocation). It serves
 // avg_w for counter-class devices: the bucket mean IS the average power, so it
 // is reported directly.
 //
@@ -175,13 +221,13 @@ from(bucket: %q)
   |> filter(fn: (r) => r._measurement == "device_power" and r._field == "power_w")
   |> filter(fn: (r) => contains(value: r.device_id, set: %s))
 %s
-  |> aggregateWindow(every: %s, fn: mean, timeSrc: "_start", location: timezone.location(name: %q), createEmpty: true)`,
+  |> aggregateWindow(every: %s, fn: mean, timeSrc: "_start", location: %s, createEmpty: true)`,
 		bucket,
 		fluxTime(start),
 		fluxTime(stop),
 		deviceSet(deviceIDs),
 		regroupByDevice,
 		interval,
-		tz,
+		windowLocation(interval, tz),
 	)
 }

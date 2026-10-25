@@ -25,7 +25,7 @@ import (
 func offGridFixtureSetup(t *testing.T) *Server {
 	t.Helper()
 	s, _ := dataSetup(t)
-	s.Influx = influx.NewCounterSim(s.Loc).AddSteady("winefridge",
+	s.Influx = influx.NewCounterSim().AddSteady("winefridge",
 		time.Date(2026, 6, 11, 12, 0, 0, 0, s.Loc),
 		time.Date(2026, 6, 11, 18, 0, 0, 0, s.Loc),
 		10*time.Second, 1000)

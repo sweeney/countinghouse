@@ -35,7 +35,7 @@ import (
 // [from, to], with the given half-open intervals omitted entirely — a device
 // that dropped off the network and came back with its counter still running.
 func gappyCounter(loc *time.Location, from, to time.Time, gaps ...[2]time.Time) *influx.CounterSim {
-	return addGappyDevice(influx.NewCounterSim(loc), "winefridge", from, to, gaps...)
+	return addGappyDevice(influx.NewCounterSim(), "winefridge", from, to, gaps...)
 }
 
 // addGappyDevice registers one more steady-1 kW counter on an existing sim, so a
@@ -197,7 +197,7 @@ func TestCounterSeriesSilentDeviceIsAllZeroBesideABusyOne(t *testing.T) {
 	loc := mustLondon(t)
 	from := time.Date(2026, 6, 11, 12, 0, 0, 0, loc)
 
-	sim := influx.NewCounterSim(loc)
+	sim := influx.NewCounterSim()
 	addGappyDevice(sim, "winefridge", from, time.Date(2026, 6, 11, 13, 0, 0, 0, loc)) // silent after 13:00
 	addGappyDevice(sim, "freezer", from, time.Date(2026, 6, 11, 18, 0, 0, 0, loc))    // reports throughout
 
