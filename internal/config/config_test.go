@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -161,6 +162,37 @@ house:
 `)
 	if _, err := Load(p); err != nil {
 		t.Fatalf("Load: unexpected error for valid timezone: %v", err)
+	}
+}
+
+// A timezone whose UTC offset is not always a whole number of hours is
+// refused at load (issue #49). /series windows sub-day intervals on the UTC
+// grid and builds 6h and slot-priced days by folding 1h/30m UTC buckets onto
+// local boundaries; both are only right when every local hour boundary is a
+// UTC hour boundary. Asia/Kolkata (+05:30) and Asia/Kathmandu (+05:45) would
+// put every local boundary mid-bucket — misattributed energy that reads as
+// data — so they fail loudly at startup instead.
+func TestLoadRejectsNonWholeHourTimezone(t *testing.T) {
+	for _, tz := range []string{"Asia/Kolkata", "Asia/Kathmandu", "Australia/Adelaide", "Australia/Lord_Howe"} {
+		dir := t.TempDir()
+		p := writeFile(t, dir, "config.yaml", "\nhouse:\n  timezone: \""+tz+"\"\n")
+		_, err := Load(p)
+		if err == nil {
+			t.Errorf("Load(%s): expected error for a non-whole-hour zone, got nil", tz)
+			continue
+		}
+		if !strings.Contains(err.Error(), tz) {
+			t.Errorf("Load(%s): error should name the zone: %v", tz, err)
+		}
+	}
+}
+
+// Whole-hour zones, with and without DST, are accepted.
+func TestLoadAcceptsWholeHourTimezones(t *testing.T) {
+	for _, tz := range []string{"Europe/London", "UTC", "America/New_York", "Europe/Berlin", "Asia/Tokyo"} {
+		if err := checkWholeHourZone(tz); err != nil {
+			t.Errorf("checkWholeHourZone(%s): %v", tz, err)
+		}
 	}
 }
 

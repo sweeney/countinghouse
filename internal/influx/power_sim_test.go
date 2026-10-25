@@ -380,3 +380,21 @@ func TestPowerSimAddSamplesRejectsMismatchedLengths(t *testing.T) {
 	}()
 	NewPowerSim(time.UTC).AddSamples("network-ups", []time.Time{time.Now()}, nil)
 }
+
+// PowerSim refuses a local sub-day window for the same reason CounterSim does
+// (issue #49): prod Influx stretches it across the autumn repeated hour, and a
+// sim that quietly stepped it by a fixed duration would agree with the bug.
+func TestPowerSimRefusesLocalSubDayWindows(t *testing.T) {
+	sim := NewPowerSim(time.UTC).AddSteady("ups",
+		time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC), time.Minute, 100)
+	flux := `import "timezone"
+from(bucket: "b")
+  |> range(start: 2026-06-11T13:00:00Z, stop: 2026-06-11T15:00:00Z)
+  |> filter(fn: (r) => r._measurement == "device_power" and r._field == "power_w")
+  |> filter(fn: (r) => contains(value: r.device_id, set: ["ups"]))
+  |> aggregateWindow(every: 1h, fn: mean, timeSrc: "_start", location: timezone.location(name: "Europe/London"), createEmpty: true)`
+	if _, err := sim.Answer(flux); err == nil {
+		t.Error("a local sub-day window must be refused, not modelled with a fixed step")
+	}
+}

@@ -246,3 +246,64 @@ func TestCounterSimDailyGridStepsCalendarDaysAcrossDST(t *testing.T) {
 		t.Errorf("the DST day's rise = %v kWh, want 25 (a 25h London day at 1 kW)", d25-d24)
 	}
 }
+
+// The sim refuses a SUB-DAY aggregateWindow with a named location rather than
+// answering it. Prod Influx stretches local sub-day windows across the autumn
+// repeated hour (issue #49); the sim used to step them by a fixed duration
+// instead, which is the grid the Go axis assumed, so the two agreed with each
+// other while both disagreed with Influx and the bug sailed through. No
+// builder issues that shape any more, so a query that does is a regression,
+// and an error is the loudest way to say so.
+//
+// The flux is hand-written, the one exception to this file's rule of driving
+// the sim through the real builders: no builder emits this shape any more,
+// which is the point.
+func TestCounterSimRefusesLocalSubDayWindows(t *testing.T) {
+	sim, _ := steadySim(t)
+	flux := `import "timezone"
+from(bucket: "b")
+  |> range(start: 2026-06-11T13:00:00Z, stop: 2026-06-11T15:00:00Z)
+  |> filter(fn: (r) => r._measurement == "device_power" and r._field == "energy_kwh")
+  |> filter(fn: (r) => contains(value: r.device_id, set: ["winefridge"]))
+  |> increase()
+  |> aggregateWindow(every: 30m, fn: last, timeSrc: "_start", location: timezone.location(name: "Europe/London"), createEmpty: false)`
+	if _, err := sim.Answer(flux); err == nil {
+		t.Error("a local sub-day window must be refused, not modelled with a fixed step")
+	}
+}
+
+// Across the autumn repeated hour, the UTC grid the builders now ask for is a
+// plain fixed step: every 30m window is 30 minutes, stamped on the UTC half
+// hour, and a steady 1 kW rises 0.5 kWh in each — including the two windows
+// inside the repeated hour that prod Influx used to swallow into one.
+func TestCounterSimSubDayGridIsUTCAcrossFallBack(t *testing.T) {
+	loc := simLondon(t)
+	from := time.Date(2026, 10, 24, 22, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 10, 25, 4, 0, 0, 0, time.UTC)
+	sim := NewCounterSim(loc).AddSteady("winefridge", from, to, time.Minute, 1000)
+
+	start := time.Date(2026, 10, 24, 23, 0, 0, 0, time.UTC) // 00:00 BST
+	stop := time.Date(2026, 10, 25, 3, 0, 0, 0, time.UTC)   // 03:00 GMT
+	rows, err := sim.Answer(BuildCounterSeriesFlux("b", []string{"winefridge"}, start, stop, "30m", "Europe/London"))
+	if err != nil {
+		t.Fatalf("Answer: %v", err)
+	}
+	if len(rows) != 8 {
+		t.Fatalf("rows = %d, want 8 (4h of 30m)", len(rows))
+	}
+	prev := 0.0
+	for i, r := range rows {
+		if want := start.Add(time.Duration(i) * 30 * time.Minute); !r.Time.Equal(want) {
+			t.Errorf("row %d stamped %v, want %v", i, r.Time.UTC(), want)
+		}
+		rise := r.Value - prev
+		prev = r.Value
+		want := 0.5
+		if i == 0 {
+			want -= 1.0 / 60 // increase() re-bases at the first reading
+		}
+		if math.Abs(rise-want) > 1e-9 {
+			t.Errorf("row %d rose %.4f kWh, want %.4f", i, rise, want)
+		}
+	}
+}
