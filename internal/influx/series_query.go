@@ -75,11 +75,16 @@ func intervalDuration(token string) (time.Duration, bool) {
 //
 // The UTC case is spelled out (timezone.utc) rather than left to Flux's
 // default so a script-level `option location` can never change it.
+//
+// UTC is also the DEFAULT here: only an interval known to be a calendar day or
+// longer gets the named location. A token missing from intervalDurations (say,
+// one added to energy.intervals and not mirrored) therefore windows on UTC
+// rather than silently taking the stretched local shape this exists to avoid.
 func windowLocation(interval, tz string) string {
-	if d, ok := intervalDuration(interval); ok && d < 24*time.Hour {
-		return "timezone.utc"
+	if d, ok := intervalDuration(interval); ok && d >= 24*time.Hour {
+		return fmt.Sprintf("timezone.location(name: %q)", tz)
 	}
-	return fmt.Sprintf("timezone.location(name: %q)", tz)
+	return "timezone.utc"
 }
 
 // BuildCounterSeriesFlux builds the per-bucket CLOSING RUNNING TOTAL of the

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefault(t *testing.T) {
@@ -187,11 +188,39 @@ func TestLoadRejectsNonWholeHourTimezone(t *testing.T) {
 	}
 }
 
-// Whole-hour zones, with and without DST, are accepted.
+// Whole-hour zones, with and without DST, are accepted — including zones that
+// are whole-hour now but had a half-hour offset before any data this service
+// can hold (PR #50 review): Singapore (+07:30 until 1982), Caracas (−04:30
+// until 2016), Pyongyang (+08:30 until 2018), Monrovia (−00:44:30 until
+// 1972). And zones whose clocks change at local midnight (Santiago, Havana),
+// whose skipped boundaries the series axes resolve to the transition.
 func TestLoadAcceptsWholeHourTimezones(t *testing.T) {
-	for _, tz := range []string{"Europe/London", "UTC", "America/New_York", "Europe/Berlin", "Asia/Tokyo"} {
-		if err := checkWholeHourZone(tz); err != nil {
+	for _, tz := range []string{"Europe/London", "UTC", "America/New_York", "Europe/Berlin", "Asia/Tokyo",
+		"Asia/Singapore", "Asia/Kuala_Lumpur", "America/Caracas", "Asia/Pyongyang", "Africa/Monrovia",
+		"America/Santiago", "America/Havana"} {
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			t.Fatalf("LoadLocation(%s): %v", tz, err)
+		}
+		if err := checkWholeHourZone(loc); err != nil {
 			t.Errorf("checkWholeHourZone(%s): %v", tz, err)
+		}
+	}
+}
+
+// The check itself, on synthetic zones so it does not depend on host tzdata:
+// any offset with a sub-hour part is refused, a whole-hour one is not.
+func TestCheckWholeHourZoneSynthetic(t *testing.T) {
+	for _, tc := range []struct {
+		off  int
+		want bool // accepted
+	}{
+		{0, true}, {3600, true}, {-5 * 3600, true}, {14 * 3600, true},
+		{5*3600 + 1800, false}, {5*3600 + 2700, false}, {-(3*3600 + 1800), false}, {60, false},
+	} {
+		err := checkWholeHourZone(time.FixedZone("X", tc.off))
+		if got := err == nil; got != tc.want {
+			t.Errorf("offset %+ds: accepted = %v, want %v (err: %v)", tc.off, got, tc.want, err)
 		}
 	}
 }

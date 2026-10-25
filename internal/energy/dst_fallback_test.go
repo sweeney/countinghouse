@@ -87,7 +87,7 @@ func fallBackQuerier(fx dstFixture) *influx.FakeQuerier {
 	for i, r := range fx.Readings {
 		at[i], kwh[i] = r.Time, r.EnergyKWh
 	}
-	sim := influx.NewCounterSim(time.UTC).AddSamples("steady_plug", at, kwh)
+	sim := influx.NewCounterSim().AddSamples("steady_plug", at, kwh)
 
 	return &influx.FakeQuerier{QueryFunc: func(flux string) ([]influx.Row, error) {
 		if strings.Contains(flux, `"energy_kwh"`) && strings.Contains(flux, "aggregateWindow") &&

@@ -67,9 +67,9 @@ func TestSeriesAcrossClockChangesHasNoMisplacedEnergy(t *testing.T) {
 		win := Window{Start: co.day, Stop: next, Label: WindowCustom}
 
 		// Readings run an hour either side so the window's edges are interior.
-		counters := influx.NewCounterSim(loc).
+		counters := influx.NewCounterSim().
 			AddSteady("plug", co.day.Add(-time.Hour), next.Add(time.Hour), time.Minute, watts)
-		powers := influx.NewPowerSim(loc).
+		powers := influx.NewPowerSim().
 			AddSteady("ups", co.day.Add(-time.Hour), next.Add(time.Hour), time.Minute, watts)
 		devices := map[string]config.DeviceConfig{
 			"plug": {Class: "continuous_power_device"},
@@ -284,6 +284,139 @@ func TestSeries6hIsQueriedHourlyAndFolded(t *testing.T) {
 		}
 		if !strings.Contains(flux, "location: timezone.utc") {
 			t.Errorf("1h query must window on the UTC grid; got:\n%s", flux)
+		}
+	}
+}
+
+// bucketStartsWithin runs BucketStarts under a deadline, so a regression to the
+// old calendar loop — which never returned on a skipped local midnight — fails
+// this test instead of hanging the whole package.
+func bucketStartsWithin(t *testing.T, win Window, iv Interval, loc *time.Location) []time.Time {
+	t.Helper()
+	done := make(chan []time.Time, 1)
+	go func() { done <- BucketStarts(win, iv, loc) }()
+	select {
+	case got := <-done:
+		return got
+	case <-time.After(2 * time.Second):
+		t.Fatalf("BucketStarts(%s, %s, %s) did not return", win.Start.Format(time.RFC3339), iv.Token, loc)
+		return nil
+	}
+}
+
+func formatAll(ts []time.Time) string {
+	var s []string
+	for _, b := range ts {
+		s = append(s, b.Format(time.RFC3339))
+	}
+	return strings.Join(s, " ")
+}
+
+// Zones whose clocks go forward AT a local 00:00 (PR #50 review). The skipped
+// midnight is a 6h and a 1d boundary, and it used to break both axes:
+//
+//   - 6h drifted onto 05/11/17/23 for the rest of the window, because each step
+//     was taken from the previous RESOLVED instant and time.Date resolves the
+//     missing 00:00 to 23:00 the day before;
+//   - 1d never returned: the missing midnight resolved into the previous day,
+//     so "the next day's midnight" was the same instant again, forever.
+//
+// Both zones are whole-hour, so checkWholeHourZone accepts them. A skipped
+// boundary now starts at the transition instant (the moment the clock reached
+// that time), and every boundary after it is back on the local grid.
+func TestBucketStartsZonesThatSkipLocalMidnight(t *testing.T) {
+	for _, tc := range []struct {
+		tz, interval string
+		from, to     [3]int // y, m, d (local midnight)
+		want         string
+	}{
+		{
+			// Santiago 2026-09-06: 00:00 -04 → 01:00 -03 (04:00Z).
+			tz: "America/Santiago", interval: "6h", from: [3]int{2026, 9, 5}, to: [3]int{2026, 9, 7},
+			want: "2026-09-05T00:00:00-04:00 2026-09-05T06:00:00-04:00 2026-09-05T12:00:00-04:00 2026-09-05T18:00:00-04:00 " +
+				"2026-09-06T01:00:00-03:00 2026-09-06T06:00:00-03:00 2026-09-06T12:00:00-03:00 2026-09-06T18:00:00-03:00",
+		},
+		{
+			tz: "America/Santiago", interval: "1d", from: [3]int{2026, 9, 3}, to: [3]int{2026, 9, 9},
+			want: "2026-09-03T00:00:00-04:00 2026-09-04T00:00:00-04:00 2026-09-05T00:00:00-04:00 " +
+				"2026-09-06T01:00:00-03:00 2026-09-07T00:00:00-03:00 2026-09-08T00:00:00-03:00",
+		},
+		{
+			// Havana 2026-03-08: 00:00 -05 → 01:00 -04 (05:00Z).
+			tz: "America/Havana", interval: "6h", from: [3]int{2026, 3, 7}, to: [3]int{2026, 3, 9},
+			want: "2026-03-07T00:00:00-05:00 2026-03-07T06:00:00-05:00 2026-03-07T12:00:00-05:00 2026-03-07T18:00:00-05:00 " +
+				"2026-03-08T01:00:00-04:00 2026-03-08T06:00:00-04:00 2026-03-08T12:00:00-04:00 2026-03-08T18:00:00-04:00",
+		},
+		{
+			tz: "America/Havana", interval: "1d", from: [3]int{2026, 3, 6}, to: [3]int{2026, 3, 10},
+			want: "2026-03-06T00:00:00-05:00 2026-03-07T00:00:00-05:00 2026-03-08T01:00:00-04:00 2026-03-09T00:00:00-04:00",
+		},
+		{
+			// Havana 2026-11-01 goes BACK at 01:00 → 00:00, so local midnight
+			// happens twice. The day starts at its FIRST occurrence (-04), which
+			// makes it the 25h day.
+			tz: "America/Havana", interval: "1d", from: [3]int{2026, 10, 31}, to: [3]int{2026, 11, 3},
+			want: "2026-10-31T00:00:00-04:00 2026-11-01T00:00:00-04:00 2026-11-02T00:00:00-05:00",
+		},
+	} {
+		t.Run(tc.tz+"/"+tc.interval, func(t *testing.T) {
+			loc, err := time.LoadLocation(tc.tz)
+			if err != nil {
+				t.Skipf("no tzdata for %s: %v", tc.tz, err)
+			}
+			iv, _ := lookupInterval(tc.interval)
+			win := Window{
+				Start: time.Date(tc.from[0], time.Month(tc.from[1]), tc.from[2], 0, 0, 0, 0, loc),
+				Stop:  time.Date(tc.to[0], time.Month(tc.to[1]), tc.to[2], 0, 0, 0, 0, loc),
+				Label: WindowCustom,
+			}
+			if got := formatAll(bucketStartsWithin(t, win, iv, loc)); got != tc.want {
+				t.Errorf("buckets\n got  %s\n want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// The wall-clock and calendar axes, swept over two whole years in zones with
+// every kind of clock change (none, at 01:00, at local midnight, going back
+// across midnight), must terminate, strictly increase, and keep every
+// boundary on the local grid — except a boundary a clock change skipped, which
+// must sit exactly on that change.
+func TestBucketStartsWallClockAxesStayOnGrid(t *testing.T) {
+	zones := []string{"Europe/London", "UTC", "America/New_York", "America/Santiago",
+		"America/Havana", "Asia/Beirut", "America/Asuncion", "Australia/Sydney"}
+	for _, tz := range zones {
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			t.Logf("skipping %s: %v", tz, err)
+			continue
+		}
+		win := Window{
+			Start: time.Date(2026, 1, 1, 0, 0, 0, 0, loc),
+			Stop:  time.Date(2028, 1, 1, 0, 0, 0, 0, loc),
+			Label: WindowCustom,
+		}
+		for _, tok := range []string{"6h", "1d"} {
+			iv, _ := lookupInterval(tok)
+			got := bucketStartsWithin(t, win, iv, loc)
+			step := 6
+			if iv.Calendar {
+				step = 24
+			}
+			for i, b := range got {
+				if i > 0 && !b.After(got[i-1]) {
+					t.Errorf("%s %s: bucket %d (%s) does not follow %s", tz, tok, i, b.Format(time.RFC3339), got[i-1].Format(time.RFC3339))
+				}
+				if b.Hour()%step == 0 && b.Minute() == 0 {
+					continue // on the local grid
+				}
+				// Off-grid is allowed only AT a clock change: the instant a
+				// zone period starts.
+				if start, _ := b.ZoneBounds(); !start.Equal(b) {
+					t.Errorf("%s %s: bucket %d (%s) is off the local grid and not at a clock change",
+						tz, tok, i, b.Format(time.RFC3339))
+				}
+			}
 		}
 	}
 }

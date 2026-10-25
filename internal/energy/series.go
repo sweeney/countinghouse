@@ -305,6 +305,12 @@ type HouseStats struct {
 //     after the change (prod, 2026-10-25: 00:00+01:00, 05:00Z, 11:00Z, 17:00Z).
 //     Its energy is queried at 1h and folded onto this axis (see queryAxisFor).
 //
+// The 1d and 6h boundaries are INTENDED wall times, each resolved into loc on
+// its own (stepWallClock, resolveWall). A boundary a clock change skips (a
+// zone whose clocks go forward at local midnight, like America/Santiago)
+// starts at the transition instant, and an ambiguous one at its first
+// occurrence; neither can shift the boundaries after it.
+//
 // A window=custom whose `from` is off the grid is SNAPPED DOWN to the
 // containing boundary (e.g. 14:23 with 1h snaps to 14:00), so the first partial
 // window is not dropped and later buckets are not shifted. For today/week/month
@@ -331,30 +337,18 @@ func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 	var out []time.Time
 	switch {
 	case iv.Calendar:
-		// Step by calendar day, anchored at the local midnight of start's date.
-		cur := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
-		for cur.Before(stop) {
-			out = append(out, cur)
-			cur = time.Date(cur.Year(), cur.Month(), cur.Day()+1, 0, 0, 0, 0, loc)
-		}
+		// Calendar days from the local midnight of start's date.
+		intended := wallClock(start.Year(), start.Month(), start.Day(), 0)
+		out = stepWallClock(intended, func(w time.Time) time.Time { return w.AddDate(0, 0, 1) }, stop, loc)
 
 	case iv.wallClock():
 		// Snap down to the wall-clock boundary at or before start's LOCAL hour,
 		// then step wall-clock hours. Hour() reads the wall clock, so a start
 		// inside the repeated hour (either occurrence of 01:xx) snaps to 00:00
-		// local; the 6h boundaries never fall in London's 01:00–02:00
-		// changeover hour, so time.Date never has to resolve an ambiguous or
-		// missing wall time here.
+		// local.
 		step := int(iv.Duration / time.Hour)
-		cur := time.Date(start.Year(), start.Month(), start.Day(), start.Hour()-start.Hour()%step, 0, 0, 0, loc)
-		for cur.Before(stop) {
-			out = append(out, cur)
-			next := time.Date(cur.Year(), cur.Month(), cur.Day(), cur.Hour()+step, 0, 0, 0, loc)
-			if !next.After(cur) {
-				break // defensive: time.Date normalisation must always move forward
-			}
-			cur = next
-		}
+		intended := wallClock(start.Year(), start.Month(), start.Day(), start.Hour()-start.Hour()%step)
+		out = stepWallClock(intended, func(w time.Time) time.Time { return w.Add(iv.Duration) }, stop, loc)
 
 	default:
 		// The absolute grid: Truncate rounds down to a multiple of iv.Duration
@@ -365,6 +359,80 @@ func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 		}
 	}
 	return out
+}
+
+// wallClock is a LOCAL wall-clock reading (year, month, day, hour) held as a
+// zone-free value: a time.Time in UTC used purely as a calendar, so that
+// adding hours or days to it is plain wall-clock arithmetic with no clock
+// change in the way. resolveWall turns it into a real instant in a zone.
+func wallClock(year int, month time.Month, day, hour int) time.Time {
+	return time.Date(year, month, day, hour, 0, 0, 0, time.UTC)
+}
+
+// stepWallClock walks INTENDED wall-clock boundaries from first, advancing
+// with next, and resolves each one into loc independently, collecting the
+// instants before stop. It is the stepping behind the 1d and 6h axes.
+//
+// Each boundary is resolved on its own, from the intended wall time, never
+// from the previous resolved instant (PR #50 review). Stepping from the
+// resolved instant used to carry any resolution error forward for the rest of
+// the window:
+//
+//   - 6h, America/Santiago 2026-09-06 (00:00 → 01:00): the missing 00:00
+//     resolved to 23:00 the day before, and every later step inherited the
+//     hour, leaving the axis on 05/11/17/23 for good — the drift issue #49
+//     removes for London, in a zone checkWholeHourZone accepts.
+//   - 1d, same day: the missing midnight resolved into the 5th, so "the next
+//     day's midnight" was the 6th's again, the same instant came back, and
+//     the loop never ended — hanging any /series request (and the bucket-cap
+//     check, which counts this axis) that crossed the change.
+//
+// The guard below is belt and braces: resolveWall maps each intended boundary
+// to an instant no earlier than the previous one, so it never fires for a
+// real zone, but a loop driven by tzdata must not be able to spin forever.
+func stepWallClock(first time.Time, next func(time.Time) time.Time, stop time.Time, loc *time.Location) []time.Time {
+	var out []time.Time
+	for w := first; ; w = next(w) {
+		cur := resolveWall(w, loc)
+		if !cur.Before(stop) {
+			return out
+		}
+		if n := len(out); n > 0 && !cur.After(out[n-1]) {
+			continue // a boundary swallowed by a clock change: no empty bucket
+		}
+		out = append(out, cur)
+	}
+}
+
+// resolveWall returns the instant at which the local wall time w (see
+// wallClock) begins in loc.
+//
+//   - An ordinary wall time is just itself.
+//   - An AMBIGUOUS one (the repeated hour after a clock goes back) is its
+//     FIRST occurrence, which is what time.Date returns and is when that wall
+//     time first begins — so a day whose midnight repeats starts at the first.
+//   - A wall time that does NOT EXIST (skipped when a clock goes forward) is
+//     the transition instant: the boundary is "the moment the clock reached
+//     this time", and on a spring-forward day the clock reaches 00:00 by
+//     jumping past it. time.Date leaves the choice of side unspecified (it
+//     currently picks the instant just BEFORE the transition, which reads as
+//     the previous wall hour), so the side it picked is detected and the
+//     zone boundary on that side is taken.
+func resolveWall(w time.Time, loc *time.Location) time.Time {
+	t := time.Date(w.Year(), w.Month(), w.Day(), w.Hour(), 0, 0, 0, loc)
+	got := wallClock(t.Year(), t.Month(), t.Day(), t.Hour())
+	switch {
+	case got.Equal(w):
+		return t
+	case got.Before(w):
+		// Resolved short of the gap, in the zone period that ends at it.
+		_, end := t.ZoneBounds()
+		return end
+	default:
+		// Resolved past the gap, in the zone period that starts at it.
+		start, _ := t.ZoneBounds()
+		return start
+	}
 }
 
 // bucketHours returns, for each bucket i, the wall-clock length in hours of the

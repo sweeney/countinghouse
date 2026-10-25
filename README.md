@@ -117,7 +117,8 @@ Timestamps are RFC3339 with the local offset (parse with JS `new Date(...)` / Sw
 #### Bucket semantics
 
 For a window whose `from` is **not** on an interval boundary, the bucket axis snaps
-**down** to the interval grid (anchored at local midnight) so it matches Influx's
+**down** to the interval's grid (the UTC grid at `5m`–`1h`, local wall clock at `6h`,
+local midnight at `1d` — see [Clock changes](#clock-changes)) so it matches the
 aggregation boundaries — e.g. `from=14:23` with `interval=1h` yields buckets starting at
 `14:00, 15:00, …`. **The first bucket's timestamp can therefore precede `from`.**
 
@@ -206,7 +207,17 @@ the whole lot at the one slot's rate ([#49](https://github.com/sweeney/countingh
 Window totals were never affected; only the split across buckets was.
 
 Because sub-day buckets sit on the UTC grid, `house.timezone` must be a zone whose UTC
-offset is always a whole number of hours (see [Configuration](#configuration)).
+offset is always a whole number of hours (see [Configuration](#configuration)). In a
+zone whose clocks go forward **at** a `6h` or day boundary (e.g. America/Santiago, which
+skips local midnight), the skipped boundary starts at the moment of the change and the
+boundaries after it stay on the local grid.
+
+`avg_w` on a folded bucket (a `6h` chart, or any bucket coarser than a half-hourly
+tariff's 30-minute slots) is the hours-weighted mean of the fine buckets, and a fine
+bucket in which a device reported no power counts as **0 W** for its hours. A device that
+drops out for one hour of a six-hour bucket therefore reports 5/6 of its real average.
+`kwh` and `cost` are unaffected. This is how slot-priced charts have always behaved;
+since issue #49 it also applies to `6h` under a flat tariff.
 
 The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth for request
 and response schemas; a path-coverage test fails CI if routes and spec drift.

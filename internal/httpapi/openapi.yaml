@@ -1118,8 +1118,9 @@ components:
         week/month→1d, custom and rolling <N>d/<N>h→by span). An interval whose bucket count over the
         window exceeds the ~1000 cap returns 400 asking for a coarser interval.
         For window=custom whose from is not on an interval boundary, the bucket
-        axis snaps DOWN to the interval grid anchored at local midnight (so it
-        matches the aggregation boundaries); the first bucket is widened to that
+        axis snaps DOWN to the interval's grid (the UTC grid at 5m–1h, local
+        wall clock at 6h, local midnight at 1d), so it matches the aggregation
+        boundaries; the first bucket is widened to that
         boundary. Period-to-date windows already start at local midnight and are
         unaffected. Grids across a clock change: 5m–1h step a fixed length on
         the absolute (UTC) grid (25 hourly buckets on the autumn changeover
@@ -2866,8 +2867,8 @@ components:
             format: date-time
           description: >
             Local-timezone bucket-start axis every series aligns to. Starts are
-            GRID-ALIGNED — anchored at local midnight and stepped by `interval` —
-            matching Influx's aggregation boundaries, so for an off-grid `from`
+            GRID-ALIGNED — on the UTC grid at 5m–1h, local wall clock at 6h and
+            local midnight at 1d — matching the aggregation boundaries, so for an off-grid `from`
             the FIRST timestamp precedes `from` (e.g. from=14:29 with interval=30m
             yields a first bucket of 14:00). That bucket is a PARTIAL bucket: it is
             labelled by the grid boundary it starts on but its values cover only

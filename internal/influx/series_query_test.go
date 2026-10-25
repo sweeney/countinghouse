@@ -136,6 +136,10 @@ func TestSeriesBuildersWindowLocation(t *testing.T) {
 				t.Errorf("%s at %s must not ask for local sub-day windows; flux:\n%s", name, iv, flux)
 			}
 		}
+		// An unknown token fails SAFE: the UTC grid, not local windows.
+		if flux := build("7m"); !strings.Contains(flux, "location: timezone.utc,") {
+			t.Errorf("%s at an unknown interval must default to the UTC grid; flux:\n%s", name, flux)
+		}
 		flux := build("1d")
 		if !strings.Contains(flux, `location: timezone.location(name: "Europe/London"),`) {
 			t.Errorf("%s at 1d must keep local calendar days; flux:\n%s", name, flux)

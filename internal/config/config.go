@@ -215,18 +215,30 @@ func (h HouseConfig) Location() *time.Location {
 }
 
 // wholeHourCheckFrom and wholeHourCheckUntil bound the span checkWholeHourZone
-// inspects. The lower bound skips Local Mean Time and other pre-standard
-// offsets every zone has in its deep history (London was −00:01:15 before
-// 1847), which no energy reading can fall in; the upper bound is well past any
-// window this service will be asked about, and beyond the last tzdata
-// transition Go extrapolates the zone's current rule anyway.
+// inspects: the span a /series window can be asked about AND find data in.
+//
+// The lower bound is the question that matters, and it is about data, not
+// tzdata: a half-hour offset can only misplace energy in a window that has
+// readings. This service's data begins in 2026 (statehouse's bucket holds
+// nothing earlier), so 2020 is comfortably before any reading. It used to be
+// 1970, which refused zones that have been whole-hour for years over offsets
+// no query can reach — Asia/Singapore (+07:30 until 1982), America/Caracas
+// (−04:30 until 2016), Asia/Pyongyang (+08:30 until 2018), Africa/Monrovia
+// (−00:44:30 until 1972) — with an error calling them unsupported (PR #50
+// review). A fixed date rather than "now minus a look-back" because config
+// loading takes no clock, and because a zone's support should not change on
+// its own while the service runs.
+//
+// The upper bound is well past any window this service will be asked about;
+// beyond the last tzdata transition Go extrapolates the zone's current rule.
 var (
-	wholeHourCheckFrom  = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	wholeHourCheckFrom  = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	wholeHourCheckUntil = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 
 // checkWholeHourZone refuses a timezone whose UTC offset is not a whole number
-// of hours at every point from 1970 to 2100 (issue #49).
+// of hours at every point from wholeHourCheckFrom to wholeHourCheckUntil
+// (issue #49).
 //
 // /series windows every sub-day interval on the UTC grid rather than asking
 // Influx for local windows, because Influx stretches local sub-day windows
@@ -242,18 +254,19 @@ var (
 // It walks the zone's actual transitions (ZoneBounds) rather than sampling, so
 // a short-lived offset cannot slip between samples. Australia/Lord_Howe, whose
 // DST shift is 30 minutes, is caught on its +10:30 standard time.
-func checkWholeHourZone(tz string) error {
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		return fmt.Errorf("parse house.timezone %q: %w", tz, err)
-	}
+//
+// A zone whose clocks change AT a 6h or day boundary (America/Santiago and
+// America/Havana go forward at local midnight) is whole-hour and accepted: the
+// series axes resolve a skipped boundary to the transition instant, which is
+// itself on the UTC hour (see energy.resolveWall).
+func checkWholeHourZone(loc *time.Location) error {
 	for t := wholeHourCheckFrom.In(loc); t.Before(wholeHourCheckUntil); {
 		name, off := t.Zone()
 		if off%3600 != 0 {
 			return fmt.Errorf("house.timezone %q has a UTC offset that is not a whole number of hours "+
 				"(%s, %+.2fh, from %s); /series buckets are built on the UTC hour grid and would "+
 				"misplace energy across every local boundary, so this zone is not supported (issue #49)",
-				tz, name, float64(off)/3600, t.UTC().Format(time.RFC3339))
+				loc.String(), name, float64(off)/3600, t.UTC().Format(time.RFC3339))
 		}
 		_, end := t.ZoneBounds()
 		if end.IsZero() || !end.After(t) {
@@ -319,10 +332,11 @@ func Load(path string) (Config, error) {
 		return cfg, err
 	}
 	if cfg.House.Timezone != "" {
-		if _, err := time.LoadLocation(cfg.House.Timezone); err != nil {
+		loc, err := time.LoadLocation(cfg.House.Timezone)
+		if err != nil {
 			return cfg, fmt.Errorf("parse house.timezone %q: %w", cfg.House.Timezone, err)
 		}
-		if err := checkWholeHourZone(cfg.House.Timezone); err != nil {
+		if err := checkWholeHourZone(loc); err != nil {
 			return cfg, err
 		}
 	}

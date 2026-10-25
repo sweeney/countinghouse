@@ -94,12 +94,6 @@ import (
 // Scope: power_w only. A query for any other field (energy_kwh) returns no rows,
 // so a test needing a counter alongside should compose this with CounterSim.
 type PowerSim struct {
-	// Loc is the house timezone the sim was built for. It no longer drives
-	// the aggregation grid — the location named in the flux does, exactly as
-	// it does for Influx (see simWindowing) — and is kept so call sites
-	// documenting which zone a fixture lives in still read naturally.
-	Loc *time.Location
-
 	ids    []string // registration order, so rows are returned deterministically
 	series map[string]powerSeries
 }
@@ -110,10 +104,12 @@ type powerSeries struct {
 	w  []float64
 }
 
-// NewPowerSim returns an empty sim for the house timezone loc. The aggregation grid
-// is whatever each query's flux asks for (see simWindowing), not loc.
-func NewPowerSim(loc *time.Location) *PowerSim {
-	return &PowerSim{Loc: loc, series: map[string]powerSeries{}}
+// NewPowerSim returns an empty sim. It takes no timezone: the aggregation grid is
+// whatever each query's flux asks for (see simWindowing), exactly as it is for
+// Influx. It used to take one, which read as if it controlled the grid and,
+// after issue #49, controlled nothing (PR #50 review).
+func NewPowerSim() *PowerSim {
+	return &PowerSim{series: map[string]powerSeries{}}
 }
 
 // AddSteady registers deviceID drawing a constant `watts`, sampled every

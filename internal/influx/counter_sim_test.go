@@ -25,7 +25,7 @@ func simLondon(t *testing.T) *time.Location {
 func steadySim(t *testing.T) (*CounterSim, *time.Location) {
 	t.Helper()
 	loc := simLondon(t)
-	return NewCounterSim(loc).AddSteady("winefridge",
+	return NewCounterSim().AddSteady("winefridge",
 		time.Date(2026, 6, 11, 12, 0, 0, 0, loc),
 		time.Date(2026, 6, 11, 18, 0, 0, 0, loc),
 		time.Minute, 1000), loc
@@ -142,7 +142,7 @@ func TestCounterSimOmitsWindowsWithNoReading(t *testing.T) {
 		at = append(at, ts)
 		kwh = append(kwh, 1000*ts.Sub(base).Hours()/1000)
 	}
-	sim := NewCounterSim(loc).AddSamples("winefridge", at, kwh)
+	sim := NewCounterSim().AddSamples("winefridge", at, kwh)
 
 	rows, err := sim.Answer(BuildCounterSeriesFlux("b", []string{"winefridge"},
 		base, base.Add(2*time.Hour), "30m", "Europe/London"))
@@ -166,7 +166,7 @@ func TestCounterSimFiltersDevicesAndField(t *testing.T) {
 	loc := simLondon(t)
 	from := time.Date(2026, 6, 11, 12, 0, 0, 0, loc)
 	to := time.Date(2026, 6, 11, 18, 0, 0, 0, loc)
-	sim := NewCounterSim(loc).
+	sim := NewCounterSim().
 		AddSteady("winefridge", from, to, time.Minute, 1000).
 		AddSteady("freezer", from, to, time.Minute, 200)
 
@@ -218,7 +218,7 @@ func TestCounterSimDailyGridStepsCalendarDaysAcrossDST(t *testing.T) {
 	// 2026-10-25 is the London autumn changeover; that local day is 25h.
 	from := time.Date(2026, 10, 23, 0, 0, 0, 0, loc)
 	to := time.Date(2026, 10, 28, 0, 0, 0, 0, loc)
-	sim := NewCounterSim(loc).AddSteady("winefridge", from, to, time.Hour, 1000)
+	sim := NewCounterSim().AddSteady("winefridge", from, to, time.Hour, 1000)
 
 	rows, err := sim.Answer(BuildCounterSeriesFlux("b", []string{"winefridge"},
 		time.Date(2026, 10, 24, 0, 0, 0, 0, loc),
@@ -277,10 +277,9 @@ from(bucket: "b")
 // hour, and a steady 1 kW rises 0.5 kWh in each — including the two windows
 // inside the repeated hour that prod Influx used to swallow into one.
 func TestCounterSimSubDayGridIsUTCAcrossFallBack(t *testing.T) {
-	loc := simLondon(t)
 	from := time.Date(2026, 10, 24, 22, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 10, 25, 4, 0, 0, 0, time.UTC)
-	sim := NewCounterSim(loc).AddSteady("winefridge", from, to, time.Minute, 1000)
+	sim := NewCounterSim().AddSteady("winefridge", from, to, time.Minute, 1000)
 
 	start := time.Date(2026, 10, 24, 23, 0, 0, 0, time.UTC) // 00:00 BST
 	stop := time.Date(2026, 10, 25, 3, 0, 0, 0, time.UTC)   // 03:00 GMT

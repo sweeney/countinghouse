@@ -54,12 +54,6 @@ import (
 // rows. Counter RESETS are not modelled — supply a monotonic counter; the
 // increase() that absorbs resets in production is exercised against real Influx.
 type CounterSim struct {
-	// Loc is the house timezone the sim was built for. It no longer drives
-	// the aggregation grid — the location named in the flux does, exactly as
-	// it does for Influx (see simWindowing) — and is kept so call sites
-	// documenting which zone a fixture lives in still read naturally.
-	Loc *time.Location
-
 	ids    []string // registration order, so rows are returned deterministically
 	series map[string]counterSeries
 }
@@ -70,10 +64,12 @@ type counterSeries struct {
 	kwh []float64
 }
 
-// NewCounterSim returns an empty sim for the house timezone loc. The aggregation grid
-// is whatever each query's flux asks for (see simWindowing), not loc.
-func NewCounterSim(loc *time.Location) *CounterSim {
-	return &CounterSim{Loc: loc, series: map[string]counterSeries{}}
+// NewCounterSim returns an empty sim. It takes no timezone: the aggregation grid is
+// whatever each query's flux asks for (see simWindowing), exactly as it is for
+// Influx. It used to take one, which read as if it controlled the grid and,
+// after issue #49, controlled nothing (PR #50 review).
+func NewCounterSim() *CounterSim {
+	return &CounterSim{series: map[string]counterSeries{}}
 }
 
 // AddSteady registers deviceID with a steady `watts` load sampled every
