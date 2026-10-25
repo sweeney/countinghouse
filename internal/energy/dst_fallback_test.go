@@ -141,3 +141,59 @@ func TestSeriesDSTFallBackRepeatedHour(t *testing.T) {
 		t.Errorf("total = %.4f kWh, want %.4f", s.TotalKWh, wantTotal)
 	}
 }
+
+// The cost side of the same bug. /series and /bill (counter_slot) price each
+// half hour at its own Octopus slot, and that night the prices moved fast. The
+// stretched 01:30 BST window put the repeated hour's 0.4 kWh into the 01:30 BST
+// bucket, so it was all priced at −6.28p instead of at the two GMT slots it
+// was actually drawn in: over-crediting about 1p on the house meter that night,
+// every October. The slot prices here are the real ones from the issue for the
+// three slots that matter, and a flat 10p elsewhere.
+func TestSeriesDSTFallBackPricesEachSlotAtItsOwnRate(t *testing.T) {
+	fx := loadDSTFixture(t)
+	q := fallBackQuerier(fx)
+
+	// One slot per half hour from 00:00 BST (23:00Z) to 03:00 GMT.
+	pence := []float64{10, 10, 10,
+		-6.28, // 01:30 BST (00:30Z)
+		-4.14, // 01:00 GMT (01:00Z) — the first half of the repeated hour
+		-3.26, // 01:30 GMT (01:30Z) — the second half
+		10, 10}
+	rates := make([]*float64, len(pence))
+	for i := range pence {
+		rates[i] = fp(pence[i])
+	}
+	pricer := slotRates{start: fx.Window.From, rates: rates}
+
+	iv, _ := lookupInterval(fx.Interval)
+	win := Window{Start: fx.Window.From, Stop: fx.Window.To, Label: WindowCustom}
+	devices := map[string]config.DeviceConfig{"steady_plug": {Class: "continuous_power_device"}}
+	resp, err := BuildSeries(context.Background(), q, "b", win, iv, GroupByDevice,
+		false, false, devices, pricer, nil, mustLondon(t))
+	if err != nil {
+		t.Fatalf("BuildSeries: %v", err)
+	}
+	if len(resp.Series) != 1 || len(resp.Series[0].Cost) != len(pence) {
+		t.Fatalf("want 1 series of %d buckets, got %+v", len(pence), resp.Series)
+	}
+	s := resp.Series[0]
+
+	// Each bucket costs its own energy at its own slot's rate.
+	var wantTotal float64
+	for i, p := range pence {
+		want := s.KWh[i] * p / 100
+		wantTotal += want
+		if math.Abs(s.Cost[i]-want) > 0.0001 {
+			t.Errorf("bucket %d (%s): cost £%.4f, want £%.4f (%.3f kWh at %.2fp)",
+				i, resp.Buckets[i].Format(time.RFC3339), s.Cost[i], want, s.KWh[i], p)
+		}
+	}
+	// The repeated hour is billed at −4.14p and −3.26p, not all at −6.28p.
+	half := fx.Watts * 0.5 / 1000
+	if want := half * (-6.28 - 4.14 - 3.26) / 100; math.Abs(s.Cost[3]+s.Cost[4]+s.Cost[5]-want) > 0.0002 {
+		t.Errorf("01:30 BST..02:00 GMT costs £%.4f, want £%.4f", s.Cost[3]+s.Cost[4]+s.Cost[5], want)
+	}
+	if math.Abs(s.TotalCost-wantTotal) > 0.0005 {
+		t.Errorf("total cost £%.4f, want £%.4f", s.TotalCost, wantTotal)
+	}
+}

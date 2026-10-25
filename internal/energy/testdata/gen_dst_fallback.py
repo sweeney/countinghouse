@@ -1,4 +1,19 @@
-# Generates the DST fall-back fixture for countinghouse (issue #49).
+# Generates dst_fallback_2026-10-25.json, the autumn clock-change fixture for
+# issue #49. Taken from the issue as filed.
+#
+# Synthetic: a steady 400 W meter, one cumulative energy_kwh reading per minute,
+# 2026-10-24T23:00Z (00:00 BST) .. 2026-10-25T03:00Z (03:00 GMT). No household data.
+#
+# "flux_rows" reproduces what prod Influx returned on that night for
+#   increase() |> aggregateWindow(every: 30m, fn: last, timeSrc: "_start",
+#                                 location: timezone.location(name: "Europe/London"))
+# Windows are laid on LOCAL wall clock, so the 01:30 BST window runs to the next
+# unambiguous wall time, 02:00 GMT, and swallows the repeated hour. The rows are
+# RECONSTRUCTED from the observed /series output, not captured verbatim from Influx.
+#
+# Run from the repo root:
+#   python3 internal/energy/testdata/gen_dst_fallback.py \
+#     > internal/energy/testdata/dst_fallback_2026-10-25.json
 import json, sys
 from datetime import datetime, timedelta, timezone
 Z = timezone.utc

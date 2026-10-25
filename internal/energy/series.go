@@ -275,21 +275,41 @@ type HouseStats struct {
 // including) win.Stop. This axis is the single source of truth every series
 // aligns to; Influx results are demuxed onto it and gaps are zero-filled.
 //
-// For calendar intervals (1d) the axis steps by CALENDAR day in loc using
-// time.Date(year, month, day+1, ...), so a London day that is 23h (spring
-// forward) or 25h (autumn back) is still a single bucket starting at local
-// midnight — DST-correct.
+// The axis is built three ways, one per kind of interval, and each matches the
+// grid its energy is actually windowed on (issue #49; see Interval):
 //
-// For fixed (sub-day) intervals the axis is SNAPPED DOWN to the interval grid
-// anchored at the local midnight of the start date, then stepped by
-// iv.Duration. This matches Influx's aggregateWindow(every:, location:), whose
-// windows are aligned to the location's grid (local midnight), NOT to
-// range(start:). For today/week/month the window start is already local
-// midnight, which is on every sub-day grid, so this is a no-op; it only matters
-// for window=custom whose `from` is off the boundary (e.g. 14:23 with 1h snaps
-// to 14:00). Snapping makes every Influx row's _start stamp exact-match a
-// bucket, so the first partial window is no longer dropped and later buckets are
-// not shifted.
+//   - Calendar (1d) steps by CALENDAR day in loc using time.Date(year, month,
+//     day+1, ...), so a London day that is 23h (spring forward) or 25h (autumn
+//     back) is still a single bucket starting at local midnight. Influx's
+//     location-aware aggregateWindow stretches its daily windows the same way.
+//
+//   - ≤1h (5m/15m/30m/1h) is the ABSOLUTE grid: win.Start truncated to a
+//     multiple of iv.Duration, then stepped by iv.Duration. That is the UTC grid
+//     the series queries window on (influx.windowLocation), so every row's
+//     _start stamp exact-matches a bucket. On the autumn changeover day the
+//     repeated hour is two distinct hourly buckets (01:00 BST and 01:00 GMT)
+//     and the day has 25; in spring the missing hour simply does not appear
+//     and the day has 23. For a whole-hour zone (config refuses any other) this
+//     grid is the local grid, so labels are on the local hour as before.
+//
+//     It used to be the same fixed step, but anchored at local midnight while
+//     the QUERY asked Influx for local wall-clock windows. Influx stretches the
+//     window that straddles the repeated hour to 90 minutes (at 30m), so the
+//     two disagreed for exactly that hour: three half hours of energy landed in
+//     one bucket and the two after it read zero. The query moved, not this.
+//
+//   - Wall-clock (6h) steps LOCAL wall-clock hours from local midnight with
+//     time.Date(..., hour+6, ...), so the buckets are 00/06/12/18 local on both
+//     sides of a change and the bucket that straddles one is 7h (autumn) or 5h
+//     (spring). It used to step a fixed 6h, which drifted an hour off that grid
+//     after the change (prod, 2026-10-25: 00:00+01:00, 05:00Z, 11:00Z, 17:00Z).
+//     Its energy is queried at 1h and folded onto this axis (see queryAxisFor).
+//
+// A window=custom whose `from` is off the grid is SNAPPED DOWN to the
+// containing boundary (e.g. 14:23 with 1h snaps to 14:00), so the first partial
+// window is not dropped and later buckets are not shifted. For today/week/month
+// the window start is already local midnight, which is on every grid, so the
+// snap is a no-op.
 //
 // The first bucket's TIMESTAMP therefore precedes `from`, but its VALUE does not
 // cover the pre-`from` slice (issues #27, #29). Both value paths hold the head to
@@ -300,22 +320,7 @@ type HouseStats struct {
 // boundary it starts on, exactly as the last bucket is a partial bucket ending at
 // win.Stop.
 //
-// Flux parity (anchoring): Influx's location-aware aggregateWindow anchors
-// windows to local midnight in the configured location and handles DST by
-// stretching/shrinking the single window that straddles the transition, NOT by
-// offsetting the whole grid by the zone offset (InfluxData, "Time Zones in
-// Flux": location-set results "always have time starting and stopping at
-// midnight in the specified time zone"). So a 6h grid is 00/06/12/18 LOCAL in
-// both GMT and BST (not 01/07/13/19), which is exactly what anchoring at local
-// midnight here produces — see TestBucketStartsCustomNonAlignedCoarse, which
-// exercises 6h on a BST date. (1h and finer always coincide regardless, because
-// London's offset is a whole number of hours.) Caveat: for a sub-day interval
-// over a custom window that CROSSES a DST transition, this fixed-duration
-// stepping drifts an hour off Flux's stretched grid after the change; that is a
-// pre-existing narrow edge (the 1d path has its own calendar branch) and worth
-// a one-off confirmation against the live instance.
-//
-// The window start is normalised into loc first so boundaries are local.
+// Returned times are in loc, so they serialise with the local offset.
 func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 	if loc == nil {
 		loc = time.UTC
@@ -324,24 +329,40 @@ func BucketStarts(win Window, iv Interval, loc *time.Location) []time.Time {
 	stop := win.Stop
 
 	var out []time.Time
-	if iv.Calendar {
+	switch {
+	case iv.Calendar:
 		// Step by calendar day, anchored at the local midnight of start's date.
 		cur := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
 		for cur.Before(stop) {
 			out = append(out, cur)
 			cur = time.Date(cur.Year(), cur.Month(), cur.Day()+1, 0, 0, 0, 0, loc)
 		}
-		return out
-	}
 
-	// Snap start down to the interval grid anchored at the start date's local
-	// midnight (Flux aligns sub-day windows to the location's grid, not to the
-	// query range start).
-	anchor := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, loc)
-	off := start.Sub(anchor) % iv.Duration
-	first := start.Add(-off)
-	for cur := first; cur.Before(stop); cur = cur.Add(iv.Duration) {
-		out = append(out, cur)
+	case iv.wallClock():
+		// Snap down to the wall-clock boundary at or before start's LOCAL hour,
+		// then step wall-clock hours. Hour() reads the wall clock, so a start
+		// inside the repeated hour (either occurrence of 01:xx) snaps to 00:00
+		// local; the 6h boundaries never fall in London's 01:00–02:00
+		// changeover hour, so time.Date never has to resolve an ambiguous or
+		// missing wall time here.
+		step := int(iv.Duration / time.Hour)
+		cur := time.Date(start.Year(), start.Month(), start.Day(), start.Hour()-start.Hour()%step, 0, 0, 0, loc)
+		for cur.Before(stop) {
+			out = append(out, cur)
+			next := time.Date(cur.Year(), cur.Month(), cur.Day(), cur.Hour()+step, 0, 0, 0, loc)
+			if !next.After(cur) {
+				break // defensive: time.Date normalisation must always move forward
+			}
+			cur = next
+		}
+
+	default:
+		// The absolute grid: Truncate rounds down to a multiple of iv.Duration
+		// since Go's zero time, which is a UTC midnight, so for every interval
+		// that divides an hour this is the UTC grid Influx windows on.
+		for cur := win.Start.Truncate(iv.Duration).In(loc); cur.Before(stop); cur = cur.Add(iv.Duration) {
+			out = append(out, cur)
+		}
 	}
 	return out
 }
@@ -1206,13 +1227,16 @@ func BuildSeries(
 		loc = time.UTC
 	}
 
-	// The DISPLAY axis is what the caller asked for; the COST axis is what the money
-	// has to be computed on. They differ only when the price varies faster than the
-	// requested bucket — see costAxisFor. Everything below runs on the cost axis, and
-	// the series are folded back onto the display axis at the end, so a slot-priced
-	// monthly chart costs the same as the monthly bill.
+	// The DISPLAY axis is what the caller asked for; the QUERY axis is what the
+	// energy and money have to be computed on. They differ when the price varies
+	// faster than the requested bucket (see costAxisFor), or when the requested
+	// bucket is a local wall-clock interval Influx cannot be trusted to window
+	// across a clock change (6h, issue #49). Everything below runs on the query
+	// axis, and the series are folded back onto the display axis at the end, so a
+	// slot-priced monthly chart costs the same as the monthly bill and a 6h chart
+	// stays on 00/06/12/18 local across a clock change.
 	display := iv
-	iv = costAxisFor(display, pricer)
+	iv = queryAxisFor(display, pricer)
 	displayBuckets := BucketStarts(win, display, loc)
 
 	buckets := BucketStarts(win, iv, loc)
@@ -1583,6 +1607,34 @@ func costAxisFor(display Interval, pricer Pricer) Interval {
 		return display
 	}
 	return CostingInterval()
+}
+
+// queryAxisFor returns the interval BuildSeries queries Influx at for a display
+// interval: the cost axis (see costAxisFor), narrowed to maxDirectInterval when
+// that would still be a wall-clock interval (issue #49).
+//
+// A 6h display under a flat tariff would otherwise be queried at 6h, and there
+// is no grid Influx can be asked for that is right: location-aware 6h windows
+// stretch across a clock change like every sub-day local window does, and UTC
+// 6h windows sit an hour off the local 00/06/12/18 grid all summer. Querying at
+// 1h on the UTC grid and folding onto the local axis is exact, because every
+// local 6h boundary of a whole-hour zone is a UTC hour boundary — the same
+// containment fold the cost axis already uses for 46/48/50-slot days.
+//
+// The price is 6× the rows for a 6h chart, bounded by MaxBuckets on the display
+// axis (1000 × 6h → 6000 hourly rows per device at most), which is the same order
+// a slot-priced monthly chart already queries at 30m.
+func queryAxisFor(display Interval, pricer Pricer) Interval {
+	iv := costAxisFor(display, pricer)
+	if !iv.wallClock() {
+		return iv
+	}
+	hourly, ok := lookupInterval("1h")
+	if !ok {
+		// Unreachable: "1h" is in the allowed set.
+		return Interval{Token: "1h", Duration: time.Hour}
+	}
+	return hourly
 }
 
 // foldIndex maps each fine bucket to the display bucket containing it.

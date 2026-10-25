@@ -15,7 +15,7 @@ import (
 //
 // It holds each device's counter as a series of cumulative readings and answers
 // BOTH Flux shapes countinghouse issues against that field, honouring range()
-// bounds and the local-midnight aggregation grid the way Influx does:
+// bounds and the aggregation grid the flux asks for (see simWindowing):
 //
 //   - increase() |> last()                                  — BuildCounterFlux,
 //     the whole-window reduction behind /devices/{id}/energy: one row per device,
@@ -38,14 +38,26 @@ import (
 // query engine. Two hand-tuned fixture sets agreeing proves nothing, and two
 // separately-maintained simulators can drift into proving different things.
 //
+// Grid: the sim reads the grid from the FLUX, as Influx does, not from Loc. A
+// sub-day aggregateWindow on timezone.utc is a fixed step on the UTC grid; a 1d
+// window on a named location steps calendar days in that zone (23h/25h across
+// a clock change). A SUB-DAY window on a named location is refused with an
+// error: Influx lays those on local wall clock and stretches the one that
+// straddles the autumn repeated hour (issue #49), and the sim used to answer
+// them with a fixed step instead — the grid the Go axis assumed — so sim and
+// code agreed with each other while both disagreed with Influx. No builder
+// issues that shape any more; refusing it means a regression that brings it
+// back fails loudly instead of passing against a model that shares the bug.
+//
 // Scope: energy_kwh only. A query for any other field (power_w) returns no rows,
 // so a test needing power telemetry alongside it should compose this with its own
 // rows. Counter RESETS are not modelled — supply a monotonic counter; the
 // increase() that absorbs resets in production is exercised against real Influx.
 type CounterSim struct {
-	// Loc is the timezone whose local midnight anchors the aggregation grid,
-	// matching aggregateWindow(location: timezone.location(...)). Defaults to
-	// UTC when nil.
+	// Loc is the house timezone the sim was built for. It no longer drives
+	// the aggregation grid — the location named in the flux does, exactly as
+	// it does for Influx (see simWindowing) — and is kept so call sites
+	// documenting which zone a fixture lives in still read naturally.
 	Loc *time.Location
 
 	ids    []string // registration order, so rows are returned deterministically
@@ -58,8 +70,8 @@ type counterSeries struct {
 	kwh []float64
 }
 
-// NewCounterSim returns an empty sim whose aggregation grid is anchored at local
-// midnight in loc.
+// NewCounterSim returns an empty sim for the house timezone loc. The aggregation grid
+// is whatever each query's flux asks for (see simWindowing), not loc.
 func NewCounterSim(loc *time.Location) *CounterSim {
 	return &CounterSim{Loc: loc, series: map[string]counterSeries{}}
 }
@@ -108,9 +120,51 @@ func (c *CounterSim) Query(_ context.Context, flux string) ([]Row, error) {
 func (c *CounterSim) Ping(context.Context) bool { return true }
 
 var (
-	simRangeRe = regexp.MustCompile(`range\(start: (\S+), stop: (\S+)\)`)
-	simEveryRe = regexp.MustCompile(`every: (\w+),`)
+	simRangeRe    = regexp.MustCompile(`range\(start: (\S+), stop: (\S+)\)`)
+	simEveryRe    = regexp.MustCompile(`every: (\w+),`)
+	simLocationRe = regexp.MustCompile(`location: (timezone\.utc|timezone\.location\(name: "([^"]+)"\))`)
 )
+
+// simWindowing reads how an aggregateWindow call asks for its windows: the
+// width (every:) and the zone whose grid they are laid on (location:). sim
+// names the caller in errors.
+//
+// The rules mirror Influx for the shapes the builders emit (issue #49):
+//
+//   - location: timezone.utc, or no location at all (Flux's default) → the
+//     UTC grid. Sub-day windows are a fixed step from UTC midnight.
+//   - location: timezone.location(name: "X") with every: 1d → calendar days
+//     in X, which simGridNext steps by date so a clock-change day is one
+//     23h/25h window.
+//   - a named location with a SUB-DAY every: → an error. Influx lays those on
+//     local wall clock and stretches the window that straddles the autumn
+//     repeated hour; the sim does not model that (and must not pretend to with
+//     a fixed step — that is how it hid the bug), and no builder emits it.
+func simWindowing(flux, sim string) (time.Duration, *time.Location, error) {
+	m := simEveryRe.FindStringSubmatch(flux)
+	if m == nil {
+		return 0, nil, fmt.Errorf("influx: %s: aggregateWindow with no every: in flux:\n%s", sim, flux)
+	}
+	every, ok := intervalDuration(m[1])
+	if !ok {
+		return 0, nil, fmt.Errorf("influx: %s: unsupported interval %q", sim, m[1])
+	}
+
+	lm := simLocationRe.FindStringSubmatch(flux)
+	if lm == nil || lm[1] == "timezone.utc" {
+		return every, time.UTC, nil
+	}
+	if every < 24*time.Hour {
+		return 0, nil, fmt.Errorf("influx: %s: refusing a sub-day aggregateWindow (every: %s) on local time %q: "+
+			"Influx stretches those across a clock change and the sim does not model it; "+
+			"sub-day series must window on timezone.utc (issue #49)", sim, m[1], lm[2])
+	}
+	loc, err := time.LoadLocation(lm[2])
+	if err != nil {
+		return 0, nil, fmt.Errorf("influx: %s: %w", sim, err)
+	}
+	return every, loc, nil
+}
 
 // Answer resolves one Flux script against the registered counters. Its signature
 // matches FakeQuerier.QueryFunc, so a test wanting FakeQuerier's query recording
@@ -126,17 +180,12 @@ func (c *CounterSim) Answer(flux string) ([]Row, error) {
 	}
 
 	var every time.Duration
+	grid := time.UTC
 	bucketed := strings.Contains(flux, "aggregateWindow")
 	if bucketed {
-		m := simEveryRe.FindStringSubmatch(flux)
-		if m == nil {
-			return nil, fmt.Errorf("influx: CounterSim: aggregateWindow with no every: in flux:\n%s", flux)
+		if every, grid, err = simWindowing(flux, "CounterSim"); err != nil {
+			return nil, err
 		}
-		d, ok := intervalDuration(m[1])
-		if !ok {
-			return nil, fmt.Errorf("influx: CounterSim: unsupported interval %q", m[1])
-		}
-		every = d
 	}
 
 	var rows []Row
@@ -151,7 +200,7 @@ func (c *CounterSim) Answer(flux string) ([]Row, error) {
 			continue
 		}
 		if bucketed {
-			rows = append(rows, in.windowCloses(id, c.location(), every, start, stop)...)
+			rows = append(rows, in.windowCloses(id, grid, every, start, stop)...)
 			continue
 		}
 		rows = append(rows, Row{
@@ -163,13 +212,6 @@ func (c *CounterSim) Answer(flux string) ([]Row, error) {
 		})
 	}
 	return rows, nil
-}
-
-func (c *CounterSim) location() *time.Location {
-	if c.Loc == nil {
-		return time.UTC
-	}
-	return c.Loc
 }
 
 // simRange parses the half-open bounds out of a range() call.
@@ -245,7 +287,8 @@ func (s counterSeries) windowCloses(deviceID string, loc *time.Location, every t
 }
 
 // simGridStart snaps t DOWN to the aggregation grid, which Influx anchors at
-// local midnight in the configured location rather than at the range start.
+// midnight in the window location (UTC for every sub-day query the builders
+// issue — see simWindowing) rather than at the range start.
 func simGridStart(t time.Time, loc *time.Location, every time.Duration) time.Time {
 	lt := t.In(loc)
 	midnight := time.Date(lt.Year(), lt.Month(), lt.Day(), 0, 0, 0, 0, loc)
@@ -258,7 +301,8 @@ func simGridStart(t time.Time, loc *time.Location, every time.Duration) time.Tim
 // simGridNext steps one window on. A daily window steps by CALENDAR day so a
 // London day across a clock change is 23h or 25h, matching the DST-aware
 // stretching aggregateWindow(location:) applies; sub-day windows step by their
-// fixed duration.
+// fixed duration, which is exact because simWindowing only lets them through on
+// the UTC grid.
 func simGridNext(w time.Time, loc *time.Location, every time.Duration) time.Time {
 	if every >= 24*time.Hour {
 		lw := w.In(loc)

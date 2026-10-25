@@ -14,15 +14,51 @@ const MaxBuckets = 1000
 // Interval is one allowed bucketing granularity.
 //
 // Token is the Flux duration literal passed to aggregateWindow(every:) (and to
-// the influx series builders). Duration is the Go-side fixed length used to
-// step the canonical axis and, via bucketHours, to energy-derive avg_w. Calendar
-// marks day-and-larger intervals whose real length is NOT a fixed Duration: a
-// London calendar day is 23h or 25h across a DST changeover, so the axis must
-// step by calendar date (time.Date day+1) rather than by adding Duration.
+// the influx series builders) — except for a wall-clock interval (6h), which
+// is never passed to Influx at all; see wallClock. Duration is the nominal
+// length: the fixed step of a ≤1h axis, and the size check behind the bucket
+// cap. Real bucket lengths come from the axis itself (bucketHours), never from
+// Duration. Calendar marks day-and-larger intervals whose real length is NOT a
+// fixed Duration: a London calendar day is 23h or 25h across a DST changeover,
+// so the axis must step by calendar date (time.Date day+1) rather than by
+// adding Duration.
+//
+// The three kinds of interval, and who lays their grid (issue #49):
+//
+//   - ≤1h (5m/15m/30m/1h): Influx windows them on the UTC grid; the axis is
+//     the same absolute grid. 25 hourly buckets on the autumn changeover day.
+//   - wall-clock (6h): Influx windows the energy at 1h on the UTC grid; Go
+//     folds it onto 00/06/12/18 LOCAL, so a changeover day's first bucket is
+//     7h (autumn) or 5h (spring).
+//   - calendar (1d): Influx windows local calendar days itself (location:),
+//     23h/25h across a change; the axis steps calendar dates to match.
 type Interval struct {
 	Token    string
 	Duration time.Duration
 	Calendar bool
+}
+
+// maxDirectInterval is the widest SUB-DAY interval Influx is asked to window
+// itself (issue #49).
+//
+// Sub-day series are queried on the UTC grid, never on local time: Influx's
+// location-aware aggregateWindow lays sub-day windows on local wall clock and
+// stretches the one that straddles the autumn repeated hour (see
+// influx.windowLocation). For a zone whose offset is always a whole number of
+// hours — config refuses any other — the UTC grid at 1h and finer coincides
+// with the local grid, so querying there loses nothing.
+//
+// Wider sub-day intervals do not coincide: a 6h UTC grid is 01/07/13/19 local
+// in BST. Those are WALL-CLOCK intervals: queried at this width and folded in
+// Go onto a local axis that BucketStarts steps by wall-clock hour.
+const maxDirectInterval = time.Hour
+
+// wallClock reports whether iv is a sub-day interval wider than Influx can be
+// asked to window directly (6h): its axis steps LOCAL wall-clock hours, so a
+// bucket that straddles a clock change is an hour longer or shorter, and its
+// energy is queried at maxDirectInterval and folded onto that axis.
+func (iv Interval) wallClock() bool {
+	return !iv.Calendar && iv.Duration > maxDirectInterval
 }
 
 // intervals is the allowed set, smallest first. Order matters: DefaultInterval

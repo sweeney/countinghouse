@@ -1121,7 +1121,11 @@ components:
         axis snaps DOWN to the interval grid anchored at local midnight (so it
         matches the aggregation boundaries); the first bucket is widened to that
         boundary. Period-to-date windows already start at local midnight and are
-        unaffected.
+        unaffected. Grids across a clock change: 5m–1h step a fixed length on
+        the absolute (UTC) grid (25 hourly buckets on the autumn changeover
+        day, 23 in spring); 6h follows local wall clock (00/06/12/18 local, so
+        the changeover day's first bucket is 7h or 5h); 1d is one local
+        calendar day (25h or 23h). See README "Clock changes" (issue #49).
       schema:
         type: string
         enum: [5m, 15m, 30m, 1h, 6h, 1d]
@@ -2869,7 +2873,10 @@ components:
             labelled by the grid boundary it starts on but its values cover only
             14:29 onwards, exactly as the last bucket covers only up to `to`.
             Buckets are also real wall-clock lengths, so a 1d bucket spanning a DST
-            change is 23h or 25h.
+            change is 23h or 25h and a 6h bucket spanning one is 7h or 5h. At 5m–1h
+            the axis is the absolute (UTC) grid, so the autumn repeated hour is two
+            distinct sets of buckets (e.g. 01:00+01:00 then 01:00Z) and the spring
+            missing hour has none.
         series:
           type: array
           description: >
