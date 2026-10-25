@@ -207,6 +207,34 @@ func TestStandingChargeVATMismatchWarnsAndNamesTheImpliedRate(t *testing.T) {
 	if got == nil || math.Abs(*got) > 1e-9 {
 		t.Errorf("implied VAT %v, want 0 — the number config should be set to", got)
 	}
+	// And the rate it was checked against, so an alert can say what config says
+	// without reaching for some other field (#52).
+	if exp := res.Warnings[0].ExpectedVATRate; exp == nil || *exp != 0.05 {
+		t.Errorf("expected VAT %v, want 0.05 — the rate this charge was checked against", exp)
+	}
+}
+
+// Unit prices carry the same pair, resolved per slot.
+func TestVATMismatchWarningCarriesTheRateTheSlotWasCheckedAgainst(t *testing.T) {
+	from := time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)
+	to := from.Add(30 * time.Minute)
+	slot := Slot{
+		TariffCode: "E-1R-AGILE-24-10-01-N", ValidFrom: from, ValidTo: &to,
+		ExcVATPence: 20, IncVATPence: 20, // zero-rated
+	}
+	res := Validate([]Slot{slot}, ValidateOptions{
+		ExpectVATRateAt: func(time.Time) (float64, bool) { return 0.05, true },
+	})
+	if len(res.Warnings) != 1 || res.Warnings[0].Kind != WarnVATMismatch {
+		t.Fatalf("want one vat_mismatch warning, got %+v", res.Warnings)
+	}
+	w := res.Warnings[0]
+	if w.ImpliedVATRate == nil || *w.ImpliedVATRate != 0 {
+		t.Errorf("implied VAT %v, want 0", w.ImpliedVATRate)
+	}
+	if w.ExpectedVATRate == nil || *w.ExpectedVATRate != 0.05 {
+		t.Errorf("expected VAT %v, want 0.05", w.ExpectedVATRate)
+	}
 }
 
 func TestStandingChargeGateARejects(t *testing.T) {

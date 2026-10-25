@@ -229,7 +229,7 @@ func checkStandingVAT(c DailyCharge, opts ValidateOptions) (Warning, bool) {
 		return Warning{}, false
 	}
 	w := Warning{
-		Slot: c.row(), Kind: WarnVATMismatch,
+		Slot: c.row(), Kind: WarnVATMismatch, ExpectedVATRate: &rate,
 		Detail: fmt.Sprintf(
 			"standing charge: inc %.6fp/day but exc %.6fp/day at VAT %.4f implies %.6fp/day "+
 				"(off by %.6fp, tolerance %g)",

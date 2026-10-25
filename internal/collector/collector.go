@@ -429,22 +429,20 @@ func (c *Collector) assess(ctx context.Context, now time.Time, res *SyncResult) 
 	// one is a different animal from a stray slot: it is a rate change, and it is
 	// the operator's cue to edit config. Raised before the rejection alert because
 	// it explains a class of warning rather than reporting a loss.
-	if drift, ok := vatDrift(res.Warnings, c.vatRate); ok {
+	if drift, ok := vatDrift(res.Warnings); ok {
+		implied, configured := drift.describe()
 		c.alert(ctx, notify.Event{
 			Kind: notify.KindAgreementDrift, Severity: notify.SeverityError,
 			Summary: fmt.Sprintf(
-				"the supplier is charging VAT at %.2f%%, but configuration says %.2f%%",
-				drift.Implied*100, drift.Configured*100),
+				"the supplier is charging VAT at %s, but configuration says %s", implied, configured),
 			DedupKey: c.tariff.Code,
-			Detail: map[string]any{
-				"tariff_code":         c.tariff.Code,
-				"implied_vat_rate":    drift.Implied,
-				"configured_vat_rate": drift.Configured,
-				"slots":               drift.Slots,
+			Detail: drift.detail(map[string]any{
+				"tariff_code": c.tariff.Code,
+				"slots":       drift.Slots,
 				"what_to_do": "set vat_rate on the agreement block covering these dates; " +
 					"prices and standing charges are still being archived correctly meanwhile, " +
 					"because both are stored as the supplier's own inc-VAT figures",
-			},
+			}),
 		})
 	}
 
@@ -919,11 +917,22 @@ const vatDriftMinSlots = 6
 // more than a thousandth.
 const vatDriftEpsilon = 5e-4
 
-// vatDrift reports a systematic disagreement between the supplier's VAT and ours.
+// vatDriftFinding is a systematic disagreement between the supplier's VAT and ours.
+//
+// The configured side is a RANGE, not a number, because it is read from the
+// warnings — the rate each slot was actually checked against — and a batch that
+// spans two agreements has two. Naming one of them would be choosing which half
+// of the batch to misdescribe.
 type vatDriftFinding struct {
-	Implied    float64
-	Configured float64
-	Slots      int
+	Implied       float64
+	ConfiguredMin float64
+	ConfiguredMax float64
+	Slots         int
+}
+
+// singleConfigured reports whether every slot was checked against the same rate.
+func (d vatDriftFinding) singleConfigured() bool {
+	return d.ConfiguredMax-d.ConfiguredMin <= vatDriftEpsilon
 }
 
 // vatDrift looks for a consistent implied VAT rate across the batch's mismatch
@@ -933,12 +942,27 @@ type vatDriftFinding struct {
 // DIFFERENT directions are a data problem and stay per-slot warnings; slots all
 // implying the same new rate are a tax change, and that is worth waking somebody
 // for — once, with the number to put in config.
-func vatDrift(warnings []prices.Warning, configured float64) (vatDriftFinding, bool) {
-	var implied []float64
+//
+// "Configuration" is the rate each warning was checked against, carried on the
+// warning itself. It used to be the collector's legacy scalar VATRate, which
+// production never sets: the per-slot check compared against the agreement (5%)
+// while the alert reported the unset field (0%), and paged "VAT at 0.00%, but
+// configuration says 0.00%" (#52).
+//
+// A warning whose implied rate is within vatDriftEpsilon of its own expected rate
+// is rounding — it cleared the per-slot pence tolerance, not the rate one — and is
+// not evidence of a rate change, so it does not count toward the threshold.
+func vatDrift(warnings []prices.Warning) (vatDriftFinding, bool) {
+	var implied, expected []float64
 	for _, w := range warnings {
-		if w.Kind == prices.WarnVATMismatch && w.ImpliedVATRate != nil {
-			implied = append(implied, *w.ImpliedVATRate)
+		if w.Kind != prices.WarnVATMismatch || w.ImpliedVATRate == nil || w.ExpectedVATRate == nil {
+			continue
 		}
+		if math.Abs(*w.ImpliedVATRate-*w.ExpectedVATRate) <= vatDriftEpsilon {
+			continue // the configured rate, give or take the supplier's rounding
+		}
+		implied = append(implied, *w.ImpliedVATRate)
+		expected = append(expected, *w.ExpectedVATRate)
 	}
 	if len(implied) < vatDriftMinSlots {
 		return vatDriftFinding{}, false
@@ -948,7 +972,51 @@ func vatDrift(warnings []prices.Warning, configured float64) (vatDriftFinding, b
 			return vatDriftFinding{}, false // not one rate; a data problem, not a tax change
 		}
 	}
-	return vatDriftFinding{Implied: implied[0], Configured: configured, Slots: len(implied)}, true
+	d := vatDriftFinding{
+		Implied: implied[0], ConfiguredMin: expected[0], ConfiguredMax: expected[0], Slots: len(implied),
+	}
+	for _, e := range expected[1:] {
+		d.ConfiguredMin = math.Min(d.ConfiguredMin, e)
+		d.ConfiguredMax = math.Max(d.ConfiguredMax, e)
+	}
+	return d, true
+}
+
+// describe renders the finding's two sides as percentages for a summary line.
+//
+// Precision grows until the implied figure prints differently from every
+// configured one. vatDrift already guarantees they differ by more than
+// vatDriftEpsilon (0.05 percentage points), which two decimals always show; this
+// is the belt to that brace, because an alert printing two identical figures as
+// a contradiction reads as a false alarm and teaches somebody to ignore it.
+func (d vatDriftFinding) describe() (implied, configured string) {
+	pct := func(v float64, prec int) string { return fmt.Sprintf("%.*f%%", prec, v*100) }
+	for prec := 2; ; prec++ {
+		implied = pct(d.Implied, prec)
+		lo, hi := pct(d.ConfiguredMin, prec), pct(d.ConfiguredMax, prec)
+		if (implied != lo && implied != hi) || prec >= 8 {
+			if d.singleConfigured() {
+				return implied, lo
+			}
+			return implied, "between " + lo + " and " + hi + " across the agreements covering these dates"
+		}
+	}
+}
+
+// detail adds the finding's rates to an alert's structured detail.
+//
+// configured_vat_rate is set only when there is exactly one; a batch spanning
+// agreements gets configured_vat_rate_min/_max instead, so no consumer can read
+// half of the batch's configuration as the whole of it.
+func (d vatDriftFinding) detail(into map[string]any) map[string]any {
+	into["implied_vat_rate"] = d.Implied
+	if d.singleConfigured() {
+		into["configured_vat_rate"] = d.ConfiguredMin
+	} else {
+		into["configured_vat_rate_min"] = d.ConfiguredMin
+		into["configured_vat_rate_max"] = d.ConfiguredMax
+	}
+	return into
 }
 
 // StandingChargeFetcher is the optional half of a RateFetcher that can also read
@@ -1012,18 +1080,15 @@ func (c *Collector) SyncStandingCharges(ctx context.Context) (prices.PutResult, 
 			Detail:   map[string]any{"tariff_code": c.tariff.Code, "count": n},
 		})
 	}
-	if drift, ok := vatDrift(v.Warnings, c.vatRate); ok {
+	if drift, ok := vatDrift(v.Warnings); ok {
+		implied, configured := drift.describe()
 		c.alert(ctx, notify.Event{
 			Kind: notify.KindAgreementDrift, Severity: notify.SeverityError,
 			Summary: fmt.Sprintf(
-				"the supplier's standing charge implies VAT at %.2f%%, but configuration says %.2f%%",
-				drift.Implied*100, drift.Configured*100),
+				"the supplier's standing charge implies VAT at %s, but configuration says %s",
+				implied, configured),
 			DedupKey: c.tariff.Code + ":standing",
-			Detail: map[string]any{
-				"tariff_code":         c.tariff.Code,
-				"implied_vat_rate":    drift.Implied,
-				"configured_vat_rate": drift.Configured,
-			},
+			Detail:   drift.detail(map[string]any{"tariff_code": c.tariff.Code}),
 		})
 	}
 	if len(v.Accepted) == 0 {
