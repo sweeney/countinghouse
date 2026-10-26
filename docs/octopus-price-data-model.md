@@ -243,6 +243,16 @@ at which point the one figure derived from config is the one figure silently wro
 temporary zero rate on domestic electricity in Great Britain (1 Oct 2026 – 31 Mar 2027)
 is what made it concrete. See the runbook in README.
 
+Archiving the figure turned out not to be enough on its own. Octopus restates a standing
+charge **in place**: on 1 Oct 2026 the one Agile charge, open-ended from 2024, was
+rewritten to its zero-rated figure, so the row says 0% for every day back to 2024 (#51).
+VAT changes are never retrospective, so a bill charges each day at the figure the
+supplier was publishing for it, which for days before a restatement lives in
+`standing_charge_restatement`. That log is therefore a billing input for standing
+charges, not only an audit trail, and is why the archive must be backed up rather than
+rebuilt: an archive rebuilt from Octopus has lost it, and falls back to judging the
+carried-back figure against config's `vat_rate`.
+
 It lives in its own table rather than under a `kind` column on `unit_price`, because the
 two hold different UNITS — pence per day against pence per kWh — and a single table
 makes it possible to sum them with a query that forgot to filter. The Go types are
