@@ -1344,6 +1344,10 @@ Both are **omitted** when there is nothing to report — no fetcher wired, or a 
 it has never heard of — rather than sent as a zero time. The fetch error text stays on
 `/healthz`.
 
+The **devices namespace is not covered**: `/devices` carries neither field today, so a
+stale devices snapshot (which decides the device set behind every `/series` and `/bill`)
+is visible only on `/healthz`.
+
 Each agreement on `/tariffs` also carries **`available_now`**, derived from its own dates
 against the service clock. The dates were always on the wire; what was missing was the
 service doing the comparison. Comparing a window against a tariff that has already

@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/sweeney/countinghouse/internal/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,17 +26,18 @@ import (
 // a stale namespace, a statutory zero-VAT block, an unaligned window).
 //
 // Two of them would have caught real defects. The price-clip bug was found this
-// way and nowhere else.
+// way and nowhere else: with the clip fix (8c97f1a) reverted,
+// TestConsumerPricesAnUnalignedWindow goes red.
 // ---------------------------------------------------------------------------
 
 // The R2.4 promise, checked the way the README now tells a consumer to check it:
 // on the per-bucket arrays, not on total_kwh.
 //
 // Both halves matter. The arrays must balance EXACTLY, because that is the
-// documented identity. The totals must be close but are allowed not to balance,
-// because each series' total accumulates raw values and rounds once — and a
-// consumer who reaches for the totals first (most will) needs the gap to be
-// small enough to read as rounding rather than as a hole.
+// documented identity. The totals are allowed not to balance, because each
+// series' total accumulates raw values and rounds once — but only by rounding,
+// so each total is pinned to its OWN array, which together with the exact array
+// identity pins the totals transitively.
 func TestConsumerClampIdentityHoldsOnTheArrays(t *testing.T) {
 	fx := chBuild(t)
 
@@ -75,6 +80,9 @@ func TestConsumerClampIdentityHoldsOnTheArrays(t *testing.T) {
 	if r.Clamp == nil {
 		t.Fatal("no clamp block, but the fixture is built to produce a clamped residual")
 	}
+	if r.Clamp.Buckets <= 0 || r.Clamp.KWh <= 0 {
+		t.Fatalf("clamp block sent empty (%+v), but the fixture clamps on purpose", *r.Clamp)
+	}
 
 	parts := sum["monitored"] + sum["unmonitored"]
 	meter := sum["meter"] + r.Clamp.KWh
@@ -83,21 +91,37 @@ func TestConsumerClampIdentityHoldsOnTheArrays(t *testing.T) {
 			"this identity is documented as exact", parts, meter, parts-meter)
 	}
 
-	// On the totals it is allowed to differ, by rounding and nothing else. The
-	// bound is loose against the axis (a few hundred buckets) and tight against
-	// the clamp, so a real regression in the decomposition still fails here.
+	// On the totals it is allowed to differ, by rounding and nothing else —
+	// checked per series, total against its own array, since that is where a
+	// total accumulated differently from its buckets would show.
+	//
+	// The worst-case rounding bound (half a unit in the last place per bucket,
+	// ~0.17 kWh over 336 buckets) sits ABOVE the clamp this fixture produces, so
+	// it could not tell rounding from a total that missed the clamp. The fixture
+	// is deterministic, so the bound is instead half the clamp itself: the real
+	// per-series gap here is ~0.025 kWh against a bound of ~0.077, and a total
+	// that drifts from its array by the clamp (0.153) fails whichever way the
+	// rounding leans.
+	bound := r.Clamp.KWh / 2
+	for _, s := range r.Series {
+		if d := math.Abs(s.TotalKWh - sum[s.Key]); d > bound {
+			t.Errorf("%s: total_kwh %.6f vs Σkwh %.6f (diff %.6f) exceeds rounding (bound %.6f, "+
+				"half the %.6f kWh clamp)", s.Key, s.TotalKWh, sum[s.Key], d, bound, r.Clamp.KWh)
+		}
+	}
 	tParts := totals["monitored"] + totals["unmonitored"]
 	tMeter := totals["meter"] + r.Clamp.KWh
-	if d := math.Abs(tParts - tMeter); d > 0.5 {
-		t.Errorf("on the TOTALS: diff %.6f is too large to be per-bucket rounding", d)
-	} else {
-		t.Logf("totals differ by %.6f kWh (per-bucket rounding); arrays balance exactly", d)
-	}
+	t.Logf("totals differ by %.6f kWh (per-bucket rounding); arrays balance exactly",
+		math.Abs(tParts-tMeter))
 }
 
 // Staleness has to be visible in the response a consumer already has, not one
 // /healthz call away. The fixture holds one namespace that FAILED its last fetch,
 // because a fixture where everything succeeded can only exercise the happy half.
+//
+// That namespace is the devices one, which no route carries freshness for (see
+// the README's freshness section), so the stale half at the point of use is
+// checked separately below, against a floorplan whose fetch failed.
 func TestConsumerSeesFreshnessAtThePointOfUse(t *testing.T) {
 	fx := chBuild(t)
 
@@ -145,6 +169,32 @@ func TestConsumerSeesFreshnessAtThePointOfUse(t *testing.T) {
 	if h["status"] != "degraded" {
 		t.Errorf("status = %v, want degraded: a namespace is serving a stale snapshot", h["status"])
 	}
+
+	// The half that exists for the fail-open case: a namespace a route DOES
+	// surface has failed, and the route says so while still answering 200.
+	t.Run("stale floorplan surfaces on /floors and /rooms", func(t *testing.T) {
+		fx := chBuild(t)
+		fx.Server.RemoteConfig = chStatuses{
+			chAgreementsNS: {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
+			"floorplan_harness": {OK: false, FetchedAt: chNow.Add(-31 * time.Hour),
+				Error: "config.swee.net: 502 Bad Gateway"},
+			"devices_harness": {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
+		}
+		for _, path := range []string{"/floors", "/rooms"} {
+			w := doGET(t, fx.Server, path)
+			if w.Code != http.StatusOK {
+				t.Fatalf("%s: %d %s — a stale namespace must not refuse service", path, w.Code, w.Body.String())
+			}
+			m := decode(t, w)
+			if m["stale"] != true {
+				t.Errorf("%s: stale = %v, want true: its namespace's last fetch failed", path, m["stale"])
+			}
+		}
+		// And /tariffs, whose namespace fetched cleanly, stays false.
+		if m := decode(t, doGET(t, fx.Server, "/tariffs")); m["stale"] != false {
+			t.Errorf("/tariffs: stale = %v, want false: only the floorplan failed", m["stale"])
+		}
+	})
 }
 
 // The config gate must be SILENT on plausible config. A health signal that is
@@ -164,12 +214,46 @@ func TestConsumerHealthzIsQuietOnPlausibleConfig(t *testing.T) {
 	}
 	// Quiet about the CONTENT of the config, which is a different axis from
 	// whether a fetch succeeded. This fixture is `degraded` for a stale
-	// namespace, and the gate must not add to that on rates it has no quarrel
-	// with — the two signals answer different questions and conflating them is
-	// how an operator learns to ignore both.
-	if _, present := h["config_warnings"]; present {
-		t.Error("the gate contributed a warning to an already-degraded health report")
+	// namespace, and the gate must not add to that — the two signals answer
+	// different questions and conflating them is how an operator learns to
+	// ignore both. So `reasons` holds the staleness and nothing else.
+	reasons, _ := h["reasons"].([]any)
+	if len(reasons) != 1 {
+		t.Fatalf("reasons = %v, want exactly the stale-namespace reason: the content gate "+
+			"must not contribute to status", reasons)
 	}
+	if s, _ := reasons[0].(string); !strings.Contains(s, "devices_harness") {
+		t.Errorf("reasons[0] = %q, want the devices namespace's staleness", s)
+	}
+
+	// Positive control: "quiet" only means something if the gate can fire on
+	// this fixture. The zero-VAT block is dated after chNow; the gate bands every
+	// block whatever its dates, so moving that date would not lose the case, but
+	// this is what proves it is still being looked at. A 15% VAT rate is not one
+	// a UK domestic supply can carry.
+	t.Run("gate fires when the zero-VAT block is a typo", func(t *testing.T) {
+		fx := chBuild(t)
+		cfg := fx.Server.Config.(chConfig)
+		blocks := append([]config.Agreement(nil), cfg.agreements.Agreements["electricity"]...)
+		for i := range blocks {
+			if blocks[i].VATRate == 0 {
+				blocks[i].VATRate = 0.15
+			}
+		}
+		cfg.agreements = config.EnergyAgreements{Agreements: map[string][]config.Agreement{"electricity": blocks}}
+		fx.Server.Config = cfg
+
+		h := decode(t, doGET(t, fx.Server, "/healthz"))
+		if _, present := h["config_warnings"]; !present {
+			t.Error("no config_warnings on a 15% VAT block: the gate is not running, so " +
+				"its silence above proves nothing")
+		}
+		// Still a separate axis when it DOES fire: a warning is never a reason.
+		if reasons, _ := h["reasons"].([]any); len(reasons) != 1 {
+			t.Errorf("reasons = %v, want only the stale namespace: config_warnings must not "+
+				"feed status", reasons)
+		}
+	})
 }
 
 // prices[] on a window whose start falls inside the first bucket.
@@ -183,10 +267,12 @@ func TestConsumerHealthzIsQuietOnPlausibleConfig(t *testing.T) {
 func TestConsumerPricesAnUnalignedWindow(t *testing.T) {
 	fx := chBuild(t)
 
-	// A day inside the fixture's priced range, entered an hour after the local
-	// day boundary so the first calendar bucket is clipped.
-	from := fx.From.Add(48 * 60 * 60 * 1e9).UTC()
-	to := from.Add(48 * 60 * 60 * 1e9)
+	// A day inside the fixture's priced range, entered at 00:00Z — an hour after
+	// the +01:00 local day boundary — so the first calendar bucket is labelled
+	// 23:00Z the previous day and clipped. fx.From is local midnight, so +48h
+	// would land on a boundary and never reach the clip path.
+	from := fx.From.Add(49 * time.Hour).UTC()
+	to := from.Add(48 * time.Hour)
 	path := "/series?window=custom" +
 		"&from=" + from.Format("2006-01-02T15:04:05Z") +
 		"&to=" + to.Format("2006-01-02T15:04:05Z") +
@@ -204,6 +290,20 @@ func TestConsumerPricesAnUnalignedWindow(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &r); err != nil {
 		t.Fatalf("decode: %v", err)
+	}
+
+	// Guard the precondition, or a future fixture change quietly re-aligns the
+	// window and this test goes vacuous — which is how it was first written.
+	if len(r.Buckets) == 0 {
+		t.Fatalf("no buckets: %s", w.Body.String())
+	}
+	b0, err := time.Parse(time.RFC3339, r.Buckets[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !b0.Before(from) {
+		t.Fatalf("buckets[0]=%s is not before from=%s: the window is aligned and the clip "+
+			"path is not exercised", r.Buckets[0], from.Format(time.RFC3339))
 	}
 
 	if len(r.Prices) != len(r.Buckets) {
@@ -241,8 +341,10 @@ func TestConsumerWindowRoutesAreCacheableButNotTagged(t *testing.T) {
 		if w.Code != http.StatusOK {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
 		}
-		if w.Header().Get("Cache-Control") == "" {
-			t.Errorf("%s: no Cache-Control, so a poller has no guidance", path)
+		// private: these are authenticated, per-home answers, so a shared cache
+		// must never hold them.
+		if cc := w.Header().Get("Cache-Control"); !strings.HasPrefix(cc, "private") {
+			t.Errorf("%s: Cache-Control %q, want private with a max-age", path, cc)
 		}
 		if et := w.Header().Get("ETag"); et != "" {
 			t.Errorf("%s: ETag %q — there is no honest strong validator over Influx", path, et)
@@ -252,7 +354,10 @@ func TestConsumerWindowRoutesAreCacheableButNotTagged(t *testing.T) {
 	// The price routes DO tag, and that asymmetry is the point rather than an
 	// inconsistency. Asserting it here keeps the two from quietly converging.
 	p := doGET(t, fx.Server, "/prices?window=today")
-	if p.Code == http.StatusOK && p.Header().Get("ETag") == "" {
+	if p.Code != http.StatusOK {
+		t.Fatalf("/prices: %d %s", p.Code, p.Body.String())
+	}
+	if p.Header().Get("ETag") == "" {
 		t.Error("/prices lost its ETag: it has a semantic fingerprint and should use it")
 	}
 }
