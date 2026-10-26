@@ -94,6 +94,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
 
   /devices/{id}/cost:
     get:
@@ -459,6 +461,10 @@ paths:
             No tariff is configured, or — for `window_mean` — some half hour in
             the window holds no price, so the window has no honest mean rate. A
             mean over the priced half would be a plausible-looking wrong number.
+            Also returned, with a Retry-After header and no WWW-Authenticate
+            challenge, when the identity service's signing keys are
+            unavailable and the token could not be checked; see the
+            AuthUnavailable response.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -483,6 +489,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
 
   /prices:
     get:
@@ -560,8 +568,15 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "503":
-          description: No price archive configured, or no tariff covers the window
+          description: >
+            No price archive configured, or no tariff covers the window. Also
+            returned, with a Retry-After header and no WWW-Authenticate
+            challenge, when the identity service's signing keys are
+            unavailable and the token could not be checked; see the
+            AuthUnavailable response.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -604,6 +619,10 @@ paths:
           description: >
             No price archive is configured on this instance, or its archive cannot
             report coverage.
+            Also returned, with a Retry-After header and no WWW-Authenticate
+            challenge, when the identity service's signing keys are
+            unavailable and the token could not be checked; see the
+            AuthUnavailable response.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -638,8 +657,14 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/UpcomingPricesResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "503":
-          description: No price archive configured, or no tariff is in force
+          description: >
+            No price archive configured, or no tariff is in force. Also
+            returned, with a Retry-After header and no WWW-Authenticate
+            challenge, when the identity service's signing keys are
+            unavailable and the token could not be checked; see the
+            AuthUnavailable response.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -677,6 +702,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CheapestRunResponse" }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "404":
           description: >
             No contiguous window of that length exists in the prices held. A
@@ -690,6 +716,10 @@ paths:
             is flat-rate. Unlike /prices and /prices/stats this route DOES refuse a
             flat tariff: every window ties, so there is no cheapest one, and a 200
             naming an arbitrary window would read as a recommendation.
+            Also returned, with a Retry-After header and no WWW-Authenticate
+            challenge, when the identity service's signing keys are
+            unavailable and the token could not be checked; see the
+            AuthUnavailable response.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -809,11 +839,16 @@ paths:
                   - $ref: "#/components/schemas/PricePeriodStatsResponse"
                   - $ref: "#/components/schemas/PriceStatsByCodeResponse"
         "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
         "503":
           description: >
             No price archive configured, or no tariff covers the window. NOT
             returned for a flat-rate tariff, which is a 200 carrying
             `half_hourly: false` and a `flat_price`.
+            Also returned, with a Retry-After header and no WWW-Authenticate
+            challenge, when the identity service's signing keys are
+            unavailable and the token could not be checked; see the
+            AuthUnavailable response.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -833,6 +868,8 @@ paths:
                 $ref: "#/components/schemas/MetricsResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
 
   /devices:
     get:
@@ -857,6 +894,8 @@ paths:
                 $ref: "#/components/schemas/DevicesCatalog"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
 
   /floors:
     get:
@@ -884,6 +923,8 @@ paths:
                 $ref: "#/components/schemas/FloorsCatalog"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
 
   /rooms:
     get:
@@ -908,6 +949,8 @@ paths:
                 $ref: "#/components/schemas/RoomsCatalog"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
 
   /devices/{id}/events:
     get:
@@ -938,6 +981,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "502":
           $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
 
   /devices/{id}/intervals:
     get:
@@ -969,6 +1014,8 @@ paths:
           $ref: "#/components/responses/NotFound"
         "502":
           $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
 
   /events:
     get:
@@ -1019,6 +1066,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "502":
           $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/AuthUnavailable"
 
 components:
   headers:
@@ -1285,7 +1334,28 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
     Unavailable:
-      description: No tariff configured
+      description: >
+        No tariff configured. Also returned, with a Retry-After header and no
+        WWW-Authenticate challenge, when the identity service's signing keys are
+        unavailable and the token could not be checked; see the AuthUnavailable
+        response.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AuthUnavailable:
+      description: >
+        The token could not be checked because the identity service's signing
+        keys are unavailable: its JWKS endpoint is unreachable, and this server
+        either holds no keys or holds keys too old to keep trusting (30 minutes).
+        This says nothing about the token itself, so do NOT discard it or sign
+        the user out. Retry after the Retry-After interval. There is no
+        WWW-Authenticate challenge.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds to wait before retrying.
       content:
         application/json:
           schema:
