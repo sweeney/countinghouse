@@ -183,7 +183,7 @@ func TestWindow_Days(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ResolveWindow: %v", err)
 		}
-		if got := w.Days(); got != 3 {
+		if got := w.Days(loc); got != 3 {
 			t.Errorf("Days() = %v, want 3", got)
 		}
 	})
@@ -192,8 +192,37 @@ func TestWindow_Days(t *testing.T) {
 		// now = local midnight + 6h -> 0.25 days.
 		now := utc(2026, 1, 15, 6, 0) // GMT: local midnight is 00:00 UTC
 		w := resolve(t, now, loc, WindowToday, time.Time{}, time.Time{})
-		if got := w.Days(); got != 0.25 {
+		if got := w.Days(loc); got != 0.25 {
 			t.Errorf("Days() = %v, want 0.25", got)
+		}
+	})
+
+	// Issue #56: a day is a calendar day in loc, whatever it lasted. These used
+	// to be 25/24 and 23/24 — "the physically correct number of days", which is
+	// not the number a supplier bills.
+	t.Run("autumn clock-change day is one day", func(t *testing.T) {
+		from := time.Date(2026, 10, 25, 0, 0, 0, 0, loc)
+		to := time.Date(2026, 10, 26, 0, 0, 0, 0, loc)
+		w := resolve(t, utc(2026, 10, 27, 0, 0), loc, WindowCustom, from, to)
+		if got := w.Days(loc); got != 1 {
+			t.Errorf("Days() = %v, want 1 (not 25/24)", got)
+		}
+	})
+
+	t.Run("today on the autumn clock-change day is pro rata of 25 hours", func(t *testing.T) {
+		// now = 12:00 GMT on 25 Oct: 13 elapsed hours since local midnight.
+		w := resolve(t, utc(2026, 10, 25, 12, 0), loc, WindowToday, time.Time{}, time.Time{})
+		if got, want := w.Days(loc), 13.0/25.0; got != want {
+			t.Errorf("Days() = %v, want %v (13 of the day's 25 hours)", got, want)
+		}
+	})
+
+	t.Run("spring clock-change month is whole days", func(t *testing.T) {
+		from := time.Date(2026, 3, 1, 0, 0, 0, 0, loc)
+		to := time.Date(2026, 4, 1, 0, 0, 0, 0, loc)
+		w := resolve(t, utc(2026, 4, 2, 0, 0), loc, WindowCustom, from, to)
+		if got := w.Days(loc); got != 31 {
+			t.Errorf("Days() = %v, want 31 (not 30 + 23/24)", got)
 		}
 	})
 }

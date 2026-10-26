@@ -122,7 +122,7 @@ func (s *Server) planFor(ctx context.Context, from, to time.Time) (tariffPlan, e
 	}
 
 	plan := tariffPlan{
-		standing:       energy.StandingChargeAcross(segments),
+		standing:       energy.StandingChargeAcross(segments, s.loc()),
 		standingSource: standingSourceConfig,
 	}
 
@@ -331,5 +331,5 @@ func (s *Server) archivedStandingCharge(ctx context.Context, code string, from, 
 		// archive is an improvement on the configured figure, not a dependency of it.
 		return 0, false
 	}
-	return prices.NewSchedule(charges).ChargeOver(from.UTC(), to.UTC())
+	return prices.NewSchedule(charges).ChargeOver(from.UTC(), to.UTC(), s.loc())
 }

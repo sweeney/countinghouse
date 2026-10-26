@@ -72,7 +72,7 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	days := energy.WindowDays(win)
+	days := energy.WindowDays(win, s.loc())
 	alts := make([]energy.Alternative, 0, len(specs))
 	for _, spec := range specs {
 		alt, ok := s.alternativeFor(w, spec, win, plan, actual, days)

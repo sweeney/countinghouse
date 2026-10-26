@@ -154,7 +154,7 @@ func TestAssembleBill(t *testing.T) {
 			// multiplication happens here, before assembly.
 			PriceFlat(tc.devices, realTariff)
 			bill := AssembleBill(tc.window, tc.devices, tc.meterKWh, tc.meterPresent, BillPricing{
-				StandingCharge: StandingChargeFor(tc.window.Days(), realTariff),
+				StandingCharge: StandingChargeFor(tc.window.Days(time.UTC), realTariff),
 				Attribution:    AttributionFlatRate,
 			})
 
@@ -218,7 +218,7 @@ func TestAssembleBill_NoMeter(t *testing.T) {
 	devices := []DeviceCost{{DeviceID: "a", KWh: 4.2}}
 	PriceFlat(devices, realTariff)
 	bill := AssembleBill(win, devices, 0, false, BillPricing{
-		StandingCharge: StandingChargeFor(win.Days(), realTariff),
+		StandingCharge: StandingChargeFor(win.Days(time.UTC), realTariff),
 		Attribution:    AttributionFlatRate,
 	})
 

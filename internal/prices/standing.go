@@ -5,6 +5,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/sweeney/countinghouse/internal/calendar"
 	"github.com/sweeney/countinghouse/internal/octopus"
 )
 
@@ -134,10 +135,22 @@ func (s Schedule) at(t time.Time) (DailyCharge, bool) {
 // ChargeOver returns the VAT-inclusive GBP standing charge for [from, to),
 // apportioned across every rate in force during it.
 //
-// Elapsed time, not calendar days: a window spanning a DST changeover lasted 23
-// or 25 hours and is charged for what it actually lasted, exactly as
-// config.Segment.Days() does.
-func (s Schedule) ChargeOver(from, to time.Time) (float64, bool) {
+// Calendar days, not elapsed time (issue #56). A standing charge is a price per
+// calendar day of supply, so a whole local day is charged as one day whether it
+// lasted 23, 24 or 25 hours — which is how the supplier bills it. A part day is
+// pro rata against the length of the day it is part of. loc is the zone whose
+// calendar defines "a day" (the house zone, Europe/London in prod); from and to
+// may carry any Location.
+//
+// Each charge period's share is measured with calendar.Days, the same function
+// config.Segment.Days uses, so the archive path and the configured-tariff path
+// cannot disagree about what a day is. calendar.Days is additive, so a charge
+// change landing mid-day splits that day between the two rates and the shares
+// still sum to exactly one day.
+//
+// Previously this was stop.Sub(cursor).Hours()/24, deliberately — "charged for
+// what it actually lasted" — which billed 25 Oct 2026 at 25/24 of a day.
+func (s Schedule) ChargeOver(from, to time.Time, loc *time.Location) (float64, bool) {
 	if !to.After(from) {
 		return 0, false
 	}
@@ -156,7 +169,8 @@ func (s Schedule) ChargeOver(from, to time.Time) (float64, bool) {
 		}
 		// at() guarantees ValidFrom <= cursor < ValidTo, so stop is strictly after
 		// cursor and this terminates.
-		days := stop.Sub(cursor).Hours() / 24
+		// Calendar days in loc, NOT stop.Sub(cursor)/24h: see the doc comment.
+		days := calendar.Days(cursor, stop, loc)
 		total += days * c.IncVATPence / 100
 		cursor = stop
 	}

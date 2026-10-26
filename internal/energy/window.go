@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/sweeney/countinghouse/internal/calendar"
 )
 
 // Window labels returned by ResolveWindow.
@@ -129,16 +131,17 @@ func resolveRolling(now time.Time, loc *time.Location, spec string) (Window, boo
 	}
 }
 
-// Days returns the window length in days, computed as the real elapsed duration
-// (Stop - Start) divided by 24 hours. This is FRACTIONAL: period-to-date
-// windows (today/week/month) end at "now" and so are partial days. Because the
-// duration is wall-clock elapsed time, a London day that spans a DST change
-// counts as 23h/24 or 25h/24 of a day, which is the physically correct number
-// of days the standing charge applied for.
+// Days returns how many calendar days of supply the window covers in loc — the
+// multiplier for a per-day standing charge. See calendar.Days for the
+// definition.
 //
-// How this should be consumed for standing charge is left to the cost
-// milestone: it decides any rounding/ceiling policy (e.g. whether a partial day
-// is billed as a whole day).
-func (w Window) Days() float64 {
-	return w.Stop.Sub(w.Start).Hours() / 24
+// It is FRACTIONAL: period-to-date windows (today/week/month) end at "now" and
+// so finish on a part day, which is pro rata (StandingChargeFor documents the
+// no-rounding policy). A part day is measured against the length of ITS OWN
+// day, and a whole local day counts exactly 1 even across a DST change: 25 Oct
+// 2026 in London is 25 hours and one day, not 25/24 of one (issue #56). This
+// used to be elapsed/24h — "the physically correct number of days" — which is
+// not the number a supplier bills.
+func (w Window) Days(loc *time.Location) float64 {
+	return calendar.Days(w.Start, w.Stop, loc)
 }

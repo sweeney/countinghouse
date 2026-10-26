@@ -112,7 +112,7 @@ func TestTwoStandingChargesForOneStartAreRefused(t *testing.T) {
 	if _, ok := s.PencePerDayAt(from.Add(time.Hour)); ok {
 		t.Error("resolved a standing charge that has two different values")
 	}
-	if _, ok := s.ChargeOver(from, end); ok {
+	if _, ok := s.ChargeOver(from, end, time.UTC); ok {
 		t.Error("ChargeOver must refuse a window it cannot price rather than guess")
 	}
 }

@@ -1,6 +1,10 @@
 package energy
 
-import "github.com/sweeney/countinghouse/internal/config"
+import (
+	"time"
+
+	"github.com/sweeney/countinghouse/internal/config"
+)
 
 // Attribution names how the energy cost in a response was derived.
 //
@@ -198,9 +202,11 @@ func DeviceCostFor(kwh float64, t config.Tariff) float64 {
 // the given fractional days at tariff t: days × daily_standing_charge ×
 // (1 + vat_rate).
 //
-// Rounding policy: days is used as-is (the window's fractional Days()). A
+// Rounding policy: days is used as-is (the window's fractional Days(loc), which
+// counts calendar days — a 25-hour clock-change day is 1, issue #56). A
 // period-to-date window ends at "now" and so covers a partial day; that partial
-// day is billed proportionally rather than rounded up to a whole day. This keeps
+// day is billed proportionally, against its own day's length, rather than
+// rounded up to a whole day. This keeps
 // the running total monotonic and matches how the meter accrues — no rounding or
 // ceiling is applied at this layer.
 func StandingChargeFor(days float64, t config.Tariff) float64 {
@@ -212,12 +218,14 @@ func StandingChargeFor(days float64, t config.Tariff) float64 {
 //
 // A window spanning a tariff change is not a corner case — the first bill after a
 // switchover necessarily is one — and the two sides can differ in both numbers.
-// Because PeriodsBetween tiles the window exactly, the apportioned parts add up to
-// the window with no gap and no double charge.
-func StandingChargeAcross(segments []config.Segment) float64 {
+// Because PeriodsBetween tiles the window exactly, and Segment.Days(loc) is
+// additive (calendar.Days), the apportioned parts add up to the window with no
+// gap and no double charge — including when a boundary falls inside a 23- or
+// 25-hour clock-change day. loc is the zone whose calendar defines a day.
+func StandingChargeAcross(segments []config.Segment, loc *time.Location) float64 {
 	var total float64
 	for _, seg := range segments {
-		total += StandingChargeFor(seg.Days(), seg.Tariff)
+		total += StandingChargeFor(seg.Days(loc), seg.Tariff)
 	}
 	return total
 }

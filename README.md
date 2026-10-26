@@ -962,6 +962,26 @@ days, pro rata for a partial day — and is charged **once, on the bill, never s
 across devices**: no device causes a standing charge, so apportioning it would invent a
 number that reads like a measurement.
 
+**A day is a calendar day, not 24 hours.** A UK standing charge is a price per calendar
+day of supply, so every whole local day (in `house.timezone`) is charged as
+exactly one day — including the clock-change days, which in Europe/London last 25 hours
+(autumn) and 23 hours (spring). A part day is pro rata against **its own** day's length:
+
+| span (Europe/London) | elapsed | days charged |
+|---|---|---|
+| Sun 25 Oct 2026, whole day (clocks go back) | 25h | **1** |
+| Sun 29 Mar 2026, whole day (clocks go forward) | 23h | **1** |
+| 25 Oct 2026, first 12 elapsed hours | 12h | 12/25 |
+| 25 Oct 2026 00:00 local → 23:00Z | 24h | 24/25 (an hour of the day is still to come) |
+| Sat 24 → Mon 26 Oct 2026, whole days | 49h | 2 |
+| Mon 26 Oct 2026, 00:00 → 12:00 | 12h | 0.5 |
+
+This matches the supplier's bill. Until issue #56 countinghouse divided elapsed hours by
+24, billing 25 Oct 2026 at £0.6163 (25/24 × £0.5916) where Octopus billed £0.5916 — about
+2.5p high for any October window and 2.5p low for any March one. The archived and
+configured standing-charge paths, and `/compare`'s `days`, all share one implementation
+(`internal/calendar`), so they cannot disagree about what a day is.
+
 Two fields exist because a cost on its own is not interpretable:
 
 - **`effective_rate`** — VAT-inclusive GBP/kWh actually paid, `cost ÷ priced kWh`. On the
@@ -1278,7 +1298,9 @@ statutory zero rate now in force makes 5% a poor guess besides.
 The baseline runs through the same path `/bill` runs, so a comparison and a bill cannot
 disagree about what actually happened. Standing charges are pro-rated on **fractional**
 days, so a part-day window does not flatter or penalise an alternative for a reason
-unrelated to the tariff. A window spanning a tariff change is fine here, as on `/bill`:
+unrelated to the tariff. `days` counts **calendar** days exactly as `/bill` does — a
+25-hour clock-change day is one day, not 25/24 (see [How spend is calculated](#how-spend-is-calculated)
+above). A window spanning a tariff change is fine here, as on `/bill`:
 a cost can be summed across tariffs where a curve cannot.
 
 ### Plausibility of configured rates
