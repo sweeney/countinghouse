@@ -916,14 +916,27 @@ func rejectionReasons(rejections []prices.Rejection) string {
 // A consistent implied rate across several is the supplier applying a different
 // rate from the one configured, which is a statutory event somebody has to act
 // on. Six is a quarter of a publication's worth of half hours: high enough that
-// no plausible per-slot glitch reaches it, low enough that a standing-charge
-// batch (which is a handful of rows at most) still can.
+// no plausible per-slot glitch reaches it.
+//
+// It is the threshold for HALF HOURS only. A standing-charge batch is a handful
+// of rows, and the #51 shape is a single open-ended charge restated in place, so
+// standing charges alert on one (standingDriftMinCharges).
 const vatDriftMinSlots = 6
 
+// standingDriftMinCharges is vatDriftMinSlots for standing charges. One is
+// enough: the per-slot noise floor has no counterpart in a figure the supplier
+// sets about once a year, and a charge is only judged at the VAT in force when
+// it was retrieved (see prices.standingVATCheckedAt), so a charge that has been
+// right since it was restated does not keep tripping it.
+const standingDriftMinCharges = 1
+
 // vatDriftEpsilon is how close two implied rates must be to count as the same
-// rate. The same tolerance /bill uses to decide whether an archived standing
-// charge's inc-VAT figure matches the agreement, so the alert and the bill agree
-// on what counts as disagreement.
+// rate. It is the rate tolerance /bill uses to decide whether a standing charge's
+// carried-back inc-VAT figure is believable for a day the archive never saw, so
+// an implied rate the bill would regross is one this alert counts as drift.
+//
+// It is not the per-row gate: Gate B warns at an absolute VATEpsilonPence, much
+// tighter, and a warning within this tolerance is discarded here as rounding.
 const vatDriftEpsilon = prices.VATRateTolerance
 
 // vatDriftFinding is a systematic disagreement between the supplier's VAT and ours.
@@ -962,6 +975,11 @@ func (d vatDriftFinding) singleConfigured() bool {
 // is rounding — it cleared the per-slot pence tolerance, not the rate one — and is
 // not evidence of a rate change, so it does not count toward the threshold.
 func vatDrift(warnings []prices.Warning) (vatDriftFinding, bool) {
+	return vatDriftAtLeast(warnings, vatDriftMinSlots)
+}
+
+// vatDriftAtLeast is vatDrift with the threshold given.
+func vatDriftAtLeast(warnings []prices.Warning, minSlots int) (vatDriftFinding, bool) {
 	var implied, expected []float64
 	for _, w := range warnings {
 		if w.Kind != prices.WarnVATMismatch || w.ImpliedVATRate == nil || w.ExpectedVATRate == nil {
@@ -973,7 +991,7 @@ func vatDrift(warnings []prices.Warning) (vatDriftFinding, bool) {
 		implied = append(implied, *w.ImpliedVATRate)
 		expected = append(expected, *w.ExpectedVATRate)
 	}
-	if len(implied) < vatDriftMinSlots {
+	if len(implied) < minSlots || len(implied) == 0 {
 		return vatDriftFinding{}, false
 	}
 	for _, v := range implied {
@@ -1089,7 +1107,7 @@ func (c *Collector) SyncStandingCharges(ctx context.Context) (prices.PutResult, 
 			Detail:   map[string]any{"tariff_code": c.tariff.Code, "count": n},
 		})
 	}
-	if drift, ok := vatDrift(v.Warnings); ok {
+	if drift, ok := vatDriftAtLeast(v.Warnings, standingDriftMinCharges); ok {
 		implied, configured := drift.describe()
 		c.alert(ctx, notify.Event{
 			Kind: notify.KindAgreementDrift, Severity: notify.SeverityError,

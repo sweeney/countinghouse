@@ -119,10 +119,10 @@ type Bill struct {
 	HouseholdTotal      *float64 `json:"household_total,omitempty"`
 
 	// StandingChargeSource is "archive" when the standing charge is the supplier's
-	// own VAT-inclusive daily figure, "archive_ex_vat" when some days used the
-	// supplier's ex-VAT figure at the agreement's VAT rate because its inc-VAT
-	// figure implied another (#51), and "config" when it is the configured ex-VAT
-	// rate grossed up by the configured VAT rate.
+	// own VAT-inclusive daily figure, "archive_ex_vat" when some days the archive
+	// never saw a figure for used the supplier's ex-VAT figure at the agreement's
+	// VAT rate because the inc-VAT figure held implied another (#51), and "config"
+	// when it is the configured ex-VAT rate grossed up by the configured VAT rate.
 	//
 	// On the wire because the two have different failure modes. The archived figure
 	// is what the supplier bills. The configured one is right only while somebody

@@ -2255,10 +2255,11 @@ components:
             VAT-inclusive daily charge, so a VAT change arrives in it rather than
             having to be applied — the same basis as energy. `archive_ex_vat` is the
             supplier's archived EX-VAT daily charge grossed up by the agreement's
-            vat_rate, used for days where the supplier's inc-VAT figure implies a
-            different rate (within 0.05 percentage points) than the agreement
-            covering them. The supplier restates a standing charge in place, so a
-            VAT change can arrive backdated over days it never applied to. `config` is the
+            vat_rate, used for days before the archive first saw the charge where
+            the inc-VAT figure it holds implies a different rate (within 0.05
+            percentage points) than the agreement covering them. Days the archive
+            did see are billed at the supplier's figure for that day, taken from
+            the restatement log when the charge has since been restated in place. `config` is the
             configured ex-VAT rate grossed up by the configured vat_rate, which is
             correct only while that rate is kept current; it is the fallback when no
             standing charge is archived for the whole window, or when the window

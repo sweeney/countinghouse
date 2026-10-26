@@ -325,14 +325,20 @@ func (s *SQLiteStore) Restatements(ctx context.Context, tariffCode string, limit
 	if limit <= 0 {
 		limit = 100
 	}
+	return s.restatements(ctx, unitPriceRelation, tariffCode, "DESC", limit)
+}
+
+// restatements reads one relation's restatement log in detection order; a
+// negative limit is SQLite's "no limit".
+func (s *SQLiteStore) restatements(ctx context.Context, rel relation, tariffCode, order string, limit int) ([]Restatement, error) {
 	rows, err := s.db.DB().QueryContext(ctx, `
 		SELECT tariff_code, payment_method, valid_from,
 		       old_exc_vat_pence, old_inc_vat_pence,
 		       new_exc_vat_pence, new_inc_vat_pence,
 		       previous_retrieved_at, detected_at
-		  FROM unit_price_restatement
+		  FROM `+rel.restatement+`
 		 WHERE tariff_code = ?
-		 ORDER BY detected_at DESC, id DESC
+		 ORDER BY detected_at `+order+`, id `+order+`
 		 LIMIT ?`, tariffCode, limit)
 	if err != nil {
 		return nil, fmt.Errorf("prices: restatements query: %w", err)
@@ -370,15 +376,17 @@ func (s *SQLiteStore) Restatements(ctx context.Context, tariffCode string, limit
 }
 
 // scanSlot reads one unit_price row.
-func scanSlot(rows *sql.Rows) (Slot, error) {
+// scanSlot reads the seven columns every slot query selects first, then any
+// extra columns into extra.
+func scanSlot(rows *sql.Rows, extra ...any) (Slot, error) {
 	var (
 		sl        Slot
 		validFrom string
 		validTo   sql.NullString
 		retrieved string
 	)
-	if err := rows.Scan(&sl.TariffCode, &sl.PaymentMethod, &validFrom, &validTo,
-		&sl.ExcVATPence, &sl.IncVATPence, &retrieved); err != nil {
+	if err := rows.Scan(append([]any{&sl.TariffCode, &sl.PaymentMethod, &validFrom, &validTo,
+		&sl.ExcVATPence, &sl.IncVATPence, &retrieved}, extra...)...); err != nil {
 		return Slot{}, fmt.Errorf("prices: scan slot: %w", err)
 	}
 	var err error
@@ -527,6 +535,70 @@ func (s *SQLiteStore) StandingCharges(ctx context.Context, tariffCode string, fr
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("prices: standing-charge rows: %w", err)
+	}
+	return out, nil
+}
+
+// StandingChargeHistories returns the charges overlapping [from, to), as
+// StandingCharges does, each with when it was first seen and its restatements,
+// oldest first. It is what a bill needs to charge each day at the figure the
+// supplier was publishing for it; see NewScheduleFromHistory.
+func (s *SQLiteStore) StandingChargeHistories(ctx context.Context, tariffCode string, from, to time.Time) ([]ChargeHistory, error) {
+	if !to.After(from) {
+		return nil, fmt.Errorf("prices: standing-charge range stop (%s) must be after start (%s)",
+			to.Format(time.RFC3339), from.Format(time.RFC3339))
+	}
+
+	rows, err := s.db.DB().QueryContext(ctx, `
+		SELECT tariff_code, payment_method, valid_from, valid_to,
+		       exc_vat_pence, inc_vat_pence, retrieved_at, first_seen_at
+		  FROM standing_charge
+		 WHERE tariff_code = ?
+		   AND valid_from < ?
+		   AND (valid_to IS NULL OR valid_to > ?)
+		 ORDER BY valid_from ASC, payment_method ASC`,
+		tariffCode, to.UTC().Format(timeLayout), from.UTC().Format(timeLayout))
+	if err != nil {
+		return nil, fmt.Errorf("prices: standing-charge history query: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var out []ChargeHistory
+	byKey := map[Key]int{}
+	for rows.Next() {
+		var firstSeen sql.NullString
+		r, err := scanSlot(rows, &firstSeen)
+		if err != nil {
+			return nil, err
+		}
+		h := ChargeHistory{Charge: dailyChargeFromRow(r)}
+		if firstSeen.Valid {
+			if h.FirstSeenAt, err = time.Parse(timeLayout, firstSeen.String); err != nil {
+				return nil, fmt.Errorf("prices: unparseable stored first_seen_at %q: %w", firstSeen.String, err)
+			}
+		}
+		byKey[chargeKey(h.Charge)] = len(out)
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("prices: standing-charge history rows: %w", err)
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+
+	// A tariff has a handful of standing-charge restatements in its life, so the
+	// whole log is read and matched up here rather than joined per row.
+	log, err := s.restatements(ctx, standingChargeRelation, tariffCode, "ASC", -1)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range log {
+		k := r.Key
+		k.ValidFrom = k.ValidFrom.UTC()
+		if i, ok := byKey[k]; ok {
+			out[i].Restatements = append(out[i].Restatements, r)
+		}
 	}
 	return out, nil
 }

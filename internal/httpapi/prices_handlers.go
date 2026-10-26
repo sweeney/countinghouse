@@ -28,13 +28,13 @@ type PriceReader interface {
 }
 
 // StandingChargeReader is the optional half of a PriceReader that can also serve
-// archived standing charges.
+// archived standing charges, with what the archive saw of each over time.
 //
 // Optional and detected by type assertion, so an instance without one — or a test
 // double that has not been taught about them — falls back to the configured rate,
 // which is exactly what every instance did before these were archived.
 type StandingChargeReader interface {
-	StandingCharges(ctx context.Context, tariffCode string, from, to time.Time) ([]prices.DailyCharge, error)
+	StandingChargeHistories(ctx context.Context, tariffCode string, from, to time.Time) ([]prices.ChargeHistory, error)
 }
 
 const (

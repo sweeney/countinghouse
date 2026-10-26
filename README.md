@@ -515,32 +515,52 @@ midnights zero-rates two half hours of 30 September and un-zero-rates two of 31 
 
 **Author the third block now, not in March.** The return to 5% is the half of this
 change nobody is watching for, and its failure mode is a bill under-charging VAT rather
-than a loud one.
+than a loud one. An instance with a standing-charge archive bills from the supplier's
+figures and is out by at most the day of the change (see below), but one without an
+archive bills every standing charge from config, at 0%, until somebody notices.
 
 **What happens if you forget.** Nothing is lost, and energy is still right. The archive
 keeps filling: the VAT check is Gate B, so every slot is stored and flagged
 `vat_mismatch`. Energy is billed from the supplier's own inc-VAT figure for each half
 hour, so the statutory change arrives in the data rather than having to be applied from
-here. The **standing charge is the exception**: it is billed at the agreement's
-`vat_rate` wherever the supplier's figure disagrees with it (see below), so until the
-split is authored, days after the change carry the old rate on the standing charge,
-about 3p a day. The collector says so: when `vat_rate` disagrees with the supplier
-consistently across a batch, it raises an `agreement_drift` alert naming the rate the supplier is actually
-charging — which is the number to paste into the document. "What configuration says"
+here. The standing charge is too, from the supplier's figure for each day as the archive
+saw it (see below); config's `vat_rate` only decides days the archive never saw a figure
+for, and where between two daily sweeps a change fell. The collector says so, in two
+places, both raising an `agreement_drift` alert naming the rate the supplier is actually
+charging — which is the number to paste into the document:
+
+- **energy:** the price poll, when `vat_rate` disagrees with the supplier consistently
+  across at least six half hours of a batch;
+- **standing charge:** the daily sweep, on a **single** disagreeing charge. A batch is a
+  handful of rows, and the case that matters (#51) is one open-ended charge restated in
+  place. A charge is judged at the VAT in force when it was fetched, not at its start,
+  so the current one, valid from 2024, is checked against today's agreement.
+ "What configuration says"
 in that alert is the rate each slot was actually checked against (the agreement covering
 it): `configured_vat_rate` when the batch has one, or `configured_vat_rate_min`/`_max` and
 a range in the summary when it spans agreements with different rates. An implied rate
 within 0.05 percentage points of the configured one is treated as supplier rounding and
 raises nothing.
 
-**Why the standing charge follows the agreement.** The supplier restates a standing
+**Why the standing charge reads the restatement log.** The supplier restates a standing
 charge **in place**. On 1 Oct 2026 Octopus rewrote the one Agile standing charge, valid
-from 2024 and open-ended, to its zero-rated figure (inc == exc). Billed as-is, every day
-before the cut lost its VAT (#51). The ex-VAT figure did not change, and the agreement
-says what VAT applied on the day, so `/bill` charges each agreement's days at the
-supplier's inc-VAT figure where it implies that agreement's `vat_rate` (within the same
-0.05 percentage points as the alert), and at the supplier's **ex-VAT** figure grossed up
-by `vat_rate` where it does not. `standing_charge_source` is then `archive_ex_vat`.
+from 2024 and open-ended, to its zero-rated figure (inc == exc). Billed from the row as
+it now stands, every day before the cut lost its VAT (#51). The 5% figure survives in
+the restatement log, so `/bill` charges each day at the figure the supplier was
+publishing **for that day**:
+
+- a day after the archive first saw the charge, and outside any restatement, is billed
+  at the figure seen then, as-is, whatever config says;
+- the stretch between the last sighting of an old figure and the first of a new one
+  (the daily sweeps are a day apart) gets whichever of the two the covering agreement's
+  `vat_rate` agrees with, which puts a VAT change at the agreement's midnight;
+- a day before the archive first saw the charge (an archive rebuilt from Octopus, say)
+  is billed at the figure held where it implies the agreement's `vat_rate` (within the
+  same 0.05 percentage points as the alert), and at its **ex-VAT** figure grossed up by
+  `vat_rate` where it does not. `standing_charge_source` is then `archive_ex_vat`.
+
+A restatement that moves the ex-VAT figure is a correction rather than a VAT change. It
+replaces the old figure for every day, which is then judged as never seen.
 
 A window with **no archived standing charge** (a fresh deployment, before the first daily
 sweep) uses config's `daily_standing_charge` instead, with `standing_charge_source:
@@ -569,12 +589,13 @@ would be ~288 requests a day to learn nothing.
 **last number in a bill still grossed up from configuration**, and therefore the last one
 a stale `vat_rate` could silently get wrong, on a service that already prices energy from
 the supplier's own inc-VAT column. Archiving it makes both sides of a bill come from the
-same place, and demotes `vat_rate` to a checkable expectation everywhere.
+same place, and demotes `vat_rate` to a checkable expectation everywhere the archive saw
+the supplier's figure. The exception is days it never did; see the VAT runbook.
 
 `/bill` reports `standing_charge_source`: `archive` when it used the supplier's figure,
-`archive_ex_vat` when it used the supplier's ex-VAT figure at the agreement's `vat_rate`
-for days where the supplier's inc-VAT figure implied a different rate (a restatement
-carried back over days it does not apply to, #51), and `config` when it fell back. It falls back — whole, never partly — when no archived charge
+`archive_ex_vat` when, for days the archive never saw a figure for, it used the
+supplier's ex-VAT figure at the agreement's `vat_rate` because the inc-VAT figure held
+implied a different rate (#51), and `config` when it fell back. It falls back — whole, never partly — when no archived charge
 covers the entire window, when the window spans a genuine tariff change (two codes, two
 charges to reconcile; config already segments that correctly), or when the read fails.
 A partial total would look like a correct but cheap bill, which is the failure the whole

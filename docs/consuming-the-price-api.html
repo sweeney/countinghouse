@@ -981,9 +981,10 @@ setInterval(moveNowMarker, <span class="n">30_000</span>);</pre>
       <strong><code>archive</code></strong> is the supplier's own VAT-inclusive figure, so a
       VAT change arrives in it the same way it arrives in energy prices.
       <strong><code>archive_ex_vat</code></strong> is the supplier's ex-VAT figure grossed
-      up by the agreement's VAT rate, for days where the supplier's inc-VAT figure implies
-      a different rate. The supplier restates a standing charge in place, so a VAT change
-      can arrive backdated over days it never applied to.
+      up by the agreement's VAT rate, for days before the archive first saw the charge
+      whose held inc-VAT figure implies a different rate. The supplier restates a
+      standing charge in place, carrying a VAT change back over days it never applied
+      to; days the archive saw are billed at the figure it saw for them.
       <strong><code>config</code></strong> is the configured ex-VAT rate grossed up by the
       configured VAT rate — correct only while somebody keeps that rate current, and the
       fallback when no archived charge covers the whole window (a fresh deployment, before
