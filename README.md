@@ -524,7 +524,12 @@ billed from the supplier's own inc-VAT figures, so the statutory change arrives 
 data rather than having to be applied from here. `vat_rate` is now purely an
 **expectation**: when it disagrees with the supplier consistently across a batch, the
 collector raises an `agreement_drift` alert naming the rate the supplier is actually
-charging — which is the number to paste into the document.
+charging — which is the number to paste into the document. "What configuration says"
+in that alert is the rate each slot was actually checked against (the agreement covering
+it): `configured_vat_rate` when the batch has one, or `configured_vat_rate_min`/`_max` and
+a range in the summary when it spans agreements with different rates. An implied rate
+within 0.05 percentage points of the configured one is treated as supplier rounding and
+raises nothing.
 
 The one case that still depends on config is a window with **no archived standing
 charge** (a fresh deployment, before the first daily sweep). `/bill` says which it used
