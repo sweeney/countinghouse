@@ -177,3 +177,57 @@ func TestAgreementDriftAcrossAgreementsDoesNotClaimOneConfiguredRate(t *testing.
 			e.Detail["configured_vat_rate"])
 	}
 }
+
+// The legacy scalar still works on its own: a collector given VATRate and no
+// VATRateAt checks every slot against it, and the alert names it, because the
+// warning carries whichever rate the check actually used. The other harnesses set
+// both fields, so VATRateAt always wins and this path was otherwise untested.
+func TestAgreementDriftNamesTheLegacyRateWhenItIsTheOneInUse(t *testing.T) {
+	f := zeroRatedFetcher(ts(t, "2026-10-22T23:00:00Z"), ts(t, "2026-10-23T23:00:00Z"))
+	store, err := prices.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() }) //nolint:errcheck
+	noti := &recordingNotifier{}
+	c, err := New(Options{
+		Fetcher: f, Store: store, Notifier: noti,
+		Clock:    testutil.NewFakeClock(ts(t, "2026-10-23T16:10:00Z")),
+		Location: london(t), TariffCode: testTariffCode,
+		VATRate: 0.05, // and no VATRateAt
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	evs := driftEvents(&harness{noti: noti})
+	if len(evs) != 1 {
+		t.Fatalf("want exactly one agreement_drift, got %d (%v)", len(evs), noti.kinds())
+	}
+	if got, ok := evs[0].Detail["configured_vat_rate"].(float64); !ok || got != 0.05 {
+		t.Errorf("configured_vat_rate = %v, want the legacy 0.05 in use", evs[0].Detail["configured_vat_rate"])
+	}
+}
+
+// A ZERO legacy rate with no VATRateAt is "unset", not "0%": validation has no
+// opinion and checks nothing, so a zero-rated supplier raises nothing. This is the
+// half of #52 that Options.VATRate's doc used to get wrong ("taken literally — 0 is
+// a legal VAT rate"), and the reason the alert must never read that field.
+func TestZeroLegacyVATRateMeansNoCheck(t *testing.T) {
+	f := zeroRatedFetcher(ts(t, "2026-10-22T23:00:00Z"), ts(t, "2026-10-23T23:00:00Z"))
+	h := newProductionWiredHarness(t, ts(t, "2026-10-23T16:10:00Z"), f, nil)
+	res, err := h.c.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range res.Warnings {
+		if w.Kind == prices.WarnVATMismatch {
+			t.Fatalf("an unset VAT rate must not check anything, got %+v", w)
+		}
+	}
+	if evs := driftEvents(h); len(evs) != 0 {
+		t.Errorf("no configured rate, yet drift raised: %q", evs[0].Summary)
+	}
+}

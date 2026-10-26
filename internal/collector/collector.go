@@ -120,8 +120,17 @@ type Options struct {
 	// while /healthz showed fetches succeeding.
 	VATRateAt func(time.Time) (float64, bool)
 
-	// VATRate is the rate the validation gate checks the inc/exc relationship
-	// against. Taken literally — 0 is a legal VAT rate.
+	// VATRate is the legacy scalar the validation gate checks the inc/exc
+	// relationship against, consulted ONLY when VATRateAt is nil.
+	//
+	// Zero means UNSET, not 0%: with no VATRateAt and VATRate 0, validation has no
+	// opinion and checks nothing (prices.ValidateOptions.expectedVATAt). A
+	// genuinely 0% agreement has to come through VATRateAt, which can say so.
+	// Production sets VATRateAt only, so this field is 0 there — which is why
+	// nothing may read it as "what configuration says": the agreement_drift alert
+	// once did, and paged "VAT at 0.00%, but configuration says 0.00%" while the
+	// agreement said 5% (#52). The rate a slot was checked against travels on its
+	// warning (prices.Warning.ExpectedVATRate) instead.
 	VATRate float64
 
 	Logger *slog.Logger
