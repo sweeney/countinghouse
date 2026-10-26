@@ -20,7 +20,7 @@ func steadyPowerSim(t *testing.T) (*PowerSim, *time.Location) {
 	}
 	// 1 kW, sampled every minute from 12:00 to 18:00 — a UPS's steady load at a
 	// realistic cadence.
-	return NewPowerSim(loc).AddSteady("network-ups",
+	return NewPowerSim().AddSteady("network-ups",
 		time.Date(2026, 6, 11, 12, 0, 0, 0, loc),
 		time.Date(2026, 6, 11, 18, 0, 0, 0, loc),
 		time.Minute, 1000), loc
@@ -129,7 +129,7 @@ func TestPowerSimIntegralOmitsWindowsWithNoSample(t *testing.T) {
 	}
 	start := time.Date(2026, 6, 11, 14, 0, 0, 0, loc)
 	stop := time.Date(2026, 6, 11, 16, 0, 0, 0, loc)
-	sim := NewPowerSim(loc).AddSteadyWithGaps("network-ups", start, stop, time.Minute, 1000,
+	sim := NewPowerSim().AddSteadyWithGaps("network-ups", start, stop, time.Minute, 1000,
 		[2]time.Time{time.Date(2026, 6, 11, 14, 30, 0, 0, loc), time.Date(2026, 6, 11, 15, 0, 0, 0, loc)})
 
 	rows, err := sim.Answer(BuildPowerIntegralSeriesFlux("b", []string{"network-ups"}, start, stop, "30m", "Europe/London"))
@@ -156,7 +156,7 @@ func TestPowerSimMeanEmitsNullForAnEmptyWindow(t *testing.T) {
 	}
 	start := time.Date(2026, 6, 11, 14, 0, 0, 0, loc)
 	stop := time.Date(2026, 6, 11, 16, 0, 0, 0, loc)
-	sim := NewPowerSim(loc).AddSteadyWithGaps("winefridge", start, stop, time.Minute, 52,
+	sim := NewPowerSim().AddSteadyWithGaps("winefridge", start, stop, time.Minute, 52,
 		[2]time.Time{time.Date(2026, 6, 11, 14, 30, 0, 0, loc), time.Date(2026, 6, 11, 15, 0, 0, 0, loc)})
 
 	rows, err := sim.Answer(BuildPowerMeanSeriesFlux("b", []string{"winefridge"}, start, stop, "30m", "Europe/London"))
@@ -194,7 +194,7 @@ func TestPowerSimMeanAndIntegralDifferOnUnevenSampling(t *testing.T) {
 
 	// Three samples in the first three minutes: 1000 W, then 100 W for the rest.
 	at := []time.Time{start, start.Add(time.Minute), start.Add(2 * time.Minute)}
-	sim := NewPowerSim(loc).AddSamples("network-ups", at, []float64{1000, 100, 100})
+	sim := NewPowerSim().AddSamples("network-ups", at, []float64{1000, 100, 100})
 
 	meanRows, err := sim.Answer(BuildPowerMeanSeriesFlux("b", []string{"network-ups"}, start, stop, "30m", "Europe/London"))
 	if err != nil {
@@ -267,7 +267,7 @@ func TestPowerSimDivergesWhenPowerStepsAcrossABoundary(t *testing.T) {
 				w = append(w, p2)
 			}
 		}
-		sim := NewPowerSim(loc).AddSamples("network-ups", at, w)
+		sim := NewPowerSim().AddSamples("network-ups", at, w)
 
 		whole, err := sim.Answer(BuildIntegralFlux("b", "network-ups", start, stop))
 		if err != nil {
@@ -378,5 +378,23 @@ func TestPowerSimAddSamplesRejectsMismatchedLengths(t *testing.T) {
 			t.Error("mismatched slice lengths must panic at the call site")
 		}
 	}()
-	NewPowerSim(time.UTC).AddSamples("network-ups", []time.Time{time.Now()}, nil)
+	NewPowerSim().AddSamples("network-ups", []time.Time{time.Now()}, nil)
+}
+
+// PowerSim refuses a local sub-day window for the same reason CounterSim does
+// (issue #49): prod Influx stretches it across the autumn repeated hour, and a
+// sim that quietly stepped it by a fixed duration would agree with the bug.
+func TestPowerSimRefusesLocalSubDayWindows(t *testing.T) {
+	sim := NewPowerSim().AddSteady("ups",
+		time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 11, 18, 0, 0, 0, time.UTC), time.Minute, 100)
+	flux := `import "timezone"
+from(bucket: "b")
+  |> range(start: 2026-06-11T13:00:00Z, stop: 2026-06-11T15:00:00Z)
+  |> filter(fn: (r) => r._measurement == "device_power" and r._field == "power_w")
+  |> filter(fn: (r) => contains(value: r.device_id, set: ["ups"]))
+  |> aggregateWindow(every: 1h, fn: mean, timeSrc: "_start", location: timezone.location(name: "Europe/London"), createEmpty: true)`
+	if _, err := sim.Answer(flux); err == nil {
+		t.Error("a local sub-day window must be refused, not modelled with a fixed step")
+	}
 }

@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,19 +83,20 @@ func TestAgreementDriftDoesNotStopTheArchiveFilling(t *testing.T) {
 // vatDrift itself, where the judgement lives
 // ---------------------------------------------------------------------------
 
-func vatWarning(implied float64) prices.Warning {
+func vatWarning(implied, expected float64) prices.Warning {
 	v := implied
-	return prices.Warning{Kind: prices.WarnVATMismatch, ImpliedVATRate: &v}
+	e := expected
+	return prices.Warning{Kind: prices.WarnVATMismatch, ImpliedVATRate: &v, ExpectedVATRate: &e}
 }
 
 func TestVATDriftRequiresAConsistentRate(t *testing.T) {
 	// Slots disagreeing in DIFFERENT directions are a data problem, not a tax
 	// change. Paging for that would train somebody to ignore the page.
 	mixed := []prices.Warning{
-		vatWarning(0), vatWarning(0.05), vatWarning(0.20),
-		vatWarning(0), vatWarning(0.13), vatWarning(0.02),
+		vatWarning(0, 0.10), vatWarning(0.05, 0.10), vatWarning(0.20, 0.10),
+		vatWarning(0, 0.10), vatWarning(0.13, 0.10), vatWarning(0.02, 0.10),
 	}
-	if _, ok := vatDrift(mixed, 0.05); ok {
+	if _, ok := vatDrift(mixed); ok {
 		t.Error("inconsistent implied rates must not be reported as drift")
 	}
 }
@@ -102,14 +104,14 @@ func TestVATDriftRequiresAConsistentRate(t *testing.T) {
 func TestVATDriftNeedsEnoughSlotsToBeCredible(t *testing.T) {
 	var few []prices.Warning
 	for i := 0; i < vatDriftMinSlots-1; i++ {
-		few = append(few, vatWarning(0))
+		few = append(few, vatWarning(0, 0.10))
 	}
-	if _, ok := vatDrift(few, 0.05); ok {
+	if _, ok := vatDrift(few); ok {
 		t.Errorf("%d slots is noise, not a rate change", len(few))
 	}
 
-	few = append(few, vatWarning(0))
-	if _, ok := vatDrift(few, 0.05); !ok {
+	few = append(few, vatWarning(0, 0.10))
+	if _, ok := vatDrift(few); !ok {
 		t.Errorf("%d consistent slots should be reported", len(few))
 	}
 }
@@ -119,9 +121,9 @@ func TestVATDriftNeedsEnoughSlotsToBeCredible(t *testing.T) {
 func TestVATDriftToleratesRoundingInTheImpliedRate(t *testing.T) {
 	var w []prices.Warning
 	for i := 0; i < vatDriftMinSlots; i++ {
-		w = append(w, vatWarning(0.0500+float64(i)*1e-5))
+		w = append(w, vatWarning(0.0500+float64(i)*1e-5, 0.20))
 	}
-	if _, ok := vatDrift(w, 0.20); !ok {
+	if _, ok := vatDrift(w); !ok {
 		t.Error("rates differing by rounding noise should count as one rate")
 	}
 }
@@ -133,7 +135,59 @@ func TestVATDriftIgnoresWarningsWithNoImpliedRate(t *testing.T) {
 	for i := 0; i < vatDriftMinSlots; i++ {
 		w = append(w, prices.Warning{Kind: prices.WarnVATMismatch})
 	}
-	if _, ok := vatDrift(w, 0.05); ok {
+	if _, ok := vatDrift(w); ok {
 		t.Error("warnings carrying no implied rate must not raise drift")
+	}
+}
+
+// A warning carrying no expected rate cannot say what configuration disagrees
+// WITH, so it cannot support an alert naming "what configuration says".
+func TestVATDriftIgnoresWarningsWithNoExpectedRate(t *testing.T) {
+	var w []prices.Warning
+	for i := 0; i < vatDriftMinSlots; i++ {
+		v := 0.0
+		w = append(w, prices.Warning{Kind: prices.WarnVATMismatch, ImpliedVATRate: &v})
+	}
+	if _, ok := vatDrift(w); ok {
+		t.Error("warnings carrying no expected rate must not raise drift")
+	}
+}
+
+// The configured rate comes from the warnings, and an implied rate that matches
+// it to within vatDriftEpsilon is rounding rather than a rate change (#52).
+func TestVATDriftTakesConfiguredFromTheWarnings(t *testing.T) {
+	var w []prices.Warning
+	for i := 0; i < vatDriftMinSlots; i++ {
+		w = append(w, vatWarning(0, 0.05))
+	}
+	d, ok := vatDrift(w)
+	if !ok {
+		t.Fatal("0% against a configured 5% is drift")
+	}
+	if d.ConfiguredMin != 0.05 || d.ConfiguredMax != 0.05 {
+		t.Errorf("configured = [%v, %v], want 0.05", d.ConfiguredMin, d.ConfiguredMax)
+	}
+
+	var near []prices.Warning
+	for i := 0; i < vatDriftMinSlots; i++ {
+		near = append(near, vatWarning(0.05+1e-4, 0.05))
+	}
+	if d, ok := vatDrift(near); ok {
+		t.Errorf("implied %v against configured %v is rounding, not drift", d.Implied, d.ConfiguredMin)
+	}
+}
+
+// Whatever reaches describe, the two sides never print as the same figure.
+func TestVATDriftDescribeNeverPrintsIdenticalFigures(t *testing.T) {
+	cases := []vatDriftFinding{
+		{Implied: 0, ConfiguredMin: 0.05, ConfiguredMax: 0.05},
+		{Implied: 0.05, ConfiguredMin: 0.050001, ConfiguredMax: 0.050001},
+		{Implied: 0.2, ConfiguredMin: 0.05, ConfiguredMax: 0.2000004},
+	}
+	for _, d := range cases {
+		implied, configured := d.describe()
+		if implied == configured || strings.Contains(configured, " "+implied+" ") {
+			t.Errorf("%+v: implied %q printed identically to configured %q", d, implied, configured)
+		}
 	}
 }

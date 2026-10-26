@@ -117,7 +117,8 @@ Timestamps are RFC3339 with the local offset (parse with JS `new Date(...)` / Sw
 #### Bucket semantics
 
 For a window whose `from` is **not** on an interval boundary, the bucket axis snaps
-**down** to the interval grid (anchored at local midnight) so it matches Influx's
+**down** to the interval's grid (the UTC grid at `5m`–`1h`, local wall clock at `6h`,
+local midnight at `1d` — see [Clock changes](#clock-changes)) so it matches the
 aggregation boundaries — e.g. `from=14:23` with `interval=1h` yields buckets starting at
 `14:00, 15:00, …`. **The first bucket's timestamp can therefore precede `from`.**
 
@@ -181,8 +182,42 @@ this one — which is what `/devices/{id}/energy`, `/devices/{id}/cost` and `/bi
 always returned.
 
 Bucket lengths are real wall-clock lengths, not nominal ones: a `1d` bucket spanning a DST
-change is 23h or 25h, and `avg_w` for the derived `unmonitored` series is scaled by the
-hours a bucket actually covers.
+change is 23h or 25h, a `6h` bucket spanning one is 7h or 5h, and `avg_w` for the derived
+`unmonitored` series is scaled by the hours a bucket actually covers.
+
+#### Clock changes
+
+Each interval keeps its own grid across a clock change. On the Europe/London changeover
+days (autumn: 02:00 BST → 01:00 GMT; spring: 01:00 GMT → 02:00 BST):
+
+| interval | grid | autumn day (25h) | spring day (23h) |
+|---|---|---|---|
+| `5m` `15m` `30m` `1h` | fixed step on the absolute (UTC) grid | the repeated hour is two sets of buckets, `…01:00+01:00` then `…01:00Z`; 25 hourly buckets | the missing hour has no buckets; 23 hourly buckets |
+| `6h` | local wall clock, `00/06/12/18` local | first bucket `00:00+01:00` is **7h**, then `06:00Z`, `12:00Z`, `18:00Z` | first bucket `00:00Z` is **5h**, then `06:00+01:00`, … |
+| `1d` | local calendar day | one 25h bucket | one 23h bucket |
+
+How the data is fetched: sub-day intervals are queried from Influx on the **UTC grid**,
+and `6h` is queried at `1h` and folded onto the local axis. Only `1d` asks Influx for
+local-time windows. This is deliberate. Influx's location-aware `aggregateWindow` lays
+sub-day windows on local wall-clock time and stretches the one that straddles the
+repeated hour (the 01:30 BST half hour ran to 02:00 GMT, 90 minutes). Before this was
+fixed, that put three half hours of energy into one bucket and **zero** into the two after
+it, and the slot-priced cost path (`/bill`'s `counter_slot` attribution included) priced
+the whole lot at the one slot's rate ([#49](https://github.com/sweeney/countinghouse/issues/49)).
+Window totals were never affected; only the split across buckets was.
+
+Because sub-day buckets sit on the UTC grid, `house.timezone` must be a zone whose UTC
+offset is always a whole number of hours (see [Configuration](#configuration)). In a
+zone whose clocks go forward **at** a `6h` or day boundary (e.g. America/Santiago, which
+skips local midnight), the skipped boundary starts at the moment of the change and the
+boundaries after it stay on the local grid.
+
+`avg_w` on a folded bucket (a `6h` chart, or any bucket coarser than a half-hourly
+tariff's 30-minute slots) is the hours-weighted mean of the fine buckets, and a fine
+bucket in which a device reported no power counts as **0 W** for its hours. A device that
+drops out for one hour of a six-hour bucket therefore reports 5/6 of its real average.
+`kwh` and `cost` are unaffected. This is how slot-priced charts have always behaved;
+since issue #49 it also applies to `6h` under a flat tariff.
 
 The OpenAPI document (`internal/httpapi/openapi.yaml`) is the source of truth for request
 and response schemas; a path-coverage test fails CI if routes and spec drift.
@@ -370,6 +405,14 @@ remote_config: { base_url: "https://config.swee.net" }
 house:   { timezone: "Europe/London" }
 ```
 
+- **`house.timezone`** is a tz database name. It must be a zone whose UTC offset is
+  **always a whole number of hours** (Europe/London, UTC, America/New_York, …). A zone like
+  Asia/Kolkata (+05:30), Asia/Kathmandu (+05:45) or Australia/Lord_Howe (30-minute DST) is
+  refused at startup. `/series` builds sub-day buckets on the UTC hour grid and folds them
+  onto local `6h`/day boundaries, and in a half-hour zone every one of those boundaries
+  would fall mid-bucket, so energy would be misplaced silently. See
+  [Clock changes](#clock-changes).
+
 - **Influx** read token must be scoped (read-only) to the bucket statehouse writes.
 - **`identity.client_id`/`client_secret`** are used only to fetch the remote config namespaces
   (the devices namespace named by the `sites` entry, and the tariff namespace) via
@@ -481,7 +524,12 @@ billed from the supplier's own inc-VAT figures, so the statutory change arrives 
 data rather than having to be applied from here. `vat_rate` is now purely an
 **expectation**: when it disagrees with the supplier consistently across a batch, the
 collector raises an `agreement_drift` alert naming the rate the supplier is actually
-charging — which is the number to paste into the document.
+charging — which is the number to paste into the document. "What configuration says"
+in that alert is the rate each slot was actually checked against (the agreement covering
+it): `configured_vat_rate` when the batch has one, or `configured_vat_rate_min`/`_max` and
+a range in the summary when it spans agreements with different rates. An implied rate
+within 0.05 percentage points of the configured one is treated as supplier rounding and
+raises nothing.
 
 The one case that still depends on config is a window with **no archived standing
 charge** (a fresh deployment, before the first daily sweep). `/bill` says which it used

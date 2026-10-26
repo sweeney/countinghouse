@@ -185,7 +185,7 @@ func TestBuildSeriesUPSClipsFirstBucketToWindowStart(t *testing.T) {
 		"network-ups": {Class: "ups_sensor", DisplayName: "UPS"},
 	}
 	// A steady 1 kW load reporting every minute, from well before the window.
-	sim := influx.NewPowerSim(loc).AddSteady("network-ups",
+	sim := influx.NewPowerSim().AddSteady("network-ups",
 		time.Date(2026, 6, 11, 12, 0, 0, 0, loc),
 		time.Date(2026, 6, 11, 18, 0, 0, 0, loc),
 		time.Minute, 1000)
@@ -266,7 +266,7 @@ func TestUPSSeriesTotalAgreesWithDeviceEnergyOnUnevenSampling(t *testing.T) {
 		at = append(at, ts)
 		w = append(w, 100)
 	}
-	sim := influx.NewPowerSim(loc).AddSamples("network-ups", at, w)
+	sim := influx.NewPowerSim().AddSamples("network-ups", at, w)
 	q := &influx.FakeQuerier{QueryFunc: sim.Answer}
 
 	resp, err := BuildSeries(context.Background(), q, "statehouse", win, iv,
@@ -321,7 +321,7 @@ func TestUPSTotalOutageBucketReadsZeroAndUndercutsTheScalar(t *testing.T) {
 		"network-ups": {Class: "ups_sensor", DisplayName: "UPS"},
 	}
 	// Silent for the whole 14:30 bucket.
-	sim := influx.NewPowerSim(loc).AddSteadyWithGaps("network-ups", start, stop, time.Minute, 1000,
+	sim := influx.NewPowerSim().AddSteadyWithGaps("network-ups", start, stop, time.Minute, 1000,
 		[2]time.Time{time.Date(2026, 6, 11, 14, 30, 0, 0, loc), time.Date(2026, 6, 11, 15, 0, 0, 0, loc)})
 	q := &influx.FakeQuerier{QueryFunc: sim.Answer}
 
@@ -374,7 +374,7 @@ func TestUPSTotalOutageBucketReadsZeroAndUndercutsTheScalar(t *testing.T) {
 // window that opens at 14:29.
 func TestSeriesTotalAgreesWithDeviceEnergyOffGridWindow(t *testing.T) {
 	loc := mustLondon(t)
-	sim := influx.NewCounterSim(loc).AddSteady("winefridge",
+	sim := influx.NewCounterSim().AddSteady("winefridge",
 		time.Date(2026, 6, 11, 12, 0, 0, 0, loc),
 		time.Date(2026, 6, 11, 18, 0, 0, 0, loc),
 		time.Minute, 1000)
@@ -424,7 +424,7 @@ func TestSeriesTotalAgreesWithDeviceEnergyOffGridWindow(t *testing.T) {
 // the first grid bucket returned a byte-identical total every time.
 func TestSeriesTotalFallsAsTheWindowStartMovesLater(t *testing.T) {
 	loc := mustLondon(t)
-	sim := influx.NewCounterSim(loc).AddSteady("winefridge",
+	sim := influx.NewCounterSim().AddSteady("winefridge",
 		time.Date(2026, 6, 11, 12, 0, 0, 0, loc),
 		time.Date(2026, 6, 11, 18, 0, 0, 0, loc),
 		time.Minute, 1000)

@@ -36,7 +36,8 @@ func TestBuildCounterSeriesFlux(t *testing.T) {
 		`r._field == "energy_kwh"`,
 		`contains(value: r.device_id, set: ["winefridge", "freezer"])`,
 		`increase()`,
-		`aggregateWindow(every: 1h, fn: last, timeSrc: "_start", location: timezone.location(name: "Europe/London"), createEmpty: false)`,
+		// Sub-day: the UTC grid, never local windows (issue #49).
+		`aggregateWindow(every: 1h, fn: last, timeSrc: "_start", location: timezone.utc, createEmpty: false)`,
 		`stop: 2026-06-12T00:00:00Z`,
 	}
 	for _, w := range wants {
@@ -84,7 +85,7 @@ func TestBuildPowerMeanSeriesFlux(t *testing.T) {
 		`r._measurement == "device_power"`,
 		`r._field == "power_w"`,
 		`contains(value: r.device_id, set: ["network-ups", "office-ups"])`,
-		`aggregateWindow(every: 15m, fn: mean, timeSrc: "_start", location: timezone.location(name: "Europe/London"), createEmpty: true)`,
+		`aggregateWindow(every: 15m, fn: mean, timeSrc: "_start", location: timezone.utc, createEmpty: true)`,
 		// No pad for the mean series: range starts AT the window start.
 		`start: 2026-06-11T00:00:00Z`,
 		`stop: 2026-06-12T00:00:00Z`,
@@ -99,6 +100,49 @@ func TestBuildPowerMeanSeriesFlux(t *testing.T) {
 	for _, bad := range []string{`energy_kwh`, `increase()`, `difference()`} {
 		if strings.Contains(flux, bad) {
 			t.Errorf("power mean series flux unexpectedly contains %q", bad)
+		}
+	}
+}
+
+// Which grid each series builder asks Influx for (issue #49).
+//
+// Influx's location-aware aggregateWindow lays SUB-DAY windows on local wall
+// clock, and on the autumn clock change the window opening just before the
+// change runs to the next wall time that only happens once — 02:00 GMT — so a
+// 30m window became 90 minutes and the repeated hour's energy landed in the
+// wrong bucket. Sub-day queries therefore window on the UTC grid (which, for a
+// whole-hour zone, is the same grid with no repeated or missing hour). Only a
+// calendar day keeps the named location, where stretching a day to 23h or 25h
+// is exactly what we want.
+func TestSeriesBuildersWindowLocation(t *testing.T) {
+	builders := map[string]func(string) string{
+		"counter": func(iv string) string {
+			return BuildCounterSeriesFlux("b", []string{"d"}, seriesStart, seriesStop, iv, "Europe/London")
+		},
+		"integral": func(iv string) string {
+			return BuildPowerIntegralSeriesFlux("b", []string{"d"}, seriesStart, seriesStop, iv, "Europe/London")
+		},
+		"mean": func(iv string) string {
+			return BuildPowerMeanSeriesFlux("b", []string{"d"}, seriesStart, seriesStop, iv, "Europe/London")
+		},
+	}
+	for name, build := range builders {
+		for _, iv := range []string{"5m", "15m", "30m", "1h", "6h"} {
+			flux := build(iv)
+			if !strings.Contains(flux, "location: timezone.utc,") {
+				t.Errorf("%s at %s must window on the UTC grid; flux:\n%s", name, iv, flux)
+			}
+			if strings.Contains(flux, "timezone.location(") {
+				t.Errorf("%s at %s must not ask for local sub-day windows; flux:\n%s", name, iv, flux)
+			}
+		}
+		// An unknown token fails SAFE: the UTC grid, not local windows.
+		if flux := build("7m"); !strings.Contains(flux, "location: timezone.utc,") {
+			t.Errorf("%s at an unknown interval must default to the UTC grid; flux:\n%s", name, flux)
+		}
+		flux := build("1d")
+		if !strings.Contains(flux, `location: timezone.location(name: "Europe/London"),`) {
+			t.Errorf("%s at 1d must keep local calendar days; flux:\n%s", name, flux)
 		}
 	}
 }

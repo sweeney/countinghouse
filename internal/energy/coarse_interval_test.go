@@ -76,7 +76,7 @@ func exactSlotSim(id string, start time.Time, slots int, kwhPerSlot float64) *in
 		at = append(at, start.Add(time.Duration(i)*30*time.Minute))
 		kwh = append(kwh, float64(i)*kwhPerSlot)
 	}
-	return influx.NewCounterSim(time.UTC).AddSamples(id, at, kwh)
+	return influx.NewCounterSim().AddSamples(id, at, kwh)
 }
 
 // ciBuildExact runs BuildSeries over `slots` half hours from start with exact
@@ -144,7 +144,7 @@ func ciBuild(t *testing.T, ivToken string, pricer Pricer, watts float64) Series 
 	}
 	win := ciWindow()
 	// Sample every 5 minutes so any bucketing the code picks is well covered.
-	sim := influx.NewCounterSim(time.UTC).
+	sim := influx.NewCounterSim().
 		AddSteady("winefridge", win.Start.Add(-time.Hour), win.Stop.Add(time.Hour), 5*time.Minute, watts)
 	devices := map[string]config.DeviceConfig{"winefridge": {Class: "continuous_power_device"}}
 
@@ -306,7 +306,7 @@ func TestFoldingKeepsTheRequestedResolutionAndSums(t *testing.T) {
 		t.Run(tc.iv, func(t *testing.T) {
 			iv, _ := lookupInterval(tc.iv)
 			win := ciWindow()
-			sim := influx.NewCounterSim(time.UTC).
+			sim := influx.NewCounterSim().
 				AddSteady("winefridge", win.Start.Add(-time.Hour), win.Stop.Add(time.Hour), 5*time.Minute, 1000)
 			devices := map[string]config.DeviceConfig{"winefridge": {Class: "continuous_power_device"}}
 			resp, err := BuildSeries(context.Background(), &influx.FakeQuerier{QueryFunc: sim.Answer},
@@ -359,7 +359,7 @@ func TestBurstyLoadIsCostedWhereItActuallyRan(t *testing.T) {
 		win.Stop,
 	}
 	kwh := []float64{0, 0, 2, 2}
-	sim := influx.NewCounterSim(time.UTC).AddSamples("dishwasher", at, kwh)
+	sim := influx.NewCounterSim().AddSamples("dishwasher", at, kwh)
 
 	iv, _ := lookupInterval("1d")
 	resp, err := BuildSeries(context.Background(), &influx.FakeQuerier{QueryFunc: sim.Answer},
@@ -494,7 +494,7 @@ func TestFoldingAcrossADSTBoundary(t *testing.T) {
 func TestFlatTariffDoesNotQueryAtSlotResolution(t *testing.T) {
 	win := ciWindow()
 	iv, _ := lookupInterval("1d")
-	sim := influx.NewCounterSim(time.UTC).
+	sim := influx.NewCounterSim().
 		AddSteady("winefridge", win.Start.Add(-time.Hour), win.Stop.Add(time.Hour), 5*time.Minute, 1000)
 	fake := &influx.FakeQuerier{QueryFunc: sim.Answer}
 	devices := map[string]config.DeviceConfig{"winefridge": {Class: "continuous_power_device"}}

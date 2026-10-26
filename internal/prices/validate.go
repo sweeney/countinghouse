@@ -135,6 +135,16 @@ type Warning struct {
 	// becomes an accidental API. Nil when exc is zero, where the ratio is undefined
 	// rather than zero.
 	ImpliedVATRate *float64
+
+	// ExpectedVATRate is set on WarnVATMismatch: the rate this slot was actually
+	// checked against — the agreement covering it, resolved per slot.
+	//
+	// Carried on the warning because it is the only honest source for "what
+	// configuration says". The collector once reported that from its own legacy
+	// scalar instead, which production never set, and paged "the supplier is
+	// charging VAT at 0.00%, but configuration says 0.00%" while the agreement
+	// actually said 5% (#52).
+	ExpectedVATRate *float64
 }
 
 // ValidationResult is the whole verdict on one batch.
@@ -370,7 +380,7 @@ func checkVAT(s Slot, opts ValidateOptions) (Warning, bool) {
 		s.IncVATPence, s.ExcVATPence, rate, want, diff, opts.VATEpsilonPence)
 	// The implied rate is the actionable number: it says what the supplier is
 	// actually charging, and therefore what config should say.
-	w := Warning{Slot: s, Kind: WarnVATMismatch}
+	w := Warning{Slot: s, Kind: WarnVATMismatch, ExpectedVATRate: &rate}
 	if s.ExcVATPence != 0 {
 		implied := s.IncVATPence/s.ExcVATPence - 1
 		w.ImpliedVATRate = &implied

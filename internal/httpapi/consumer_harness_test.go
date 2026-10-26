@@ -360,8 +360,8 @@ func chBuild(t *testing.T) *chFixture {
 	from = time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, loc)
 	to := chNow.In(loc)
 
-	counters := influx.NewCounterSim(loc)
-	power := influx.NewPowerSim(loc)
+	counters := influx.NewCounterSim()
+	power := influx.NewPowerSim()
 
 	const cadence = 15 * time.Minute
 	automation := chDay(t, loc, chAutomationDay)

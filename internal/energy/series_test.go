@@ -887,7 +887,7 @@ func TestBuildSeriesUPSPartialFinalBucket(t *testing.T) {
 	devices := map[string]config.DeviceConfig{
 		"network-ups": {Class: "ups_sensor", DisplayName: "UPS"},
 	}
-	sim := influx.NewPowerSim(loc).AddSteady("network-ups", start, stop, time.Minute, 100)
+	sim := influx.NewPowerSim().AddSteady("network-ups", start, stop, time.Minute, 100)
 
 	resp, err := BuildSeries(context.Background(), &influx.FakeQuerier{QueryFunc: sim.Answer},
 		"statehouse", win, iv, GroupByDevice, false, false, devices, testPricer(), nil, loc)
