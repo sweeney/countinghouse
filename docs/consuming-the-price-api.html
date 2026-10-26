@@ -953,7 +953,7 @@ setInterval(moveNowMarker, <span class="n">30_000</span>);</pre>
   <span class="c">// When present, it is energy we could not price, and it is</span>
   <span class="c">// NOT included in "cost". Surface it; do not add it in.</span>
   <span class="k">"standing_charge"</span>: <span class="n">0.6195</span>,
-  <span class="k">"standing_charge_source"</span>: <span class="s">"archive"</span>  <span class="c">// or "config"</span>
+  <span class="k">"standing_charge_source"</span>: <span class="s">"archive"</span>  <span class="c">// or "archive_ex_vat", "config"</span>
 }</pre>
     </div>
 
@@ -980,6 +980,11 @@ setInterval(moveNowMarker, <span class="n">30_000</span>);</pre>
       <p><code>standing_charge_source</code> says where the daily charge came from.
       <strong><code>archive</code></strong> is the supplier's own VAT-inclusive figure, so a
       VAT change arrives in it the same way it arrives in energy prices.
+      <strong><code>archive_ex_vat</code></strong> is the supplier's ex-VAT figure grossed
+      up by the agreement's VAT rate, for days before the archive first saw the charge
+      whose held inc-VAT figure implies a different rate. The supplier restates a
+      standing charge in place, carrying a VAT change back over days it never applied
+      to; days the archive saw are billed at the figure it saw for them.
       <strong><code>config</code></strong> is the configured ex-VAT rate grossed up by the
       configured VAT rate — correct only while somebody keeps that rate current, and the
       fallback when no archived charge covers the whole window (a fresh deployment, before

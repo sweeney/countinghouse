@@ -231,3 +231,46 @@ func TestZeroLegacyVATRateMeansNoCheck(t *testing.T) {
 		t.Errorf("no configured rate, yet drift raised: %q", evs[0].Summary)
 	}
 }
+
+// #51's shape: ONE open-ended standing charge, restated in place to zero-rated.
+// Six slots is a half-hour noise floor a single charge can never reach, so this
+// alerted on nothing while the bill quietly changed. One charge is enough.
+func TestOneZeroRatedStandingChargeRaisesAgreementDrift(t *testing.T) {
+	base := newFakeFetcher(ts(t, "2026-10-01T00:00:00Z"), ts(t, "2026-10-23T23:00:00Z"))
+	f := scFetcher{fakeFetcher: base, charges: []octopus.Rate{{
+		ValidFrom: ts(t, "2024-09-30T23:00:00Z"), ExcVATPence: 59.1606, IncVATPence: 59.1606,
+	}}}
+	h := newProductionWiredHarness(t, ts(t, "2026-10-23T01:03:00Z"), f, constVAT(0.05))
+
+	if _, err := h.c.SyncStandingCharges(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if evs := driftEvents(h); len(evs) != 1 {
+		t.Fatalf("want one agreement_drift for a single zero-rated charge, got %d (%v)", len(evs), h.noti.kinds())
+	}
+}
+
+// And once the split is authored, the same charge is right: it is judged at the
+// VAT in force when it was fetched, not at its 2024 start, so it does not alert
+// on every daily sync from then on.
+func TestARestatedStandingChargeIsQuietOnceTheSplitIsAuthored(t *testing.T) {
+	base := newFakeFetcher(ts(t, "2026-10-01T00:00:00Z"), ts(t, "2026-10-23T23:00:00Z"))
+	f := scFetcher{fakeFetcher: base, charges: []octopus.Rate{{
+		ValidFrom: ts(t, "2024-09-30T23:00:00Z"), ExcVATPence: 59.1606, IncVATPence: 59.1606,
+	}}}
+	cut := ts(t, "2026-09-30T23:00:00Z")
+	split := func(at time.Time) (float64, bool) {
+		if at.Before(cut) {
+			return 0.05, true
+		}
+		return 0, true
+	}
+	h := newProductionWiredHarness(t, ts(t, "2026-10-23T01:03:00Z"), f, split)
+
+	if _, err := h.c.SyncStandingCharges(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if evs := driftEvents(h); len(evs) != 0 {
+		t.Errorf("want no agreement_drift once config agrees with the supplier, got %v", evs)
+	}
+}

@@ -314,7 +314,14 @@ type chConfig struct {
 func (c chConfig) Devices() map[string]config.DeviceConfig { return c.devices }
 func (c chConfig) Tariffs() config.TariffSource            { return c.agreements }
 func (c chConfig) Agreements() config.EnergyAgreements     { return c.agreements }
-func (c chConfig) TariffNamespace() string                 { return "energy_tariffs" }
+func (c chConfig) TariffNamespace() string                 { return chAgreementsNS }
+
+// chAgreementsNS is the dated-agreements namespace the fixture's site names, and
+// the ONE spelling of it: TariffNamespace() and the remote-config status map both
+// read it, so the two cannot disagree again. It is the dated namespace rather than
+// the legacy energy_tariffs because chAgreements serves dated, half-hourly blocks,
+// which in production only energy_agreements can carry (Fetcher.TariffNamespace).
+const chAgreementsNS = "energy_agreements_harness"
 
 // chFloorplan is a two-storey floorplan covering the fixture's rooms.
 type chFloorplan struct{}
@@ -518,8 +525,15 @@ func chBuild(t *testing.T) *chFixture {
 	//
 	// The devices namespace is deliberately STALE: a fixture where every fetch
 	// succeeded can only ever exercise the happy half.
+	//
+	// Keyed by the namespace each ROUTE actually looks up. This map and
+	// chConfig.TariffNamespace() used to be two string literals that disagreed
+	// ("energy_agreements" vs "energy_tariffs"), so /tariffs found no status and
+	// omitted freshness entirely: the fixture was wired to exercise that path and
+	// silently did not. Both now read chAgreementsNS. Found from the consumer side,
+	// which is the point of having one.
 	s.RemoteConfig = chStatuses{
-		"energy_agreements": {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
+		chAgreementsNS:      {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
 		"floorplan_harness": {OK: true, FetchedAt: chNow.Add(-4 * time.Minute)},
 		"devices_harness": {OK: false, FetchedAt: chNow.Add(-31 * time.Hour),
 			Error: "config.swee.net: 502 Bad Gateway"},

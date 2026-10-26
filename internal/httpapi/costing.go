@@ -51,8 +51,10 @@ type tariffPlan struct {
 	standing float64
 
 	// standingSource says where that figure came from: "archive" when it is the
-	// supplier's own inc-VAT daily charge, "config" when it is the configured
-	// ex-VAT rate grossed up by the configured VAT rate.
+	// supplier's own inc-VAT daily charge, "archive_ex_vat" when some days had to
+	// be grossed up from the supplier's ex-VAT figure at the agreement's rate, and
+	// "config" when it is the configured ex-VAT rate grossed up by the configured
+	// VAT rate.
 	//
 	// Reported on the wire because the two differ in what can go wrong with them.
 	// The archived figure is what the supplier bills; the configured one is right
@@ -129,15 +131,17 @@ func (s *Server) planFor(ctx context.Context, from, to time.Time) (tariffPlan, e
 	// Prefer the supplier's own archived standing charge. It is the figure they
 	// actually bill, so a VAT change arrives in it rather than having to be applied
 	// from configuration — the same reason energy is priced from the archive's
-	// inc-VAT column and never grossed up here.
+	// inc-VAT column. The one exception is days the archive never saw a figure
+	// for, where an implausible one is grossed up from ex-VAT at the agreement's
+	// rate (standingSourceArchiveExVAT).
 	//
 	// Falls back silently to the configured rate, which is what every instance did
 	// before standing charges were archived: a deployment with no archive, or a
 	// window the archive does not fully cover, is not a reason to refuse a bill.
 	if code, ok := singleTariffCode(segments); ok {
-		if charged, ok := s.archivedStandingCharge(ctx, code, from, to); ok {
+		if charged, source, ok := s.archivedStandingCharge(ctx, code, from, to, segments); ok {
 			plan.standing = charged
-			plan.standingSource = standingSourceArchive
+			plan.standingSource = source
 		}
 	}
 
@@ -290,7 +294,11 @@ func influxFailed(w http.ResponseWriter, err error) {
 // Where a bill's standing charge came from.
 const (
 	standingSourceArchive = "archive"
-	standingSourceConfig  = "config"
+	// The supplier's archived EX-VAT figure, grossed up at the agreement's
+	// vat_rate, for days the archive never saw a figure for and whose
+	// carried-back inc-VAT figure implies a different rate.
+	standingSourceArchiveExVAT = "archive_ex_vat"
+	standingSourceConfig       = "config"
 )
 
 // singleTariffCode returns the tariff code when EVERY segment shares one.
@@ -315,21 +323,42 @@ func singleTariffCode(segments []config.Segment) (string, bool) {
 }
 
 // archivedStandingCharge returns the supplier's own standing charge for the
-// window, and whether the archive could answer for all of it.
+// window, where it came from, and whether the archive could answer for all of it.
 //
 // Partial coverage returns false rather than a partial total: a total missing a
 // few days looks like a correct but cheap bill, which is the failure the whole
 // pricing layer is built to avoid.
-func (s *Server) archivedStandingCharge(ctx context.Context, code string, from, to time.Time) (float64, bool) {
+//
+// Each day is charged at the figure the supplier was publishing for it, which is
+// not always the figure the archive holds now: a standing charge restated in
+// place carries its new VAT back over every day it covers (#51), and the old
+// figure survives only in the restatement log. For days before the archive saw
+// any figure, the agreement covering the day decides whether the carried-back
+// one is believable, and where it is not the day is grossed up from ex-VAT at
+// the agreement's rate; see prices.Schedule.ChargeOverAtVAT.
+func (s *Server) archivedStandingCharge(ctx context.Context, code string, from, to time.Time, segments []config.Segment) (float64, string, bool) {
 	reader, ok := s.PriceReader.(StandingChargeReader)
 	if !ok {
-		return 0, false
+		return 0, "", false
 	}
-	charges, err := reader.StandingCharges(ctx, code, from.UTC(), to.UTC())
-	if err != nil || len(charges) == 0 {
+	histories, err := reader.StandingChargeHistories(ctx, code, from.UTC(), to.UTC())
+	if err != nil || len(histories) == 0 {
 		// A read failure falls back to config rather than failing the bill. The
 		// archive is an improvement on the configured figure, not a dependency of it.
-		return 0, false
+		return 0, "", false
 	}
-	return prices.NewSchedule(charges).ChargeOver(from.UTC(), to.UTC(), s.loc())
+	schedule := prices.NewScheduleFromHistory(histories)
+	var total float64
+	source := standingSourceArchive
+	for _, seg := range segments {
+		charged, regrossed, ok := schedule.ChargeOverAtVAT(seg.Start.UTC(), seg.Stop.UTC(), seg.Tariff.VATRate, s.loc())
+		if !ok {
+			return 0, "", false
+		}
+		total += charged
+		if regrossed {
+			source = standingSourceArchiveExVAT
+		}
+	}
+	return total, source, true
 }

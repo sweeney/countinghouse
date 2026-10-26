@@ -436,3 +436,362 @@ func TestStandingChargesAlsoRecordFirstSeen(t *testing.T) {
 		t.Errorf("first_seen_at = %q, want %q", firstSeen, want)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ChargeOverAtVAT: the supplier's inc-VAT figure only where it matches the day
+// ---------------------------------------------------------------------------
+
+// #51: one charge, open-ended from 2024, restated in place to its zero-rated
+// figure. Charged at 5%, it must be grossed up from ex-VAT, and say so.
+func TestChargeOverAtVATRegrossesABackdatedZeroRate(t *testing.T) {
+	s := NewSchedule([]DailyCharge{charge(day(2024, 9, 30), nil, 59.1606, 59.1606)})
+
+	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 9, 21), day(2026, 9, 22), 0.05, time.UTC)
+	if !ok {
+		t.Fatal("window is fully covered but ChargeOverAtVAT said no")
+	}
+	if want := 0.591606 * 1.05; math.Abs(got-want) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f", got, want)
+	}
+	if !regrossed {
+		t.Error("regrossed = false; the inc-VAT figure was not used and the caller must know")
+	}
+}
+
+// Where the supplier's figure implies the rate asked for, it is used as-is.
+func TestChargeOverAtVATUsesTheSupplierFigureWhenItAgrees(t *testing.T) {
+	s := NewSchedule([]DailyCharge{charge(day(2024, 9, 30), nil, 59.1606, 59.1606)})
+
+	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 10, 2), day(2026, 10, 4), 0, time.UTC)
+	if !ok {
+		t.Fatal("not covered")
+	}
+	if want := 2 * 0.591606; math.Abs(got-want) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f", got, want)
+	}
+	if regrossed {
+		t.Error("regrossed = true for a figure that implies exactly the rate asked for")
+	}
+}
+
+// Each charge in the window is judged on its own: only the one that disagrees
+// is grossed up.
+func TestChargeOverAtVATJudgesEachChargeSeparately(t *testing.T) {
+	boundary := day(2026, 6, 1)
+	s := NewSchedule([]DailyCharge{
+		charge(day(2026, 1, 1), ptr(boundary), 50, 52.5), // 5%, agrees
+		charge(boundary, nil, 56.19, 56.19),              // 0%, does not
+	})
+
+	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 5, 31), day(2026, 6, 2), 0.05, time.UTC)
+	if !ok {
+		t.Fatal("not covered")
+	}
+	if want := 0.525 + 0.5619*1.05; math.Abs(got-want) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f", got, want)
+	}
+	if !regrossed {
+		t.Error("regrossed = false, but the second charge was grossed up")
+	}
+}
+
+// ChargeOverAtVAT refuses a window it does not fully cover, exactly as
+// ChargeOver does.
+func TestChargeOverAtVATRefusesAGap(t *testing.T) {
+	s := NewSchedule([]DailyCharge{charge(day(2026, 1, 1), ptr(day(2026, 6, 1)), 56.19, 59.0)})
+	if _, _, ok := s.ChargeOverAtVAT(day(2026, 5, 30), day(2026, 6, 3), 0.05, time.UTC); ok {
+		t.Error("window runs past the last charge; ChargeOverAtVAT must refuse it")
+	}
+}
+
+func TestImpliesVATRate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		exc, inc float64
+		rate     float64
+		want     bool
+	}{
+		{"exact 5%", 59.1606, 62.11863, 0.05, true},
+		{"supplier rounding of 5%", 59.1606, 62.1186, 0.05, true},
+		{"zero rate", 59.1606, 59.1606, 0, true},
+		{"zero-rated figure, 5% expected", 59.1606, 59.1606, 0.05, false},
+		{"5% figure, zero expected", 59.1606, 62.11863, 0, false},
+		{"20% figure, 5% expected", 50, 60, 0.05, false},
+		{"no ex-VAT figure is taken at its word", 0, 59, 0.05, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := charge(day(2026, 1, 1), nil, tc.exc, tc.inc)
+			if got := c.ImpliesVATRate(tc.rate); got != tc.want {
+				t.Errorf("ImpliesVATRate(%v) for exc %v inc %v = %v, want %v",
+					tc.rate, tc.exc, tc.inc, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// History: each day at the figure the supplier was publishing for it
+// ---------------------------------------------------------------------------
+
+// vatOnly is a restatement that moved only the inc-VAT figure: a VAT change.
+func vatOnly(t *testing.T, c DailyCharge, oldInc, newInc float64, prev, detected string) Restatement {
+	return Restatement{
+		Key:            c.row().Key(),
+		OldExcVATPence: c.ExcVATPence, OldIncVATPence: oldInc,
+		NewExcVATPence: c.ExcVATPence, NewIncVATPence: newInc,
+		PreviousRetrievedAt: at(t, prev), DetectedAt: at(t, detected),
+	}
+}
+
+// #51's charge as production holds it: first seen at 5% on 17 Sep, restated in
+// place to 0% by the sweep at 01:03Z on 1 Oct, the one before having run a day
+// earlier.
+func productionHistory(t *testing.T) ChargeHistory {
+	c := charge(at(t, "2024-09-30T23:00:00Z"), nil, 59.1606, 59.1606)
+	return ChargeHistory{
+		Charge:       c,
+		FirstSeenAt:  at(t, "2026-09-17T01:03:00Z"),
+		Restatements: []Restatement{vatOnly(t, c, 62.1186, 59.1606, "2026-09-30T01:03:00Z", "2026-10-01T01:03:00Z")},
+	}
+}
+
+func chargeAt(t *testing.T, s Schedule, from, to string, vat float64) (float64, bool) {
+	t.Helper()
+	got, regrossed, ok := s.ChargeOverAtVAT(at(t, from), at(t, to), vat, londonLoc(t))
+	if !ok {
+		t.Fatalf("%s..%s is covered but ChargeOverAtVAT said no", from, to)
+	}
+	return got, regrossed
+}
+
+func wantPence(t *testing.T, got float64, wantPencePerDay, days float64) {
+	t.Helper()
+	if want := wantPencePerDay * days / 100; math.Abs(got-want) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f (%.4fp/day for %.4f days)", got, want, wantPencePerDay, days)
+	}
+}
+
+// A day the archive watched go by is billed at what the supplier published for
+// it then, not at the zero-rated figure the row was later restated to — and not
+// at whatever the agreement says either, which here is wrong on purpose.
+func TestHistoryBillsAWitnessedDayAtItsOwnFigure(t *testing.T) {
+	s := NewScheduleFromHistory([]ChargeHistory{productionHistory(t)})
+	for _, vat := range []float64{0.05, 0} {
+		got, regrossed := chargeAt(t, s, "2026-09-20T23:00:00Z", "2026-09-21T23:00:00Z", vat)
+		wantPence(t, got, 62.1186, 1)
+		if regrossed {
+			t.Errorf("at an agreement of %v: regrossed a day the supplier's figure was witnessed for", vat)
+		}
+	}
+}
+
+// After the restatement was seen, the new figure, again whatever the agreement
+// says: a configuration that never authored the split cannot move the bill.
+func TestHistoryBillsAfterTheRestatementAtTheNewFigure(t *testing.T) {
+	s := NewScheduleFromHistory([]ChargeHistory{productionHistory(t)})
+	got, regrossed := chargeAt(t, s, "2026-10-05T23:00:00Z", "2026-10-06T23:00:00Z", 0.05)
+	wantPence(t, got, 59.1606, 1)
+	if regrossed {
+		t.Error("regrossed a witnessed day")
+	}
+}
+
+// Between the last sighting of the old figure and the first of the new, the
+// agreement picks whichever of the two it agrees with.
+func TestHistoryLetsTheAgreementPlaceTheChangeBetweenSweeps(t *testing.T) {
+	s := NewScheduleFromHistory([]ChargeHistory{productionHistory(t)})
+
+	before, _ := chargeAt(t, s, "2026-09-30T01:03:00Z", "2026-09-30T23:00:00Z", 0.05)
+	wantPence(t, before, 62.1186, (23-(1+3.0/60))/24)
+
+	after, _ := chargeAt(t, s, "2026-09-30T23:00:00Z", "2026-10-01T01:03:00Z", 0)
+	wantPence(t, after, 59.1606, (2+3.0/60)/24)
+
+	// An agreement neither figure matches: ex-VAT at its rate, flagged.
+	odd, regrossed := chargeAt(t, s, "2026-09-30T23:00:00Z", "2026-10-01T01:03:00Z", 0.2)
+	wantPence(t, odd, 59.1606*1.2, (2+3.0/60)/24)
+	if !regrossed {
+		t.Error("regrossed = false for a figure neither side of the restatement implies")
+	}
+}
+
+// The zero rate ends on 31 Mar 2027. Suppose configuration never authors that
+// split, so the 0% agreement runs on, and Octopus restates the charge back to
+// 5% in place. Days after the sweep saw it are billed at 5%: the supplier's
+// figure, not the forgotten agreement's under-charge.
+func TestHistoryBillsTheReturnTo5PercentOverAForgottenAgreement(t *testing.T) {
+	h := productionHistory(t)
+	h.Restatements = append(h.Restatements,
+		vatOnly(t, h.Charge, 59.1606, 62.1186, "2027-03-31T01:03:00Z", "2027-04-01T01:03:00Z"))
+	h.Charge.IncVATPence = 62.1186
+	s := NewScheduleFromHistory([]ChargeHistory{h})
+
+	got, regrossed := chargeAt(t, s, "2027-04-04T23:00:00Z", "2027-04-05T23:00:00Z", 0)
+	wantPence(t, got, 62.1186, 1)
+	if regrossed {
+		t.Error("regrossed a witnessed day")
+	}
+	// The zero-rated months in between are still zero-rated.
+	mid, _ := chargeAt(t, s, "2026-12-01T00:00:00Z", "2026-12-02T00:00:00Z", 0)
+	wantPence(t, mid, 59.1606, 1)
+	// And September is still 5%, two restatements later.
+	sep, _ := chargeAt(t, s, "2026-09-20T23:00:00Z", "2026-09-21T23:00:00Z", 0.05)
+	wantPence(t, sep, 62.1186, 1)
+}
+
+// Before the archive first saw a charge, nobody saw what the supplier charged.
+// The figure held is a later one carried back, believed where it agrees with the
+// agreement and grossed up from ex-VAT where it does not.
+func TestHistoryJudgesDaysBeforeTheFirstSightingByTheAgreement(t *testing.T) {
+	s := NewScheduleFromHistory([]ChargeHistory{productionHistory(t)})
+	got, regrossed := chargeAt(t, s, "2025-06-01T00:00:00Z", "2025-06-02T00:00:00Z", 0.05)
+	wantPence(t, got, 62.1186, 1)
+	if regrossed {
+		t.Error("regrossed a carried-back figure that agrees with the agreement")
+	}
+
+	rebuilt := ChargeHistory{Charge: productionHistory(t).Charge, FirstSeenAt: at(t, "2026-10-20T01:03:00Z")}
+	s = NewScheduleFromHistory([]ChargeHistory{rebuilt})
+	got, regrossed = chargeAt(t, s, "2026-09-20T23:00:00Z", "2026-09-21T23:00:00Z", 0.05)
+	wantPence(t, got, 59.1606*1.05, 1)
+	if !regrossed {
+		t.Error("regrossed = false; a rebuilt archive's zero-rated figure was billed for a 5% day")
+	}
+}
+
+// A restatement that moves the ex-VAT figure is a correction, the supplier's
+// account of every day the charge covers. The superseded figure is not billed
+// for any of them; days before the correction was seen are judged as unwitnessed.
+func TestHistoryTreatsAnExVATChangeAsACorrection(t *testing.T) {
+	c := charge(at(t, "2024-09-30T23:00:00Z"), nil, 60, 63)
+	h := ChargeHistory{
+		Charge:      c,
+		FirstSeenAt: at(t, "2026-09-17T01:03:00Z"),
+		Restatements: []Restatement{{
+			Key:            c.row().Key(),
+			OldExcVATPence: 59.1606, OldIncVATPence: 62.1186,
+			NewExcVATPence: 60, NewIncVATPence: 63,
+			PreviousRetrievedAt: at(t, "2026-09-24T01:03:00Z"), DetectedAt: at(t, "2026-09-25T01:03:00Z"),
+		}},
+	}
+	s := NewScheduleFromHistory([]ChargeHistory{h})
+	got, regrossed := chargeAt(t, s, "2026-09-20T23:00:00Z", "2026-09-21T23:00:00Z", 0.05)
+	wantPence(t, got, 63, 1)
+	if regrossed {
+		t.Error("the corrected figure implies the agreement's 5% and needs no regross")
+	}
+}
+
+// A row older than the first_seen_at column was seen no later than its earliest
+// confirmation on record: the old figure's last one, when it has been restated.
+// Nothing before that was witnessed.
+func TestHistoryWithoutFirstSeenFallsBackToTheEarliestConfirmation(t *testing.T) {
+	h := productionHistory(t)
+	h.FirstSeenAt = time.Time{}
+	s := NewScheduleFromHistory([]ChargeHistory{h})
+
+	// Before 30 Sep 01:03Z the 5% figure is unwitnessed; a 0% agreement there
+	// disbelieves it and regrosses.
+	_, regrossed := chargeAt(t, s, "2026-09-20T23:00:00Z", "2026-09-21T23:00:00Z", 0)
+	if !regrossed {
+		t.Error("a day before any confirmation on record was treated as witnessed")
+	}
+	// After the restatement was seen, the new figure is witnessed as usual.
+	got, regrossed := chargeAt(t, s, "2026-10-05T23:00:00Z", "2026-10-06T23:00:00Z", 0.05)
+	wantPence(t, got, 59.1606, 1)
+	if regrossed {
+		t.Error("regrossed a witnessed day")
+	}
+}
+
+// The store hands back each charge with its first sighting and its restatement
+// log, oldest first, so a bill can be built from them.
+func TestStandingChargeHistoriesCarryFirstSeenAndRestatements(t *testing.T) {
+	st := scStore(t)
+	ctx := context.Background()
+	c := charge(at(t, "2024-09-30T23:00:00Z"), nil, 59.1606, 62.1186)
+	c.RetrievedAt = at(t, "2026-09-17T01:03:00Z")
+	other := charge(at(t, "2020-01-01T00:00:00Z"), ptr(at(t, "2024-09-30T23:00:00Z")), 50, 52.5)
+	if _, err := st.PutStandingCharges(ctx, []DailyCharge{c, other}); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		inc float64
+		at  string
+	}{{62.1186, "2026-09-30T01:03:00Z"}, {59.1606, "2026-10-01T01:03:00Z"}, {62.1186, "2027-04-01T01:03:00Z"}} {
+		c.IncVATPence, c.RetrievedAt = step.inc, at(t, step.at)
+		if _, err := st.PutStandingCharges(ctx, []DailyCharge{c}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	hs, err := st.StandingChargeHistories(ctx, c.TariffCode, at(t, "2026-09-01T00:00:00Z"), at(t, "2027-05-01T00:00:00Z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hs) != 1 {
+		t.Fatalf("got %d histories, want only the charge overlapping the window", len(hs))
+	}
+	h := hs[0]
+	if !h.FirstSeenAt.Equal(at(t, "2026-09-17T01:03:00Z")) {
+		t.Errorf("first seen %s, want 2026-09-17T01:03:00Z", h.FirstSeenAt)
+	}
+	if len(h.Restatements) != 2 {
+		t.Fatalf("got %d restatements, want 2: %+v", len(h.Restatements), h.Restatements)
+	}
+	if r := h.Restatements[0]; r.NewIncVATPence != 59.1606 || !r.PreviousRetrievedAt.Equal(at(t, "2026-09-30T01:03:00Z")) {
+		t.Errorf("first restatement %+v, want the 1 Oct zero rating, oldest first", r)
+	}
+	if r := h.Restatements[1]; r.NewIncVATPence != 62.1186 || !r.DetectedAt.Equal(at(t, "2027-04-01T01:03:00Z")) {
+		t.Errorf("second restatement %+v, want the 1 Apr return to 5%%", r)
+	}
+
+	got, _ := chargeAt(t, NewScheduleFromHistory(hs), "2026-09-20T23:00:00Z", "2026-09-21T23:00:00Z", 0)
+	wantPence(t, got, 62.1186, 1)
+}
+
+// An open-ended charge is judged at the VAT in force when it was retrieved, not
+// at its start in 2024. Production's restated charge, after the split is
+// authored, must not warn on every daily sync for ever.
+func TestStandingChargeVATIsJudgedWhenItWasRetrieved(t *testing.T) {
+	c := charge(at(t, "2024-09-30T23:00:00Z"), nil, 59.1606, 59.1606)
+	c.RetrievedAt = at(t, "2026-10-26T01:03:00Z")
+	cut := at(t, "2026-09-30T23:00:00Z")
+	split := func(when time.Time) (float64, bool) {
+		if when.Before(cut) {
+			return 0.05, true
+		}
+		return 0, true
+	}
+	if res := ValidateStandingCharges([]DailyCharge{c}, ValidateOptions{ExpectVATRateAt: split}); len(res.Warnings) != 0 {
+		t.Errorf("warned on a zero-rated charge retrieved under a 0%% agreement: %+v", res.Warnings)
+	}
+
+	// A charge that ended before it was retrieved is judged at its last instant.
+	past := charge(at(t, "2026-01-01T00:00:00Z"), &cut, 59.1606, 59.1606*1.05)
+	past.RetrievedAt = c.RetrievedAt
+	if res := ValidateStandingCharges([]DailyCharge{past}, ValidateOptions{ExpectVATRateAt: split}); len(res.Warnings) != 0 {
+		t.Errorf("warned on a 5%% charge that ended at the cut: %+v", res.Warnings)
+	}
+}
+
+// Issue #56 on the era-aware path (#55), which is the one /bill actually uses.
+// ChargeOverAtVAT cuts a charge into eras and measures each piece separately,
+// so it needs the calendar-day rule as much as ChargeOver does: production's
+// zero-rated figure, witnessed from 1 Oct, billed for the whole local day of
+// 25 Oct 2026 (25 hours) must come to exactly one day's charge.
+func TestChargeOverAtVATChargesTheAutumnClockChangeAsOneDay(t *testing.T) {
+	loc := londonLoc(t)
+	s := NewScheduleFromHistory([]ChargeHistory{productionHistory(t)})
+	from := time.Date(2026, 10, 25, 0, 0, 0, 0, loc)
+	to := time.Date(2026, 10, 26, 0, 0, 0, 0, loc)
+
+	got, regrossed, ok := s.ChargeOverAtVAT(from.UTC(), to.UTC(), 0, loc)
+	if !ok {
+		t.Fatal("covered but ChargeOverAtVAT said no")
+	}
+	if regrossed {
+		t.Error("a witnessed day must bill the supplier's figure, not a regrossed one")
+	}
+	wantPence(t, got, 59.1606, 1.0) // not 25/24
+}
