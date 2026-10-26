@@ -46,8 +46,9 @@ func scCharge(from time.Time, to *time.Time, exc, inc float64) prices.DailyCharg
 	}
 }
 
-// THE case this was built for. Config still says 5%; the supplier has zero-rated
-// the standing charge. The bill must use the supplier's figure.
+// THE case this was built for: the supplier has zero-rated the standing charge
+// and the agreement says so too. The bill must use the supplier's figure, not the
+// configured daily_standing_charge (0.59 ex VAT), which is a different number.
 func TestStandingChargeComesFromTheArchiveNotConfig(t *testing.T) {
 	s := vatSetup(t) // config: 5% before 1 Oct, 0% after; clock 2 Oct
 	base := s.PriceReader.(fakePriceReader)
@@ -60,7 +61,8 @@ func TestStandingChargeComesFromTheArchiveNotConfig(t *testing.T) {
 		},
 	}
 
-	w := doGET(t, s, "/bill?window=custom&from=2026-09-30T00:00:00Z&to=2026-10-02T00:00:00Z")
+	// 00:00 BST on 1 Oct to 01:00 BST on 2 Oct: 25 hours, all under the zero rate.
+	w := doGET(t, s, "/bill?window=custom&from=2026-09-30T23:00:00Z&to=2026-10-02T00:00:00Z")
 	if w.Code != 200 {
 		t.Fatalf("got %d: %s", w.Code, w.Body.String())
 	}
@@ -69,11 +71,93 @@ func TestStandingChargeComesFromTheArchiveNotConfig(t *testing.T) {
 	if m["standing_charge_source"] != "archive" {
 		t.Errorf("standing_charge_source = %v, want archive", m["standing_charge_source"])
 	}
-	// Two days at 56.19p/day inc VAT = £1.1238. Config would have said
-	// 2 x 0.59 x 1.05 = £1.239 for the first day's rate — a different number.
 	got := m["standing_charge"].(float64)
-	if want := 1.1238; got < want-0.001 || got > want+0.001 {
+	if want := 25.0 / 24 * 0.5619; got < want-0.0001 || got > want+0.0001 {
 		t.Errorf("standing_charge £%.4f, want £%.4f (the supplier's own inc-VAT figure)", got, want)
+	}
+}
+
+// #51, as it happened in production. The supplier published ONE standing charge,
+// open-ended from 2024, and on 1 Oct 2026 restated it in place to the zero-rated
+// figure (inc == exc). Billing that inc-VAT figure for a day before the cut bills
+// a 5%-VAT day without VAT. The ex-VAT figure is still right; only the VAT in the
+// inc column is backdated, so the day is charged at the ex-VAT figure grossed up
+// by the agreement covering it.
+func TestBackdatedZeroRatedStandingChargeKeepsVATBeforeTheCut(t *testing.T) {
+	s := vatSetup(t)
+	base := s.PriceReader.(fakePriceReader)
+	s.PriceReader = scReader{
+		fakePriceReader: base,
+		charges: []prices.DailyCharge{
+			scCharge(time.Date(2024, 9, 30, 23, 0, 0, 0, time.UTC), nil, 59.1606, 59.1606),
+		},
+	}
+
+	// 21 Sep 2026, a whole local day under the 5% agreement.
+	w := doGET(t, s, "/bill?window=custom&from=2026-09-20T23:00:00Z&to=2026-09-21T23:00:00Z")
+	if w.Code != 200 {
+		t.Fatalf("got %d: %s", w.Code, w.Body.String())
+	}
+	m := decode(t, w)
+	got := m["standing_charge"].(float64)
+	if want := 0.591606 * 1.05; got < want-0.0001 || got > want+0.0001 {
+		t.Errorf("standing_charge £%.4f, want £%.4f: 59.1606p ex VAT at the 5%% the agreement "+
+			"for that day says, not the zero-rated inc figure backdated to 2024", got, want)
+	}
+	if m["standing_charge_source"] != "archive_ex_vat" {
+		t.Errorf("standing_charge_source = %v, want archive_ex_vat: the bill used the "+
+			"supplier's ex-VAT figure, not its inc-VAT one, and must say so", m["standing_charge_source"])
+	}
+}
+
+// The same backdated record across the cut: each side gets its own agreement's
+// VAT. The zero-rated side agrees with the supplier and bills its figure as-is.
+func TestBackdatedStandingChargeAcrossTheCutBillsEachSideAtItsOwnVAT(t *testing.T) {
+	s := vatSetup(t)
+	base := s.PriceReader.(fakePriceReader)
+	s.PriceReader = scReader{
+		fakePriceReader: base,
+		charges: []prices.DailyCharge{
+			scCharge(time.Date(2024, 9, 30, 23, 0, 0, 0, time.UTC), nil, 56.19, 56.19),
+		},
+	}
+
+	// 00:00Z 30 Sep to 00:00Z 2 Oct. The agreements split at local midnight,
+	// 23:00Z: 23 hours at 5%, then 25 at 0%.
+	m := decode(t, doGET(t, s, "/bill?window=custom&from=2026-09-30T00:00:00Z&to=2026-10-02T00:00:00Z"))
+	got := m["standing_charge"].(float64)
+	want := 23.0/24*0.5619*1.05 + 25.0/24*0.5619
+	if got < want-0.0001 || got > want+0.0001 {
+		t.Errorf("standing_charge £%.4f, want £%.4f (23h at 5%%, 25h at 0%%)", got, want)
+	}
+	if m["standing_charge_source"] != "archive_ex_vat" {
+		t.Errorf("standing_charge_source = %v, want archive_ex_vat", m["standing_charge_source"])
+	}
+}
+
+// A supplier inc-VAT figure that rounds the agreement's rate is the agreement's
+// rate: it is billed as-is, not recomputed. Same tolerance as the drift alert.
+func TestStandingChargeWithinRoundingOfTheAgreementIsBilledAsIs(t *testing.T) {
+	s := vatSetup(t)
+	base := s.PriceReader.(fakePriceReader)
+	s.PriceReader = scReader{
+		fakePriceReader: base,
+		charges: []prices.DailyCharge{
+			// 59.1606 x 1.05 = 62.11863; the supplier rounds to 62.1186.
+			scCharge(time.Date(2024, 9, 30, 23, 0, 0, 0, time.UTC), nil, 59.1606, 62.1186),
+		},
+	}
+
+	m := decode(t, doGET(t, s, "/bill?window=custom&from=2026-09-20T23:00:00Z&to=2026-09-21T23:00:00Z"))
+	if m["standing_charge_source"] != "archive" {
+		t.Errorf("standing_charge_source = %v, want archive: rounding is not disagreement",
+			m["standing_charge_source"])
+	}
+	// The bill rounds money to 4dp, which cannot tell 62.1186p from 62.11863p;
+	// the source above is what proves the supplier's figure was used.
+	got := m["standing_charge"].(float64)
+	if want := 0.621186; got < want-0.0001 || got > want+0.0001 {
+		t.Errorf("standing_charge £%.4f, want the supplier's own £%.4f", got, want)
 	}
 }
 
@@ -133,12 +217,13 @@ func TestStandingChargeReadFailureFallsBackRatherThanFailing(t *testing.T) {
 func TestArchivedStandingChargeSplitsAtItsOwnBoundary(t *testing.T) {
 	s := vatSetup(t)
 	base := s.PriceReader.(fakePriceReader)
-	boundary := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	// The supplier's charge changes at local midnight, where the agreements split.
+	boundary := time.Date(2026, 9, 30, 23, 0, 0, 0, time.UTC)
 
 	s.PriceReader = scReader{
 		fakePriceReader: base,
 		charges: []prices.DailyCharge{
-			scCharge(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), &boundary, 56.19, 59.0),
+			scCharge(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), &boundary, 56.19, 58.9995),
 			scCharge(boundary, nil, 56.19, 56.19),
 		},
 	}
@@ -147,9 +232,9 @@ func TestArchivedStandingChargeSplitsAtItsOwnBoundary(t *testing.T) {
 	if m["standing_charge_source"] != "archive" {
 		t.Fatalf("source = %v, want archive", m["standing_charge_source"])
 	}
-	// One day at 59p, one at 56.19p.
+	// 23 hours at 58.9995p, then 25 at 56.19p.
 	got := m["standing_charge"].(float64)
-	if want := 0.59 + 0.5619; got < want-0.001 || got > want+0.001 {
+	if want := (23*58.9995 + 25*56.19) / 24 / 100; got < want-0.0001 || got > want+0.0001 {
 		t.Errorf("standing_charge £%.4f, want £%.4f", got, want)
 	}
 }
