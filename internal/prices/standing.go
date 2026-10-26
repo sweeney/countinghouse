@@ -255,12 +255,12 @@ func erasOf(h ChargeHistory) []era {
 			seen = h.Restatements[0].PreviousRetrievedAt
 		}
 	}
-	eras := []era{{fig: fig}, {from: seen, kind: eraWitnessed, fig: fig}}
+	eras := []era{{kind: eraUnwitnessed, fig: fig}, {from: seen, kind: eraWitnessed, fig: fig}}
 	for _, r := range h.Restatements {
 		next := fig
 		next.ExcVATPence, next.IncVATPence = r.NewExcVATPence, r.NewIncVATPence
 		if math.Abs(r.NewExcVATPence-r.OldExcVATPence) > priceEpsilon {
-			eras = []era{{fig: next}, {from: r.DetectedAt, kind: eraWitnessed, fig: next}}
+			eras = []era{{kind: eraUnwitnessed, fig: next}, {from: r.DetectedAt, kind: eraWitnessed, fig: next}}
 		} else {
 			eras = append(eras,
 				era{from: r.PreviousRetrievedAt, kind: eraBetween, fig: fig, alt: next},
@@ -317,7 +317,7 @@ func (s Schedule) ChargeOverAtVAT(from, to time.Time, vatRate float64) (total fl
 	total, ok = s.charge(from, to, func(c DailyCharge, a, b time.Time) float64 {
 		eras, known := s.eras[chargeKey(c)]
 		if !known {
-			eras = []era{{fig: c}}
+			eras = []era{{kind: eraUnwitnessed, fig: c}}
 		}
 		var pence float64
 		for i, e := range eras {
