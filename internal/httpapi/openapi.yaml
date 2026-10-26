@@ -2249,11 +2249,16 @@ components:
             devices — no device causes it.
         standing_charge_source:
           type: string
-          enum: [archive, config]
+          enum: [archive, archive_ex_vat, config]
           description: >-
             Where that figure came from. `archive` is the supplier's own
             VAT-inclusive daily charge, so a VAT change arrives in it rather than
-            having to be applied — the same basis as energy. `config` is the
+            having to be applied — the same basis as energy. `archive_ex_vat` is the
+            supplier's archived EX-VAT daily charge grossed up by the agreement's
+            vat_rate, used for days where the supplier's inc-VAT figure implies a
+            different rate (within 0.05 percentage points) than the agreement
+            covering them. The supplier restates a standing charge in place, so a
+            VAT change can arrive backdated over days it never applied to. `config` is the
             configured ex-VAT rate grossed up by the configured vat_rate, which is
             correct only while that rate is kept current; it is the fallback when no
             standing charge is archived for the whole window, or when the window

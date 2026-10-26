@@ -372,3 +372,95 @@ func TestStandingChargesAlsoRecordFirstSeen(t *testing.T) {
 		t.Errorf("first_seen_at = %q, want %q", firstSeen, want)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ChargeOverAtVAT: the supplier's inc-VAT figure only where it matches the day
+// ---------------------------------------------------------------------------
+
+// #51: one charge, open-ended from 2024, restated in place to its zero-rated
+// figure. Charged at 5%, it must be grossed up from ex-VAT, and say so.
+func TestChargeOverAtVATRegrossesABackdatedZeroRate(t *testing.T) {
+	s := NewSchedule([]DailyCharge{charge(day(2024, 9, 30), nil, 59.1606, 59.1606)})
+
+	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 9, 21), day(2026, 9, 22), 0.05)
+	if !ok {
+		t.Fatal("window is fully covered but ChargeOverAtVAT said no")
+	}
+	if want := 0.591606 * 1.05; math.Abs(got-want) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f", got, want)
+	}
+	if !regrossed {
+		t.Error("regrossed = false; the inc-VAT figure was not used and the caller must know")
+	}
+}
+
+// Where the supplier's figure implies the rate asked for, it is used as-is.
+func TestChargeOverAtVATUsesTheSupplierFigureWhenItAgrees(t *testing.T) {
+	s := NewSchedule([]DailyCharge{charge(day(2024, 9, 30), nil, 59.1606, 59.1606)})
+
+	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 10, 2), day(2026, 10, 4), 0)
+	if !ok {
+		t.Fatal("not covered")
+	}
+	if want := 2 * 0.591606; math.Abs(got-want) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f", got, want)
+	}
+	if regrossed {
+		t.Error("regrossed = true for a figure that implies exactly the rate asked for")
+	}
+}
+
+// Each charge in the window is judged on its own: only the one that disagrees
+// is grossed up.
+func TestChargeOverAtVATJudgesEachChargeSeparately(t *testing.T) {
+	boundary := day(2026, 6, 1)
+	s := NewSchedule([]DailyCharge{
+		charge(day(2026, 1, 1), ptr(boundary), 50, 52.5), // 5%, agrees
+		charge(boundary, nil, 56.19, 56.19),              // 0%, does not
+	})
+
+	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 5, 31), day(2026, 6, 2), 0.05)
+	if !ok {
+		t.Fatal("not covered")
+	}
+	if want := 0.525 + 0.5619*1.05; math.Abs(got-want) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f", got, want)
+	}
+	if !regrossed {
+		t.Error("regrossed = false, but the second charge was grossed up")
+	}
+}
+
+// ChargeOverAtVAT refuses a window it does not fully cover, exactly as
+// ChargeOver does.
+func TestChargeOverAtVATRefusesAGap(t *testing.T) {
+	s := NewSchedule([]DailyCharge{charge(day(2026, 1, 1), ptr(day(2026, 6, 1)), 56.19, 59.0)})
+	if _, _, ok := s.ChargeOverAtVAT(day(2026, 5, 30), day(2026, 6, 3), 0.05); ok {
+		t.Error("window runs past the last charge; ChargeOverAtVAT must refuse it")
+	}
+}
+
+func TestImpliesVATRate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		exc, inc float64
+		rate     float64
+		want     bool
+	}{
+		{"exact 5%", 59.1606, 62.11863, 0.05, true},
+		{"supplier rounding of 5%", 59.1606, 62.1186, 0.05, true},
+		{"zero rate", 59.1606, 59.1606, 0, true},
+		{"zero-rated figure, 5% expected", 59.1606, 59.1606, 0.05, false},
+		{"5% figure, zero expected", 59.1606, 62.11863, 0, false},
+		{"20% figure, 5% expected", 50, 60, 0.05, false},
+		{"no ex-VAT figure is taken at its word", 0, 59, 0.05, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := charge(day(2026, 1, 1), nil, tc.exc, tc.inc)
+			if got := c.ImpliesVATRate(tc.rate); got != tc.want {
+				t.Errorf("ImpliesVATRate(%v) for exc %v inc %v = %v, want %v",
+					tc.rate, tc.exc, tc.inc, got, tc.want)
+			}
+		})
+	}
+}

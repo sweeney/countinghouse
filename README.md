@@ -517,13 +517,15 @@ midnights zero-rates two half hours of 30 September and un-zero-rates two of 31 
 change nobody is watching for, and its failure mode is a bill under-charging VAT rather
 than a loud one.
 
-**What happens if you forget.** Nothing is lost, and — since standing charges are
-archived too — nothing is wrong. The archive keeps filling: the VAT check is Gate B, so
-every slot is stored and flagged `vat_mismatch`. Both energy and the standing charge are
-billed from the supplier's own inc-VAT figures, so the statutory change arrives in the
-data rather than having to be applied from here. `vat_rate` is now purely an
-**expectation**: when it disagrees with the supplier consistently across a batch, the
-collector raises an `agreement_drift` alert naming the rate the supplier is actually
+**What happens if you forget.** Nothing is lost, and energy is still right. The archive
+keeps filling: the VAT check is Gate B, so every slot is stored and flagged
+`vat_mismatch`. Energy is billed from the supplier's own inc-VAT figure for each half
+hour, so the statutory change arrives in the data rather than having to be applied from
+here. The **standing charge is the exception**: it is billed at the agreement's
+`vat_rate` wherever the supplier's figure disagrees with it (see below), so until the
+split is authored, days after the change carry the old rate on the standing charge,
+about 3p a day. The collector says so: when `vat_rate` disagrees with the supplier
+consistently across a batch, it raises an `agreement_drift` alert naming the rate the supplier is actually
 charging — which is the number to paste into the document. "What configuration says"
 in that alert is the rate each slot was actually checked against (the agreement covering
 it): `configured_vat_rate` when the batch has one, or `configured_vat_rate_min`/`_max` and
@@ -531,9 +533,18 @@ a range in the summary when it spans agreements with different rates. An implied
 within 0.05 percentage points of the configured one is treated as supplier rounding and
 raises nothing.
 
-The one case that still depends on config is a window with **no archived standing
-charge** (a fresh deployment, before the first daily sweep). `/bill` says which it used
-in `standing_charge_source`.
+**Why the standing charge follows the agreement.** The supplier restates a standing
+charge **in place**. On 1 Oct 2026 Octopus rewrote the one Agile standing charge, valid
+from 2024 and open-ended, to its zero-rated figure (inc == exc). Billed as-is, every day
+before the cut lost its VAT (#51). The ex-VAT figure did not change, and the agreement
+says what VAT applied on the day, so `/bill` charges each agreement's days at the
+supplier's inc-VAT figure where it implies that agreement's `vat_rate` (within the same
+0.05 percentage points as the alert), and at the supplier's **ex-VAT** figure grossed up
+by `vat_rate` where it does not. `standing_charge_source` is then `archive_ex_vat`.
+
+A window with **no archived standing charge** (a fresh deployment, before the first daily
+sweep) uses config's `daily_standing_charge` instead, with `standing_charge_source:
+config`.
 
 **What does not need doing.** `/prices` and `/prices/stats` serve windows spanning these
 boundaries normally: the split leaves the tariff code unchanged, so there is still one
@@ -561,7 +572,9 @@ the supplier's own inc-VAT column. Archiving it makes both sides of a bill come 
 same place, and demotes `vat_rate` to a checkable expectation everywhere.
 
 `/bill` reports `standing_charge_source`: `archive` when it used the supplier's figure,
-`config` when it fell back. It falls back — whole, never partly — when no archived charge
+`archive_ex_vat` when it used the supplier's ex-VAT figure at the agreement's `vat_rate`
+for days where the supplier's inc-VAT figure implied a different rate (a restatement
+carried back over days it does not apply to, #51), and `config` when it fell back. It falls back — whole, never partly — when no archived charge
 covers the entire window, when the window spans a genuine tariff change (two codes, two
 charges to reconcile; config already segments that correctly), or when the read fails.
 A partial total would look like a correct but cheap bill, which is the failure the whole

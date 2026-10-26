@@ -921,10 +921,10 @@ func rejectionReasons(rejections []prices.Rejection) string {
 const vatDriftMinSlots = 6
 
 // vatDriftEpsilon is how close two implied rates must be to count as the same
-// rate. Generous, because the inputs are pence rounded by the supplier: at a
-// standing charge of 56.19p a single rounded penny moves the implied rate by
-// more than a thousandth.
-const vatDriftEpsilon = 5e-4
+// rate. The same tolerance /bill uses to decide whether an archived standing
+// charge's inc-VAT figure matches the agreement, so the alert and the bill agree
+// on what counts as disagreement.
+const vatDriftEpsilon = prices.VATRateTolerance
 
 // vatDriftFinding is a systematic disagreement between the supplier's VAT and ours.
 //

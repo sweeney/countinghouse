@@ -16,11 +16,12 @@ import (
 // is exactly the class of mistake this service spends its effort preventing.
 // The STORAGE path is shared, so the bitemporal machinery has one implementation.
 //
-// As with Slot, inc is never derived from exc. That is the whole point of
-// archiving these: the supplier's inc-VAT figure is what they bill, so a VAT
-// change — such as the temporary zero rate on domestic electricity in Great
-// Britain, 1 Oct 2026 to 31 Mar 2027 — arrives in the data rather than having to
-// be applied from configuration.
+// As with Slot, inc is never derived from exc when ARCHIVED. The supplier's
+// inc-VAT figure is what they bill, so a VAT change — such as the temporary zero
+// rate on domestic electricity in Great Britain, 1 Oct 2026 to 31 Mar 2027 —
+// arrives in the data rather than having to be applied from configuration. The
+// one place a bill does derive it is ChargeOverAtVAT, for days the archived
+// inc-VAT figure was never true of.
 type DailyCharge struct {
 	TariffCode    string
 	PaymentMethod string
@@ -138,6 +139,56 @@ func (s Schedule) at(t time.Time) (DailyCharge, bool) {
 // or 25 hours and is charged for what it actually lasted, exactly as
 // config.Segment.Days() does.
 func (s Schedule) ChargeOver(from, to time.Time) (float64, bool) {
+	return s.charge(from, to, func(c DailyCharge) float64 { return c.IncVATPence })
+}
+
+// VATRateTolerance is how far a supplier's implied VAT rate may sit from an
+// expected one and still count as the same rate. The inputs are pence rounded by
+// the supplier: at a standing charge of 56.19p a single rounded penny moves the
+// implied rate by more than a thousandth.
+const VATRateTolerance = 5e-4
+
+// ImpliesVATRate reports whether the charge's own inc and exc figures imply
+// rate, within VATRateTolerance. A charge with no ex-VAT figure implies nothing
+// checkable, and is taken at its word.
+func (d DailyCharge) ImpliesVATRate(rate float64) bool {
+	if d.ExcVATPence == 0 {
+		return true
+	}
+	return math.Abs(d.IncVATPence/d.ExcVATPence-1-rate) <= VATRateTolerance
+}
+
+// ChargeOverAtVAT is ChargeOver for a window one agreement covers, at that
+// agreement's VAT rate.
+//
+// Where a charge's inc-VAT figure implies vatRate, it is billed as-is, the
+// supplier's own number. Where it implies something else, the inc-VAT figure is
+// for a different VAT regime than this window's, and the window is billed at the
+// charge's ex-VAT figure grossed up by vatRate instead; regrossed says so.
+//
+// That happens because the supplier restates a standing charge IN PLACE. On
+// 1 Oct 2026 Octopus rewrote the one Agile standing charge, open-ended from
+// 2024, to its zero-rated figure (inc == exc), so the archive held 0% VAT for
+// every day back to 2024 and bills before the cut went out without VAT (#51).
+// The ex-VAT figure was unchanged, and the agreement says what VAT applied on
+// the day, so between them they still give the right number.
+func (s Schedule) ChargeOverAtVAT(from, to time.Time, vatRate float64) (total float64, regrossed bool, ok bool) {
+	total, ok = s.charge(from, to, func(c DailyCharge) float64 {
+		if c.ImpliesVATRate(vatRate) {
+			return c.IncVATPence
+		}
+		regrossed = true
+		return c.ExcVATPence * (1 + vatRate)
+	})
+	if !ok {
+		return 0, false, false
+	}
+	return total, regrossed, true
+}
+
+// charge walks [from, to) across the charges in force, billing each stretch at
+// the pence per day pence returns for it.
+func (s Schedule) charge(from, to time.Time, pence func(DailyCharge) float64) (float64, bool) {
 	if !to.After(from) {
 		return 0, false
 	}
@@ -157,7 +208,7 @@ func (s Schedule) ChargeOver(from, to time.Time) (float64, bool) {
 		// at() guarantees ValidFrom <= cursor < ValidTo, so stop is strictly after
 		// cursor and this terminates.
 		days := stop.Sub(cursor).Hours() / 24
-		total += days * c.IncVATPence / 100
+		total += days * pence(c) / 100
 		cursor = stop
 	}
 	return total, true
