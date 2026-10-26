@@ -375,7 +375,6 @@ func (s *SQLiteStore) restatements(ctx context.Context, rel relation, tariffCode
 	return out, nil
 }
 
-// scanSlot reads one unit_price row.
 // scanSlot reads the seven columns every slot query selects first, then any
 // extra columns into extra.
 func scanSlot(rows *sql.Rows, extra ...any) (Slot, error) {

@@ -553,7 +553,9 @@ publishing **for that day**:
   at the figure seen then, as-is, whatever config says;
 - the stretch between the last sighting of an old figure and the first of a new one
   (the daily sweeps are a day apart) gets whichever of the two the covering agreement's
-  `vat_rate` agrees with, which puts a VAT change at the agreement's midnight;
+  `vat_rate` agrees with, which puts a VAT change at the agreement's midnight. This is
+  the one place config decides a witnessed charge, so a missed daily sweep across a VAT
+  change, or a forgotten split, lets config decide those days;
 - a day before the archive first saw the charge (an archive rebuilt from Octopus, say)
   is billed at the figure held where it implies the agreement's `vat_rate` (within the
   same 0.05 percentage points as the alert), and at its **ex-VAT** figure grossed up by
