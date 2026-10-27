@@ -9,7 +9,7 @@ import (
 	"math"
 	"time"
 
-	commondb "github.com/sweeney/identity/common/db"
+	commondb "github.com/sweeney/common/db"
 )
 
 //go:embed migrations/*.sql
@@ -28,7 +28,7 @@ const timeLayout = "2006-01-02T15:04:05Z"
 // It is the concrete Store (see prices.go). SQLite rather than Influx because
 // this is immutable reference data with interval validity and a composite key
 // that we want the ENGINE to enforce, not a metric stream — see
-// docs/octopus-price-data-model.md §1. It comes from identity/common/db, so it
+// docs/octopus-price-data-model.md §1. It comes from sweeney/common/db, so it
 // shares the house PRAGMAs (WAL, foreign_keys, busy_timeout), 0600 file
 // permissions and the single-connection policy.
 type SQLiteStore struct {
