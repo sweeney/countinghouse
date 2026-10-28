@@ -137,7 +137,7 @@ operator needs in order to correct config and most of what a per-slot `vat_rate`
 would have bought — so this largely answers deferred **D4**. The residual exposure is the
 standing charge, which really does use the config rate.
 
-> **A hazard here was removed upstream.** Until `common/v0.6.0` this paragraph warned that
+> **A hazard here was removed upstream.** Until `identity/common v0.6.0` this paragraph warned that
 > building D4 — a `vat_rate` column, therefore `ALTER TABLE ... ADD COLUMN` — would trip
 > [identity#44](https://github.com/sweeney/identity/issues/44): migrations were replayed on
 > every boot, `ADD COLUMN` could not be made idempotent, and the resulting

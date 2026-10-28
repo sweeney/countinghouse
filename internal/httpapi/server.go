@@ -19,11 +19,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sweeney/common/web/spec"
 	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/countinghouse/internal/influx"
 	"github.com/sweeney/countinghouse/internal/testutil"
 	"github.com/sweeney/identity/common/auth"
-	"github.com/sweeney/identity/common/spec"
 )
 
 // ConfigProvider supplies the current remote-config snapshots the data
