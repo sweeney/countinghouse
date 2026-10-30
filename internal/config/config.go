@@ -113,7 +113,26 @@ func (s *SiteConfig) UnmarshalYAML(unmarshal func(any) error) error {
 type HTTPConfig struct {
 	Listen    string `yaml:"listen"`
 	PublicURL string `yaml:"public_url"`
+
+	// AudienceCheck is how incoming tokens' `aud` claim is checked against
+	// "countinghouse": AudienceWarn (the default) accepts a token that does not
+	// name it and logs the caller, AudienceEnforce refuses it with a 401, and
+	// AudienceOff does neither. Without a check, a token minted for any sibling
+	// service (mqttauth, config) reads countinghouse.
+	//
+	// Warn is the default so the check can ship before anyone has read the
+	// warnings: every one names a caller that enforcing would lock out. Moving
+	// to enforce is then a reviewed change to this default, not an edit of the
+	// host's root-owned config file.
+	AudienceCheck string `yaml:"audience_check"`
 }
+
+// The modes of HTTPConfig.AudienceCheck.
+const (
+	AudienceWarn    = "warn"
+	AudienceEnforce = "enforce"
+	AudienceOff     = "off"
+)
 
 // InfluxConfig describes the (read-only) connection to InfluxDB. Token
 // may be supplied inline or via TokenFile; Load reads the file when
@@ -308,6 +327,15 @@ func Load(path string) (Config, error) {
 	}
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse config: %w", err)
+	}
+	switch cfg.HTTP.AudienceCheck {
+	case "":
+		cfg.HTTP.AudienceCheck = AudienceWarn
+	case AudienceWarn, AudienceEnforce, AudienceOff:
+	default:
+		// A misspelt mode must not quietly mean "off".
+		return cfg, fmt.Errorf("http.audience_check %q: want %q, %q or %q",
+			cfg.HTTP.AudienceCheck, AudienceWarn, AudienceEnforce, AudienceOff)
 	}
 	if cfg.Influx.Token == "" && cfg.Influx.TokenFile != "" {
 		tok, err := os.ReadFile(cfg.Influx.TokenFile)

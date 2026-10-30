@@ -162,9 +162,11 @@ func main() {
 		Config:       fetcher,
 		RemoteConfig: fetcher,
 		IdentityURL:  cfg.Identity.BaseURL,
-		PublicURL:    cfg.HTTP.PublicURL,
-		Version:      version,
-		SiteID:       cfg.Site.ID,
+		// warn unless the config file says otherwise; see HTTPConfig.AudienceCheck.
+		AudienceCheck: cfg.HTTP.AudienceCheck,
+		PublicURL:     cfg.HTTP.PublicURL,
+		Version:       version,
+		SiteID:        cfg.Site.ID,
 		// The RESOLVED namespaces, not the local config values — /healthz must
 		// report what is actually being read, which is now usually what `sites`
 		// said rather than anything in this file.
