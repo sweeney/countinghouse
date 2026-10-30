@@ -54,3 +54,7 @@ Sibling/reference service: `../statehouse` (mirror its conventions).
 - Auth via `github.com/sweeney/identity/common`: JWKS verify inbound, `client_credentials`
   `TokenSource` outbound. **Accept service tokens** (`ParseServiceToken`) as well as user
   tokens — statehouse's gap of rejecting service tokens must not be inherited.
+- The config-service transport comes from `github.com/sweeney/common/remoteconfig` (**v0.1.0**):
+  `remoteconfig.Client` does the GET (name check, one 401 retry with a fresh token, JSON-object
+  check) and `remoteconfig.Tracker` keeps per-namespace status and the landed latch behind
+  `Fetcher.Cold()`. `internal/config` keeps the namespaces, decoding, validation and snapshots.

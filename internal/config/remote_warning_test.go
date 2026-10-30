@@ -48,7 +48,7 @@ func TestFetchErrorIdentifiesTheNamespace(t *testing.T) {
 	defer srv.Close()
 
 	f := &Fetcher{BaseURL: srv.URL, Tokens: &staticTokenSource{"token"}, DevicesNamespace: "devices_home"}
-	err := f.fetch(context.Background(), "token", "devices_hme", &map[string]DeviceConfig{})
+	err := f.fetch(context.Background(), "devices_hme", &map[string]DeviceConfig{})
 	if err == nil {
 		t.Fatal("want an error for a 404")
 	}

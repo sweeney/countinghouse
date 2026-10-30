@@ -77,9 +77,10 @@ func main() {
 		ClientSecret: cfg.Identity.ClientSecret,
 	}
 	fetcher := &config.Fetcher{
-		BaseURL: cfg.RemoteConfig.BaseURL,
-		Tokens:  tokens,
-		Logger:  logger,
+		BaseURL:   cfg.RemoteConfig.BaseURL,
+		Tokens:    tokens,
+		Logger:    logger,
+		UserAgent: "countinghouse/" + version,
 		// The namespace pointers are NOT set here. They are resolved below from the
 		// shared `sites` document — see ResolveNamespaces. The two local values are
 		// fallbacks for partially-filled site entries; devices_namespace has no

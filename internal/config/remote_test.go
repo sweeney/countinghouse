@@ -257,3 +257,57 @@ func (errTokenSource) Token(context.Context) (string, error) {
 	return "", context.DeadlineExceeded
 }
 func (errTokenSource) Invalidate() {}
+
+// rotatingTokenSource issues "stale-token" until invalidated, then "test-token".
+type rotatingTokenSource struct{ invalidated int }
+
+func (r *rotatingTokenSource) Token(context.Context) (string, error) {
+	if r.invalidated == 0 {
+		return "stale-token", nil
+	}
+	return "test-token", nil
+}
+func (r *rotatingTokenSource) Invalidate() { r.invalidated++ }
+
+// A token that expired between being minted and being used is retried at once
+// with a fresh one, rather than leaving the service on its old snapshot until
+// the next SIGHUP.
+func TestFetcher_401RetriesWithFreshToken(t *testing.T) {
+	mux := http.NewServeMux()
+	serveNamespace(mux, "devices_home", map[string]any{
+		"meter": map[string]any{"class": "electricity_meter"},
+	})
+	src := &rotatingTokenSource{}
+	f := newTestFetcher(t, mux, src)
+	f.DevicesNamespace = "devices_home"
+	f.FloorplanNamespace = ""
+	f.Refresh(context.Background())
+
+	if _, ok := f.Devices()["meter"]; !ok {
+		t.Error("the retry with a fresh token should have populated the snapshot")
+	}
+	if !f.Statuses()["devices_home"].OK {
+		t.Error("status should be OK after a successful retry")
+	}
+}
+
+// With the agreements namespace authoritative, a token failure is recorded
+// against IT. The pre-remoteconfig Fetcher recorded it against energy_tariffs,
+// which is not fetched at all in that mode, and left the agreements status
+// showing its last OK.
+func TestFetcher_TokenFailureRecordedAgainstAuthoritativeTariffNamespace(t *testing.T) {
+	f := &Fetcher{BaseURL: "https://config.test", Tokens: &errTokenSource{},
+		DevicesNamespace: "devices_home", FloorplanNamespace: "floorplan_home",
+		EnergyAgreementsNamespace: "energy_agreements"}
+	f.Refresh(context.Background())
+
+	st := f.Statuses()
+	for _, ns := range []string{"devices_home", "floorplan_home", "energy_agreements"} {
+		if s, ok := st[ns]; !ok || s.OK || s.Error == "" {
+			t.Errorf("status[%s] = %+v, %v; want a recorded failure", ns, s, ok)
+		}
+	}
+	if _, ok := st[nsTariffs]; ok {
+		t.Errorf("status recorded for %s, which this Fetcher does not read", nsTariffs)
+	}
+}

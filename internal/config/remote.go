@@ -2,35 +2,23 @@ package config
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
-	"time"
+
+	"github.com/sweeney/common/remoteconfig"
 )
 
-// TokenSource is satisfied by identity.TokenSource. The Fetcher uses it to
-// obtain a Bearer token for the config service and to invalidate that token on
-// a 401 so the next fetch retries with a fresh credential.
-type TokenSource interface {
-	Token(ctx context.Context) (string, error)
-	// Invalidate clears any cached token. Called by Fetcher when the config
-	// service responds with 401, so the next Token() call fetches a fresh one
-	// rather than replaying the rejected credential for its full TTL.
-	Invalidate()
-}
+// TokenSource is satisfied by identity.TokenSource. remoteconfig uses it to
+// obtain a Bearer token for the config service, and invalidates that token on a
+// 401 before retrying once with a fresh credential.
+type TokenSource = remoteconfig.TokenSource
 
 // NamespaceStatus records the outcome of the most recent fetch attempt for a
 // single config namespace, surfaced on /healthz.
-type NamespaceStatus struct {
-	OK        bool      `json:"ok"`
-	FetchedAt time.Time `json:"fetched_at"`
-	Error     string    `json:"error,omitempty"`
-}
+type NamespaceStatus = remoteconfig.Status
 
 // Fetcher fetches the three remote config namespaces countinghouse depends on —
 // this site's devices namespace, energy_tariffs, and this site's floorplan
@@ -52,6 +40,9 @@ type Fetcher struct {
 	Tokens     TokenSource
 	HTTPClient *http.Client
 	Logger     *slog.Logger
+	// UserAgent is sent to the config service, conventionally
+	// "countinghouse/<version>". Empty sends remoteconfig's default.
+	UserAgent string
 
 	// DevicesNamespace names the namespace holding this site's devices. Empty means
 	// the shared pre-migration document, so a Fetcher built without it behaves
@@ -81,22 +72,13 @@ type Fetcher struct {
 	rooms      map[string]RoomConfig
 	tariffs    EnergyTariffs
 	agreements EnergyAgreements
-	statuses   map[string]NamespaceStatus
 
-	// landed records the namespaces that have been fetched successfully at least
-	// once, which is what separates STALE from COLD. It is not derivable from
-	// statuses: a namespace that landed and then failed has OK=false there, and is
-	// exactly the case fail-open exists to protect. Nor is it derivable from the
-	// snapshots — an empty document is a successful fetch of "nothing here", which
-	// is an answer rather than an absence.
-	landed map[string]bool
+	// tracker holds each namespace's latest status and whether it has ever
+	// landed, which is what separates STALE from COLD. Landing is not derivable
+	// from the snapshots: an empty document is a successful fetch of "nothing
+	// here", which is an answer rather than an absence.
+	tracker remoteconfig.Tracker
 }
-
-// defaultFetchClient is used when Fetcher.HTTPClient is nil.
-var defaultFetchClient = &http.Client{Timeout: 10 * time.Second}
-
-// maxConfigBytes is the maximum response body size accepted from the config service.
-const maxConfigBytes = 1 << 20 // 1 MiB
 
 // nsTariffs is the one namespace that is still the same document for every site.
 // The devices namespace is per-site and comes from config — see DevicesNamespace.
@@ -125,12 +107,7 @@ func (f *Fetcher) ResolveNamespaces(ctx context.Context, local SiteConfig) ([]st
 	var sites Sites
 
 	if f.BaseURL != "" {
-		token, err := f.Tokens.Token(ctx)
-		if err != nil {
-			f.recordStatus(nsSites, err)
-			return nil, fmt.Errorf("config: cannot resolve site namespaces: identity token: %w", err)
-		}
-		if err := f.fetch(ctx, token, nsSites, &sites); err != nil {
+		if err := f.fetch(ctx, nsSites, &sites); err != nil {
 			f.recordStatus(nsSites, err)
 			return nil, fmt.Errorf("config: cannot resolve site namespaces: fetching %q: %w", nsSites, err)
 		}
@@ -164,12 +141,8 @@ func (f *Fetcher) SiteNamespaceDrift(ctx context.Context) []string {
 	if f.BaseURL == "" {
 		return nil
 	}
-	token, err := f.Tokens.Token(ctx)
-	if err != nil {
-		return nil
-	}
 	var sites Sites
-	if err := f.fetch(ctx, token, nsSites, &sites); err != nil {
+	if err := f.fetch(ctx, nsSites, &sites); err != nil {
 		return nil
 	}
 	f.mu.RLock()
@@ -285,16 +258,7 @@ func (f *Fetcher) Rooms() map[string]RoomConfig {
 // namespace; main.go treats an empty base_url as an explicit local-dev opt-out and
 // only consults Cold when a config service is named.
 func (f *Fetcher) Cold() []string {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	var out []string
-	for _, ns := range f.configuredNamespaces() {
-		if !f.landed[ns] {
-			out = append(out, ns)
-		}
-	}
-	sort.Strings(out)
-	return out
+	return f.tracker.Cold(f.configuredNamespaces()...)
 }
 
 // configuredNamespaces lists the namespaces this Fetcher reads. An unnamed one is
@@ -328,13 +292,7 @@ func (f *Fetcher) configuredNamespaces() []string {
 // Statuses returns a snapshot of the last fetch result for each namespace.
 // Implements httpapi.ConfigStatus.
 func (f *Fetcher) Statuses() map[string]NamespaceStatus {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	out := make(map[string]NamespaceStatus, len(f.statuses))
-	for k, v := range f.statuses {
-		out[k] = v
-	}
-	return out
+	return f.tracker.Statuses()
 }
 
 // Refresh fetches both namespaces and swaps the held snapshots on success.
@@ -352,23 +310,13 @@ func (f *Fetcher) Refresh(ctx context.Context) {
 		// token fetch or record a status — there is nothing to fetch.
 		return
 	}
-	token, err := f.Tokens.Token(ctx)
-	if err != nil {
-		f.warn("remote config: identity token fetch failed, keeping last-known snapshots", "error", err)
-		f.recordStatus(f.devicesNamespace(), err)
-		f.recordStatus(nsTariffs, err)
-		if f.FloorplanNamespace != "" {
-			f.recordStatus(f.FloorplanNamespace, err)
-		}
-		return
-	}
-	f.refreshDevices(ctx, token)
+	f.refreshDevices(ctx)
 	if f.EnergyAgreementsNamespace != "" {
-		f.refreshAgreements(ctx, token)
+		f.refreshAgreements(ctx)
 	} else {
-		f.refreshTariffs(ctx, token)
+		f.refreshTariffs(ctx)
 	}
-	f.refreshFloorplan(ctx, token)
+	f.refreshFloorplan(ctx)
 }
 
 // refreshFloorplan fetches the floorplan namespace, which carries both the
@@ -380,7 +328,7 @@ func (f *Fetcher) Refresh(ctx context.Context) {
 // required at load time and the DOCUMENT is not: countinghouse insists an
 // operator says where the records live, then tolerates the config service being
 // down.
-func (f *Fetcher) refreshFloorplan(ctx context.Context, token string) {
+func (f *Fetcher) refreshFloorplan(ctx context.Context) {
 	if f.FloorplanNamespace == "" {
 		// Load refuses a config naming no floorplan namespace, so reaching here
 		// means a Fetcher built by hand. Concatenating an empty name would request
@@ -391,7 +339,7 @@ func (f *Fetcher) refreshFloorplan(ctx context.Context, token string) {
 		return
 	}
 	var doc floorplanDocument
-	if err := f.fetch(ctx, token, f.FloorplanNamespace, &doc); err != nil {
+	if err := f.fetch(ctx, f.FloorplanNamespace, &doc); err != nil {
 		f.warn("remote config: floorplan namespace unavailable, keeping last-known",
 			"namespace", f.FloorplanNamespace, "error", err)
 		f.recordStatus(f.FloorplanNamespace, err)
@@ -414,7 +362,7 @@ func (f *Fetcher) refreshFloorplan(ctx context.Context, token string) {
 	f.recordStatus(f.FloorplanNamespace, nil)
 }
 
-func (f *Fetcher) refreshDevices(ctx context.Context, token string) {
+func (f *Fetcher) refreshDevices(ctx context.Context) {
 	ns := f.devicesNamespace()
 	// The request path is built by concatenation, so an unnamed namespace would ask for
 	// /api/v1/config/ — a different endpoint, failing for a reason that says nothing
@@ -428,7 +376,7 @@ func (f *Fetcher) refreshDevices(ctx context.Context, token string) {
 	}
 
 	var devices map[string]DeviceConfig
-	if err := f.fetch(ctx, token, ns, &devices); err != nil {
+	if err := f.fetch(ctx, ns, &devices); err != nil {
 		f.warn("remote config: devices namespace unavailable, keeping last-known",
 			"namespace", ns, "error", err)
 		f.recordStatus(ns, err)
@@ -444,9 +392,9 @@ func (f *Fetcher) refreshDevices(ctx context.Context, token string) {
 	f.recordStatus(ns, nil)
 }
 
-func (f *Fetcher) refreshTariffs(ctx context.Context, token string) {
+func (f *Fetcher) refreshTariffs(ctx context.Context) {
 	var tariffs EnergyTariffs
-	if err := f.fetch(ctx, token, nsTariffs, &tariffs); err != nil {
+	if err := f.fetch(ctx, nsTariffs, &tariffs); err != nil {
 		f.warn("remote config: energy_tariffs unavailable, keeping last-known", "error", err)
 		f.recordStatus(nsTariffs, err)
 		return
@@ -477,10 +425,10 @@ func (f *Fetcher) refreshTariffs(ctx context.Context, token string) {
 // last-known snapshot and records the reason, because applying an ambiguous
 // tariff document would let it price money. With the cold-start rule, boot needs
 // truth and running keeps the last truth.
-func (f *Fetcher) refreshAgreements(ctx context.Context, token string) {
+func (f *Fetcher) refreshAgreements(ctx context.Context) {
 	ns := f.EnergyAgreementsNamespace
 	var agreements EnergyAgreements
-	if err := f.fetch(ctx, token, ns, &agreements); err != nil {
+	if err := f.fetch(ctx, ns, &agreements); err != nil {
 		f.warn("remote config: agreements namespace unavailable, keeping last-known",
 			"namespace", ns, "error", err)
 		f.recordStatus(ns, err)
@@ -498,68 +446,25 @@ func (f *Fetcher) refreshAgreements(ctx context.Context, token string) {
 	f.recordStatus(ns, nil)
 }
 
+// recordStatus records a fetch outcome. A success latches the namespace as
+// landed for the rest of the process's life, so a later failure is stale rather
+// than cold: a transient config-service blip must never promote a healthy
+// instance into a refusal.
 func (f *Fetcher) recordStatus(ns string, err error) {
-	s := NamespaceStatus{OK: err == nil, FetchedAt: time.Now()}
-	if err != nil {
-		s.Error = err.Error()
-	}
-	f.mu.Lock()
-	if f.statuses == nil {
-		f.statuses = make(map[string]NamespaceStatus)
-	}
-	f.statuses[ns] = s
-	if err == nil {
-		if f.landed == nil {
-			f.landed = make(map[string]bool)
-		}
-		// Latched, never cleared: a namespace that has landed once has a snapshot
-		// to fall back on for the rest of the process's life, so a later failure is
-		// stale rather than cold. Clearing it here would let a transient
-		// config-service blip promote a healthy instance into a refusal.
-		f.landed[ns] = true
-	}
-	f.mu.Unlock()
+	f.tracker.Record(ns, err)
 }
 
-func (f *Fetcher) fetch(ctx context.Context, token, ns string, dst any) error {
-	client := f.HTTPClient
-	if client == nil {
-		client = defaultFetchClient
+// fetch reads one namespace. A Client is built per call from the exported
+// fields, so a Fetcher whose BaseURL or Tokens change between refreshes reads
+// with the current ones.
+func (f *Fetcher) fetch(ctx context.Context, ns string, dst any) error {
+	c := remoteconfig.Client{
+		BaseURL:    f.BaseURL,
+		Tokens:     f.Tokens,
+		UserAgent:  f.UserAgent,
+		HTTPClient: f.HTTPClient,
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		f.BaseURL+"/api/v1/config/"+ns, nil)
-	if err != nil {
-		return fmt.Errorf("build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("http: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		f.Tokens.Invalidate()
-		return fmt.Errorf("unauthorized: token may be stale, invalidated for next retry")
-	}
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body) //nolint:errcheck
-		return fmt.Errorf("namespace %s: unexpected status %d", ns, resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxConfigBytes+1))
-	if err != nil {
-		return fmt.Errorf("read body: %w", err)
-	}
-	if int64(len(body)) > maxConfigBytes {
-		return fmt.Errorf("config response exceeds %d bytes", maxConfigBytes)
-	}
-	if err := json.Unmarshal(body, dst); err != nil {
-		return fmt.Errorf("unmarshal: %w", err)
-	}
-	return nil
+	return c.Get(ctx, ns, dst)
 }
 
 func (f *Fetcher) warn(msg string, args ...any) {

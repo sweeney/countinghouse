@@ -77,6 +77,8 @@ github.com/sweeney/common/backup v0.1.0 h1:AkxvrxvD9c/kDLpc9yJ7PwXHhJtda6b91wSYp
 github.com/sweeney/common/backup v0.1.0/go.mod h1:XeWoblZb/LtkwHSzpZcNs7bEP8qmsPWCWqKlM5Jx6hA=
 github.com/sweeney/common/db v0.1.0 h1:U4HPfqLr4Le1rnW9/D2LbPZga/mzJL3tcYpCbHgJHQw=
 github.com/sweeney/common/db v0.1.0/go.mod h1:S8cus8f3QU2jz/5xyz5PKJGnUY6LbYXYEVLybvNPk4Y=
+github.com/sweeney/common/remoteconfig v0.1.0 h1:3X+dvjfL8wxyRd86kXDziuOQBX6q+HUMNcRzai+yJt0=
+github.com/sweeney/common/remoteconfig v0.1.0/go.mod h1:3dPRbqk07XHF+GboSSM/k+cynJ3DS/H5YnMqLrMXfaQ=
 github.com/sweeney/common/web v0.2.0 h1:LnlX9fpg/hMpVMDjqcttWMh6lN4uFzVsdk6vu8IQpBI=
 github.com/sweeney/common/web v0.2.0/go.mod h1:Eol05LCMORsBfLsIXh7QX2tRtgGa8NsMHg+8wbPe/HU=
 github.com/sweeney/identity/common v0.7.0 h1:jPHgEtsXFaNWZMWbzdwXATkEPR8YzvgXsC0bg1Tqf0Y=
