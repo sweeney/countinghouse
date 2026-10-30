@@ -8,7 +8,10 @@
 // identical bugs rather than a property of the code.
 package calendar
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Days returns how many calendar days of supply [from, to) covers, measured in
 // the local calendar of loc. It is the multiplier for a per-day standing charge.
@@ -25,8 +28,9 @@ import "time"
 //     2026 is 23 hours (they go forward); each is one day, because a UK
 //     standing charge is a price per calendar day of supply and that is how the
 //     supplier bills it. The previous elapsed/24 arithmetic billed them as
-//     25/24 and 23/24 of a day — ~2.5p high in October, ~2.5p low in March,
-//     cancelling only over a window that happened to contain both.
+//     25/24 and 23/24 of a day: any window containing the autumn change was
+//     1/24 of a day's charge high (~2.5p at ~59p/day), any containing the
+//     spring change the same low, cancelling only in a window containing both.
 //
 //   - A PART day is pro rata, as the API has always promised — but against the
 //     length of the day it is part of, not against a fixed 24 hours. The first
@@ -45,6 +49,10 @@ import "time"
 // *time.Location that from and to happen to carry — so a window parsed from a
 // query string (UTC) and one built by ResolveWindow (local) bill identically.
 //
+// Zones whose clocks change AT local midnight (America/Santiago,
+// America/Havana — both accepted by config) are handled: a date whose 00:00 is
+// skipped begins at the transition instant (see startOfDay).
+//
 // An empty or inverted span is 0 days. A nil loc is treated as UTC, where every
 // day is 24 hours and this reduces exactly to the old elapsed/24; that keeps a
 // zero-value caller working rather than panicking, but production callers must
@@ -57,20 +65,31 @@ func Days(from, to time.Time, loc *time.Location) float64 {
 		loc = time.UTC
 	}
 
-	// Start at the local midnight of the day containing `from`. Built with
-	// time.Date, as everywhere else in this service, so the offset is correct for
-	// that date (00:00 local is 23:00Z in BST, 00:00Z in GMT).
-	lf := from.In(loc)
-	dayStart := time.Date(lf.Year(), lf.Month(), lf.Day(), 0, 0, 0, 0, loc)
+	// Walk CIVIL DATES, not instants. Each pass names a date (y, m, d) and asks
+	// when that date begins and when the next one does; the date counter, not
+	// the instant, is what advances. Deriving "the next date" from an instant
+	// instead is what used to hang: in a zone that skips midnight, time.Date
+	// resolves the missing 00:00 back to 23:00 the PREVIOUS day, the next pass
+	// read that day's date back off it, and the walk never moved (PR #57 review).
+	y, m, d := from.In(loc).Date()
 
 	var days float64
-	for dayStart.Before(to) {
-		// The next local midnight. AddDate on the calendar fields — never
-		// Add(24*time.Hour) — is the whole point: on a clock-change day the two
-		// differ by an hour. time.Date normalises day overflow (31 Oct + 1 is
-		// 1 Nov), so month and year ends need no special case.
-		ds := dayStart.In(loc)
-		next := time.Date(ds.Year(), ds.Month(), ds.Day()+1, 0, 0, 0, 0, loc)
+	for {
+		dayStart := startOfDay(y, m, d, loc)
+		if !dayStart.Before(to) {
+			break
+		}
+		// d+1 rather than AddDate on dayStart: AddDate keeps dayStart's wall
+		// clock, which on a gap day is 01:00, not 00:00. startOfDay normalises
+		// overflow (31 Oct + 1 is 1 Nov), so month and year ends need no case.
+		next := startOfDay(y, m, d+1, loc)
+		if !next.After(dayStart) {
+			// Unreachable while startOfDay is right: a civil date always lasts
+			// some positive time. Fail loudly rather than spin on the request path,
+			// which is how the original form of this bug presented.
+			panic(fmt.Sprintf("calendar: %04d-%02d-%02d in %s starts at %s but the next date does not start after it (%s)",
+				y, m, d, loc, dayStart.Format(time.RFC3339), next.Format(time.RFC3339)))
+		}
 		length := next.Sub(dayStart) // 23h, 24h or 25h in Europe/London
 
 		// The part of this day that falls inside [from, to). Only the first and
@@ -89,7 +108,54 @@ func Days(from, to time.Time, loc *time.Location) float64 {
 			days += float64(hi.Sub(lo)) / float64(length)
 		}
 
-		dayStart = next
+		d++
 	}
 	return days
+}
+
+// startOfDay returns the first instant of the civil date y-m-d in loc: the
+// instant from which a clock in loc reads that date.
+//
+// Usually that is 00:00 local. Two zone-transition cases make it something else,
+// and both are real in zones config.checkWholeHourZone accepts (America/Santiago
+// and America/Havana change their clocks AT midnight):
+//
+//   - Clocks go BACK at midnight: the hour before midnight repeats and 00:00
+//     itself happens once, which time.Date returns. Taken as is. (Were a zone
+//     ever to repeat 00:00 itself, time.Date returns the first occurrence,
+//     which is when the date begins — still right.)
+//   - Midnight SKIPPED (clocks go forward at 00:00): there is no 00:00 that day;
+//     the clock jumps from 23:59:59 the day before straight to 01:00. The date
+//     begins at that transition instant. time.Date leaves which side of the gap
+//     it resolves to unspecified (today it picks 23:00 the day BEFORE, which is
+//     a different date), so the side is detected and the zone boundary on that
+//     side taken — the same rule energy.resolveWall applies to series axes.
+//     calendar cannot import energy (energy imports calendar), hence a sibling
+//     implementation rather than a shared one.
+//
+// y, m, d may be out of range (d = 32, m = 13, …); they are normalised exactly
+// as time.Date normalises them.
+func startOfDay(y int, m time.Month, d int, loc *time.Location) time.Time {
+	// Normalise the date on a zone with no transitions, so the comparison
+	// below is against the date actually meant (2026-10-32 is 2026-11-01).
+	y, m, d = time.Date(y, m, d, 12, 0, 0, 0, time.UTC).Date()
+
+	t := time.Date(y, m, d, 0, 0, 0, 0, loc)
+	ty, tm, td := t.Date()
+	sameDate := ty == y && tm == m && td == d
+	switch {
+	case sameDate && t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0:
+		// Ordinary, or the first of a repeated midnight.
+		return t
+	case !sameDate:
+		// Resolved short of the gap, into the previous date: the date begins
+		// where that zone period ends.
+		_, end := t.ZoneBounds()
+		return end
+	default:
+		// Resolved past the gap, later on the right date: the date begins where
+		// this zone period starts.
+		start, _ := t.ZoneBounds()
+		return start
+	}
 }

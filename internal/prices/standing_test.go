@@ -795,3 +795,36 @@ func TestChargeOverAtVATChargesTheAutumnClockChangeAsOneDay(t *testing.T) {
 	}
 	wantPence(t, got, 59.1606, 1.0) // not 25/24
 }
+
+// An era boundary INSIDE the 25-hour day, on the path /bill uses (PR #57
+// review). Era boundaries are arbitrary sweep instants (FirstSeenAt,
+// PreviousRetrievedAt, DetectedAt), so they land mid-day as a matter of course,
+// and only calendar.Days' additivity keeps the two pieces of 25 Oct summing to
+// one day. A VAT-only restatement detected at 03:00Z splits the local day
+// (24 Oct 23:00Z .. 26 Oct 00:00Z) into 4 hours at the old witnessed figure and
+// 21 hours at the new one: 4/25 + 21/25, not 4/24 + 21/24.
+func TestChargeOverAtVATSplitsTheAutumnClockChangeDayAtAnEra(t *testing.T) {
+	loc := londonLoc(t)
+	c := charge(at(t, "2024-09-30T23:00:00Z"), nil, 59.1606, 59.1606)
+	s := NewScheduleFromHistory([]ChargeHistory{{
+		Charge:      c,
+		FirstSeenAt: at(t, "2026-09-17T01:03:00Z"),
+		// Previous confirmation and detection at the same instant: no "between"
+		// era, just witnessed-old then witnessed-new.
+		Restatements: []Restatement{vatOnly(t, c, 62.1186, 59.1606, "2026-10-25T03:00:00Z", "2026-10-25T03:00:00Z")},
+	}})
+	from := time.Date(2026, 10, 25, 0, 0, 0, 0, loc)
+	to := time.Date(2026, 10, 26, 0, 0, 0, 0, loc)
+
+	got, regrossed, ok := s.ChargeOverAtVAT(from.UTC(), to.UTC(), 0, loc)
+	if !ok {
+		t.Fatal("covered but ChargeOverAtVAT said no")
+	}
+	if regrossed {
+		t.Error("both eras are witnessed; nothing should be regrossed")
+	}
+	want := (4.0/25.0)*62.1186 + (21.0/25.0)*59.1606
+	if math.Abs(got-want/100) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f (4/25 at 62.1186p + 21/25 at 59.1606p)", got, want/100)
+	}
+}

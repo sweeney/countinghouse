@@ -1013,8 +1013,10 @@ exactly one day — including the clock-change days, which in Europe/London last
 | Mon 26 Oct 2026, 00:00 → 12:00 | 12h | 0.5 |
 
 This matches the supplier's bill. Until issue #56 countinghouse divided elapsed hours by
-24, billing 25 Oct 2026 at £0.6163 (25/24 × £0.5916) where Octopus billed £0.5916 — about
-2.5p high for any October window and 2.5p low for any March one. The archived and
+24, billing 25 Oct 2026 at £0.6163 (25/24 × £0.5916) where Octopus billed £0.5916. Any window
+**containing** the autumn clock-change day came out 1/24 of a day's charge high (about
+2.5p at ~59p/day), and any window containing the spring one the same amount low; a window
+containing neither, or both, was unaffected. The archived and
 configured standing-charge paths, and `/compare`'s `days`, all share one implementation
 (`internal/calendar`), so they cannot disagree about what a day is.
 

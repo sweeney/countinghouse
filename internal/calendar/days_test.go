@@ -107,6 +107,19 @@ func TestDays(t *testing.T) {
 			want: 2.0,
 		},
 
+		{
+			// A UTC calendar day across the change, as a client sending UTC query
+			// strings would ask for it. 24 elapsed hours, and it lies wholly INSIDE
+			// the 25-hour local Sun 25 Oct (which runs 24 Oct 23:00Z to 26 Oct
+			// 00:00Z), so it is 24/25 of a day — not 1. Surprising, and correct by
+			// the definition: the house is billed in London days, and this span is
+			// one of them less its first hour.
+			name: "UTC day 25 Oct 00:00Z to 26 Oct 00:00Z is 24/25",
+			from: time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC),
+			to:   time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC),
+			want: 24.0 / 25.0,
+		},
+
 		// --- Ordinary days are unchanged: regression guard for every other day
 		// of the year, which the fix must not touch.
 		{
