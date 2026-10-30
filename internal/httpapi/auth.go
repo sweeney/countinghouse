@@ -2,9 +2,11 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/identity/common/auth"
 )
 
@@ -27,12 +29,16 @@ func (s *Server) authMiddleware() func(http.Handler) http.Handler {
 		Logger:    s.Logger,
 	}
 	switch s.AudienceCheck {
-	case "warn":
+	case config.AudienceWarn:
 		// Accepted, and logged with the caller's subject and audience: each
 		// warning is a caller that enforcing would lock out.
 		vc.RequiredAudience, vc.RequiredAudienceWarnOnly = Audience, true
-	case "enforce":
+	case config.AudienceEnforce:
 		vc.RequiredAudience = Audience
+	case config.AudienceOff, "":
+	default:
+		// config.Load refuses any other mode, so this is a wiring mistake.
+		panic(fmt.Sprintf("httpapi: unknown audience check %q", s.AudienceCheck))
 	}
 	verifier, err := auth.NewJWKSVerifier(vc)
 	if err != nil {

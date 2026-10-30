@@ -44,12 +44,14 @@ const audienceWarning = "token would be rejected by audience enforcement"
 
 func TestAudienceWarnAcceptsAWrongAudienceAndLogsIt(t *testing.T) {
 	for _, typ := range []string{"JWT", "at+jwt"} {
-		h, logs, mint := audienceSetup(t, "warn")
-		if w := doAuth(h, mint(typ, []string{"mqttauth"})); w.Code != http.StatusOK {
-			t.Errorf("%s: want 200 in warn mode, got %d", typ, w.Code)
-		}
-		if !strings.Contains(logs.String(), audienceWarning) || !strings.Contains(logs.String(), Audience) {
-			t.Errorf("%s: want a warning naming %q, log was:\n%s", typ, Audience, logs)
+		for _, aud := range []any{nil, []string{"mqttauth"}} {
+			h, logs, mint := audienceSetup(t, "warn")
+			if w := doAuth(h, mint(typ, aud)); w.Code != http.StatusOK {
+				t.Errorf("%s aud=%v: want 200 in warn mode, got %d", typ, aud, w.Code)
+			}
+			if !strings.Contains(logs.String(), audienceWarning) || !strings.Contains(logs.String(), Audience) {
+				t.Errorf("%s aud=%v: want a warning naming %q, log was:\n%s", typ, aud, Audience, logs)
+			}
 		}
 	}
 }
@@ -92,4 +94,14 @@ func TestAudienceOffNeitherRefusesNorLogs(t *testing.T) {
 	if strings.Contains(logs.String(), audienceWarning) {
 		t.Errorf("off must not log, log was:\n%s", logs)
 	}
+}
+
+// A mode the config layer would have refused is a programming error here.
+func TestAudienceUnknownModePanics(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("want a panic for an unknown audience mode")
+		}
+	}()
+	audienceSetup(t, "enforcing")
 }
