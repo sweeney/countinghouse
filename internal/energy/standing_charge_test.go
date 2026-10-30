@@ -79,7 +79,7 @@ func TestStandingChargeAcross(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := StandingChargeAcross(tc.segs)
+			got := StandingChargeAcross(tc.segs, time.UTC)
 			if math.Abs(got-tc.want) > 1e-12 {
 				t.Errorf("StandingChargeAcross = %v, want %v", got, tc.want)
 			}
@@ -91,11 +91,11 @@ func TestStandingChargeAcross(t *testing.T) {
 // carry the same tariff. If it does, the apportionment is lossy and the first bill
 // after any switchover is wrong by the rounding.
 func TestStandingChargeAcrossIsAdditive(t *testing.T) {
-	whole := StandingChargeAcross([]config.Segment{seg(30, 0.591606, 0.05)})
+	whole := StandingChargeAcross([]config.Segment{seg(30, 0.591606, 0.05)}, time.UTC)
 	split := StandingChargeAcross([]config.Segment{
 		seg(11.5, 0.591606, 0.05),
 		seg(18.5, 0.591606, 0.05),
-	})
+	}, time.UTC)
 	if math.Abs(whole-split) > 1e-12 {
 		t.Errorf("30 days costs %v whole but %v split in two; apportionment must be additive", whole, split)
 	}

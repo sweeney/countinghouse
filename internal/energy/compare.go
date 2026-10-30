@@ -180,8 +180,12 @@ func FlatCost(label string, kwh, days, unitRate, dailyStanding, vatRate float64)
 	}
 }
 
-// WindowDays is the window's length in fractional days.
-func WindowDays(w Window) float64 { return w.Stop.Sub(w.Start).Hours() / 24 }
+// WindowDays is the window's length in fractional CALENDAR days in loc — the
+// same measure /bill charges the standing charge on (see Window.Days and
+// calendar.Days), so a counterfactual's standing charge is computed on exactly
+// the days the actual bill was. A 25-hour clock-change day is one day here, as
+// it is on the bill (issue #56).
+func WindowDays(w Window, loc *time.Location) float64 { return w.Days(loc) }
 
 // MeanRateOverWindow returns the time-weighted mean VAT-inclusive £/kWh across
 // the whole window, and whether every interval in it was priced.

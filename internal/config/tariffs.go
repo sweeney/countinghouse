@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/sweeney/countinghouse/internal/calendar"
 )
 
 // Tariff is a RESOLVED tariff: what a kWh and a day cost at one instant.
@@ -65,10 +67,16 @@ type Segment struct {
 	Tariff      Tariff
 }
 
-// Days returns the segment's length in days, for apportioning the standing
-// charge. Fractional, and computed from real elapsed time so a segment spanning
-// a DST changeover counts the 23 or 25 hours it actually lasted.
-func (s Segment) Days() float64 { return s.Stop.Sub(s.Start).Hours() / 24 }
+// Days returns how many calendar days of supply the segment covers in loc, for
+// apportioning the standing charge.
+//
+// Calendar days, not elapsed hours / 24 (issue #56): a whole local day counts 1
+// whether it lasted 23, 24 or 25 hours, because a standing charge is a price per
+// day of supply and the supplier bills a clock-change day as one day. A part day
+// is pro rata against the length of its own day. Delegates to calendar.Days —
+// the same function prices.Schedule.ChargeOver uses — so the configured and
+// archived standing charges cannot drift apart on what a day is.
+func (s Segment) Days(loc *time.Location) float64 { return calendar.Days(s.Start, s.Stop, loc) }
 
 // EnergyTariffs is the payload of the LEGACY `energy_tariffs` namespace: one
 // current rate per fuel, with no dates.

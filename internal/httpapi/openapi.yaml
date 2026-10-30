@@ -305,6 +305,12 @@ paths:
         that reads like a measurement. It is apportioned across TARIFF SEGMENTS
         instead — a window spanning a switchover is charged each side's daily rate for
         its own days — and a partial day is billed pro rata rather than rounded up.
+
+        A day is a CALENDAR day in `house.timezone`, not 24 hours: a whole
+        local day is charged as exactly one day even when a clock change makes it
+        25 or 23 hours long, because that is how a UK supplier bills a per-day
+        standing charge. A partial day is pro rata against the length of ITS OWN
+        day (the first 12 hours of a 25-hour day are 12/25 of a day).
       operationId: getBill
       tags: [data]
       parameters:
@@ -2245,8 +2251,10 @@ components:
           type: number
           description: >-
             VAT-inclusive GBP for the window, apportioned across tariff segments and
-            pro rata for a partial day. Charged once here and NEVER split across
-            devices — no device causes it.
+            pro rata for a partial day. Charged per CALENDAR day in `house.timezone`:
+            a whole 25- or 23-hour clock-change day is one day, and a
+            partial day is pro rata against its own day's length. Charged once here
+            and NEVER split across devices — no device causes it.
         standing_charge_source:
           type: string
           enum: [archive, archive_ex_vat, config]
@@ -2730,9 +2738,12 @@ components:
         days:
           type: number
           description: >
-            Window length in FRACTIONAL days. Standing charges are pro-rated on
-            it, so a part-day window does not flatter or penalise an alternative
-            for a reason unrelated to the tariff.
+            Window length in FRACTIONAL calendar days in `house.timezone`,
+            counted exactly as /bill counts them: a whole clock-change day is 1
+            (not 25/24 or 23/24) and a part day is pro rata against its own day's
+            length. Standing charges are pro-rated on it, so a part-day window does
+            not flatter or penalise an alternative for a reason unrelated to the
+            tariff.
         scope:
           type: string
           enum: [household, monitored]

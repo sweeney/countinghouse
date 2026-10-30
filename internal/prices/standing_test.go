@@ -116,7 +116,7 @@ func TestScheduleChargesEachRateForItsOwnDays(t *testing.T) {
 		charge(boundary, nil, 56.19, 56.19),                 // zero-rated
 	})
 
-	got, ok := s.ChargeOver(day(2026, 9, 29), day(2026, 10, 4))
+	got, ok := s.ChargeOver(day(2026, 9, 29), day(2026, 10, 4), time.UTC)
 	if !ok {
 		t.Fatal("window is fully covered but ChargeOver said no")
 	}
@@ -133,33 +133,97 @@ func TestScheduleRefusesAWindowItDoesNotFullyCover(t *testing.T) {
 	s := NewSchedule([]DailyCharge{
 		charge(day(2026, 1, 1), ptr(day(2026, 6, 1)), 56.19, 59.0),
 	})
-	if _, ok := s.ChargeOver(day(2026, 5, 30), day(2026, 6, 3)); ok {
+	if _, ok := s.ChargeOver(day(2026, 5, 30), day(2026, 6, 3), time.UTC); ok {
 		t.Error("window runs past the last charge; ChargeOver must refuse it")
 	}
-	if _, ok := s.ChargeOver(day(2025, 12, 30), day(2026, 1, 3)); ok {
+	if _, ok := s.ChargeOver(day(2025, 12, 30), day(2026, 1, 3), time.UTC); ok {
 		t.Error("window starts before the first charge; ChargeOver must refuse it")
 	}
 }
 
-// Elapsed time, not calendar days. A window spanning the autumn changeover lasted
-// 25 hours, and is charged for what it actually lasted.
-func TestScheduleChargesRealElapsedTimeAcrossDST(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Clock-change days (issue #56).
+//
+// A standing charge is a price per CALENDAR DAY of supply. Octopus bills
+// 25 October 2026 — a 25-hour local day — at exactly one day's charge, and
+// 29 March 2026 — 23 hours — at one day's charge too. This test used to pin the
+// opposite (25/24 of a day, "charged for what it actually lasted"), and that is
+// how prod came to bill 25 Oct at £0.6163 against the supplier's £0.5916.
+//
+// Part days stay pro rata, but against the length of THE DAY THEY ARE PART OF:
+// twelve hours of a 25-hour day is 12/25 of a day's charge, not 12/24.
+// ---------------------------------------------------------------------------
+
+func londonLoc(t *testing.T) *time.Location {
+	t.Helper()
 	loc, err := time.LoadLocation("Europe/London")
 	if err != nil {
 		t.Fatal(err)
 	}
+	return loc
+}
+
+func TestScheduleChargesCalendarDaysAcrossDST(t *testing.T) {
+	loc := londonLoc(t)
+	// 59p/day inc VAT throughout, so every expectation is "days × £0.59".
 	s := NewSchedule([]DailyCharge{charge(day(2020, 1, 1), nil, 56.19, 59.0)})
+	at := func(y int, m time.Month, d, h int) time.Time { return time.Date(y, m, d, h, 0, 0, 0, loc) }
 
-	// 25 October 2026: the clocks go back, so this local day is 25 hours.
-	from := time.Date(2026, 10, 25, 0, 0, 0, 0, loc)
-	to := time.Date(2026, 10, 26, 0, 0, 0, 0, loc)
+	tests := []struct {
+		name     string
+		from, to time.Time
+		days     float64
+	}{
+		// THE prod case: the whole of the 25-hour day is one day, not 25/24.
+		{"25 Oct 2026 whole (25h)", at(2026, 10, 25, 0), at(2026, 10, 26, 0), 1.0},
+		// Its mirror image, which under-billed by the same 1/24 of a day.
+		{"29 Mar 2026 whole (23h)", at(2026, 3, 29, 0), at(2026, 3, 30, 0), 1.0},
+		// First twelve elapsed hours of the long day: 12/25, not 12/24.
+		{"25 Oct first 12 elapsed hours", at(2026, 10, 25, 0), at(2026, 10, 25, 0).Add(12 * time.Hour), 12.0 / 25.0},
+		// Twenty-four elapsed hours is NOT the whole day: an hour of it is still to come.
+		{"25 Oct 00:00 local to 23:00Z", at(2026, 10, 25, 0), time.Date(2026, 10, 25, 23, 0, 0, 0, time.UTC), 24.0 / 25.0},
+		// Whole days spanning the change are whole: 2, not 49/24.
+		{"24-26 Oct whole days", at(2026, 10, 24, 0), at(2026, 10, 26, 0), 2.0},
+		// Regression guard: an ordinary day's half is still half.
+		{"26 Oct 00:00-12:00 (ordinary day)", at(2026, 10, 26, 0), at(2026, 10, 26, 12), 0.5},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// UTC instants, exactly as archivedStandingCharge passes them: the
+			// calendar comes from loc, not from the arguments' own Location.
+			got, ok := s.ChargeOver(tc.from.UTC(), tc.to.UTC(), loc)
+			if !ok {
+				t.Fatal("not covered")
+			}
+			if want := tc.days * 0.59; math.Abs(got-want) > 1e-9 {
+				t.Errorf("charge £%.6f, want £%.6f (%.6f days at £0.59)", got, want, tc.days)
+			}
+		})
+	}
+}
 
-	got, ok := s.ChargeOver(from.UTC(), to.UTC())
+// A standing-charge change landing INSIDE a clock-change day: each side is
+// charged its share of that 25-hour day at its own rate, and the shares still
+// add up to exactly one day. The cursor loop calls Days once per charge, so this
+// is what proves the per-segment pieces are measured against the day they sit
+// in rather than against 24 hours each.
+func TestScheduleSplitsAClockChangeDayAtARateChange(t *testing.T) {
+	loc := londonLoc(t)
+	dayStart := time.Date(2026, 10, 25, 0, 0, 0, 0, loc)
+	// Five elapsed hours in: 04:00 GMT, after the repeated 01:00 hour.
+	change := dayStart.Add(5 * time.Hour)
+	s := NewSchedule([]DailyCharge{
+		charge(day(2020, 1, 1), ptr(change.UTC()), 50, 50.0), // 50p/day
+		charge(change.UTC(), nil, 75, 75.0),                  // 75p/day
+	})
+
+	got, ok := s.ChargeOver(dayStart.UTC(), dayStart.AddDate(0, 0, 1).UTC(), loc)
 	if !ok {
 		t.Fatal("not covered")
 	}
-	if want := (25.0 / 24.0) * 0.59; math.Abs(got-want) > 1e-9 {
-		t.Errorf("charge £%.6f, want £%.6f (25 hours, not 24)", got, want)
+	want := (5.0/25.0)*0.50 + (20.0/25.0)*0.75
+	if math.Abs(got-want) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f (5/25 at 50p + 20/25 at 75p)", got, want)
 	}
 }
 
@@ -382,7 +446,7 @@ func TestStandingChargesAlsoRecordFirstSeen(t *testing.T) {
 func TestChargeOverAtVATRegrossesABackdatedZeroRate(t *testing.T) {
 	s := NewSchedule([]DailyCharge{charge(day(2024, 9, 30), nil, 59.1606, 59.1606)})
 
-	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 9, 21), day(2026, 9, 22), 0.05)
+	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 9, 21), day(2026, 9, 22), 0.05, time.UTC)
 	if !ok {
 		t.Fatal("window is fully covered but ChargeOverAtVAT said no")
 	}
@@ -398,7 +462,7 @@ func TestChargeOverAtVATRegrossesABackdatedZeroRate(t *testing.T) {
 func TestChargeOverAtVATUsesTheSupplierFigureWhenItAgrees(t *testing.T) {
 	s := NewSchedule([]DailyCharge{charge(day(2024, 9, 30), nil, 59.1606, 59.1606)})
 
-	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 10, 2), day(2026, 10, 4), 0)
+	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 10, 2), day(2026, 10, 4), 0, time.UTC)
 	if !ok {
 		t.Fatal("not covered")
 	}
@@ -419,7 +483,7 @@ func TestChargeOverAtVATJudgesEachChargeSeparately(t *testing.T) {
 		charge(boundary, nil, 56.19, 56.19),              // 0%, does not
 	})
 
-	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 5, 31), day(2026, 6, 2), 0.05)
+	got, regrossed, ok := s.ChargeOverAtVAT(day(2026, 5, 31), day(2026, 6, 2), 0.05, time.UTC)
 	if !ok {
 		t.Fatal("not covered")
 	}
@@ -435,7 +499,7 @@ func TestChargeOverAtVATJudgesEachChargeSeparately(t *testing.T) {
 // ChargeOver does.
 func TestChargeOverAtVATRefusesAGap(t *testing.T) {
 	s := NewSchedule([]DailyCharge{charge(day(2026, 1, 1), ptr(day(2026, 6, 1)), 56.19, 59.0)})
-	if _, _, ok := s.ChargeOverAtVAT(day(2026, 5, 30), day(2026, 6, 3), 0.05); ok {
+	if _, _, ok := s.ChargeOverAtVAT(day(2026, 5, 30), day(2026, 6, 3), 0.05, time.UTC); ok {
 		t.Error("window runs past the last charge; ChargeOverAtVAT must refuse it")
 	}
 }
@@ -493,7 +557,7 @@ func productionHistory(t *testing.T) ChargeHistory {
 
 func chargeAt(t *testing.T, s Schedule, from, to string, vat float64) (float64, bool) {
 	t.Helper()
-	got, regrossed, ok := s.ChargeOverAtVAT(at(t, from), at(t, to), vat)
+	got, regrossed, ok := s.ChargeOverAtVAT(at(t, from), at(t, to), vat, londonLoc(t))
 	if !ok {
 		t.Fatalf("%s..%s is covered but ChargeOverAtVAT said no", from, to)
 	}
@@ -708,5 +772,59 @@ func TestStandingChargeVATIsJudgedWhenItWasRetrieved(t *testing.T) {
 	past.RetrievedAt = c.RetrievedAt
 	if res := ValidateStandingCharges([]DailyCharge{past}, ValidateOptions{ExpectVATRateAt: split}); len(res.Warnings) != 0 {
 		t.Errorf("warned on a 5%% charge that ended at the cut: %+v", res.Warnings)
+	}
+}
+
+// Issue #56 on the era-aware path (#55), which is the one /bill actually uses.
+// ChargeOverAtVAT cuts a charge into eras and measures each piece separately,
+// so it needs the calendar-day rule as much as ChargeOver does: production's
+// zero-rated figure, witnessed from 1 Oct, billed for the whole local day of
+// 25 Oct 2026 (25 hours) must come to exactly one day's charge.
+func TestChargeOverAtVATChargesTheAutumnClockChangeAsOneDay(t *testing.T) {
+	loc := londonLoc(t)
+	s := NewScheduleFromHistory([]ChargeHistory{productionHistory(t)})
+	from := time.Date(2026, 10, 25, 0, 0, 0, 0, loc)
+	to := time.Date(2026, 10, 26, 0, 0, 0, 0, loc)
+
+	got, regrossed, ok := s.ChargeOverAtVAT(from.UTC(), to.UTC(), 0, loc)
+	if !ok {
+		t.Fatal("covered but ChargeOverAtVAT said no")
+	}
+	if regrossed {
+		t.Error("a witnessed day must bill the supplier's figure, not a regrossed one")
+	}
+	wantPence(t, got, 59.1606, 1.0) // not 25/24
+}
+
+// An era boundary INSIDE the 25-hour day, on the path /bill uses (PR #57
+// review). Era boundaries are arbitrary sweep instants (FirstSeenAt,
+// PreviousRetrievedAt, DetectedAt), so they land mid-day as a matter of course,
+// and only calendar.Days' additivity keeps the two pieces of 25 Oct summing to
+// one day. A VAT-only restatement detected at 03:00Z splits the local day
+// (24 Oct 23:00Z .. 26 Oct 00:00Z) into 4 hours at the old witnessed figure and
+// 21 hours at the new one: 4/25 + 21/25, not 4/24 + 21/24.
+func TestChargeOverAtVATSplitsTheAutumnClockChangeDayAtAnEra(t *testing.T) {
+	loc := londonLoc(t)
+	c := charge(at(t, "2024-09-30T23:00:00Z"), nil, 59.1606, 59.1606)
+	s := NewScheduleFromHistory([]ChargeHistory{{
+		Charge:      c,
+		FirstSeenAt: at(t, "2026-09-17T01:03:00Z"),
+		// Previous confirmation and detection at the same instant: no "between"
+		// era, just witnessed-old then witnessed-new.
+		Restatements: []Restatement{vatOnly(t, c, 62.1186, 59.1606, "2026-10-25T03:00:00Z", "2026-10-25T03:00:00Z")},
+	}})
+	from := time.Date(2026, 10, 25, 0, 0, 0, 0, loc)
+	to := time.Date(2026, 10, 26, 0, 0, 0, 0, loc)
+
+	got, regrossed, ok := s.ChargeOverAtVAT(from.UTC(), to.UTC(), 0, loc)
+	if !ok {
+		t.Fatal("covered but ChargeOverAtVAT said no")
+	}
+	if regrossed {
+		t.Error("both eras are witnessed; nothing should be regrossed")
+	}
+	want := (4.0/25.0)*62.1186 + (21.0/25.0)*59.1606
+	if math.Abs(got-want/100) > 1e-9 {
+		t.Errorf("charge £%.6f, want £%.6f (4/25 at 62.1186p + 21/25 at 59.1606p)", got, want/100)
 	}
 }

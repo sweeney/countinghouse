@@ -89,7 +89,7 @@ func TestFlatCostGrossesUpBothComponents(t *testing.T) {
 func TestWindowDaysIsFractional(t *testing.T) {
 	start := time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC)
 	w := Window{Start: start, Stop: start.Add(36 * time.Hour)}
-	if got := WindowDays(w); math.Abs(got-1.5) > 1e-9 {
+	if got := WindowDays(w, time.UTC); math.Abs(got-1.5) > 1e-9 {
 		t.Errorf("WindowDays = %v, want 1.5", got)
 	}
 }
@@ -143,5 +143,23 @@ func TestValidScope(t *testing.T) {
 		if ValidScope(s) {
 			t.Errorf("ValidScope(%q) = true, want false", s)
 		}
+	}
+}
+
+// /compare reports `days` and prices every alternative's standing charge from
+// it, so it must count a clock-change day as one day like /bill does (issue #56).
+// Otherwise a counterfactual on 25 Oct would carry 1/24 of a day's charge that
+// the actual bill does not, and report it as a saving or a cost of switching.
+func TestWindowDaysCountsTheAutumnClockChangeAsOneDay(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/London")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := Window{
+		Start: time.Date(2026, 10, 25, 0, 0, 0, 0, loc),
+		Stop:  time.Date(2026, 10, 26, 0, 0, 0, 0, loc),
+	}
+	if got := WindowDays(w, loc); got != 1 {
+		t.Errorf("WindowDays = %v, want 1 (not 25/24)", got)
 	}
 }

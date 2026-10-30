@@ -5,6 +5,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/sweeney/countinghouse/internal/calendar"
 	"github.com/sweeney/countinghouse/internal/octopus"
 )
 
@@ -136,12 +137,24 @@ func (s Schedule) at(t time.Time) (DailyCharge, bool) {
 // ChargeOver returns the VAT-inclusive GBP standing charge for [from, to),
 // apportioned across every rate in force during it.
 //
-// Elapsed time, not calendar days: a window spanning a DST changeover lasted 23
-// or 25 hours and is charged for what it actually lasted, exactly as
-// config.Segment.Days() does.
-func (s Schedule) ChargeOver(from, to time.Time) (float64, bool) {
+// Calendar days, not elapsed time (issue #56). A standing charge is a price per
+// calendar day of supply, so a whole local day is charged as one day whether it
+// lasted 23, 24 or 25 hours — which is how the supplier bills it. A part day is
+// pro rata against the length of the day it is part of. loc is the zone whose
+// calendar defines "a day" (the house zone, Europe/London in prod); from and to
+// may carry any Location.
+//
+// Each charge period's share is measured with calendar.Days, the same function
+// config.Segment.Days uses, so the archive path and the configured-tariff path
+// cannot disagree about what a day is. calendar.Days is additive, so a charge
+// change landing mid-day splits that day between the two rates and the shares
+// still sum to exactly one day.
+//
+// Previously this was stop.Sub(cursor).Hours()/24, deliberately — "charged for
+// what it actually lasted" — which billed 25 Oct 2026 at 25/24 of a day.
+func (s Schedule) ChargeOver(from, to time.Time, loc *time.Location) (float64, bool) {
 	return s.charge(from, to, func(c DailyCharge, a, b time.Time) float64 {
-		return daysBetween(a, b) * c.IncVATPence
+		return calendar.Days(a, b, loc) * c.IncVATPence
 	})
 }
 
@@ -313,7 +326,10 @@ func (e era) pence(vatRate float64) (float64, bool) {
 //
 // A schedule built without history knows of no witnessed days, so every
 // disagreeing day is regrossed.
-func (s Schedule) ChargeOverAtVAT(from, to time.Time, vatRate float64) (total float64, regrossed bool, ok bool) {
+//
+// Days are calendar days in loc, exactly as ChargeOver counts them: a whole
+// 25- or 23-hour clock-change day is one day (issue #56).
+func (s Schedule) ChargeOverAtVAT(from, to time.Time, vatRate float64, loc *time.Location) (total float64, regrossed bool, ok bool) {
 	total, ok = s.charge(from, to, func(c DailyCharge, a, b time.Time) float64 {
 		eras, known := s.eras[chargeKey(c)]
 		if !known {
@@ -333,7 +349,10 @@ func (s Schedule) ChargeOverAtVAT(from, to time.Time, vatRate float64) (total fl
 			}
 			p, rg := e.pence(vatRate)
 			regrossed = regrossed || rg
-			pence += daysBetween(lo, hi) * p
+			// Calendar days in loc (issue #56). calendar.Days is additive, so
+			// cutting one charge into eras — even mid-way through a 25-hour
+			// clock-change day — still sums to the days the charge covers.
+			pence += calendar.Days(lo, hi, loc) * p
 		}
 		return pence
 	})
@@ -369,8 +388,6 @@ func (s Schedule) charge(from, to time.Time, bill func(c DailyCharge, a, b time.
 	}
 	return total, true
 }
-
-func daysBetween(a, b time.Time) float64 { return b.Sub(a).Hours() / 24 }
 
 // ValidateStandingCharges runs the same two gates over standing charges that
 // Validate runs over prices, with the slot-grid checks dropped — a standing

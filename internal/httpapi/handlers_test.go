@@ -350,8 +350,9 @@ func TestBill(t *testing.T) {
 		t.Errorf("energy_cost = %v want %v", bill.EnergyCost, round.To(rawEnergy, round.MoneyDP))
 	}
 
-	// Standing charge: window.Days() for month-to-date. now=2026-06-11 13:00 UTC,
-	// month start = 2026-06-01 00:00 BST = 2026-05-31 23:00 UTC. Days = elapsed/24h.
+	// Standing charge: window.Days(loc) for month-to-date. now=2026-06-11 13:00 UTC,
+	// month start = 2026-06-01 00:00 BST = 2026-05-31 23:00 UTC. June has no clock
+	// change, so every local day is 24h and calendar days == elapsed/24h here.
 	loc, _ := time.LoadLocation("Europe/London")
 	start := time.Date(2026, 6, 1, 0, 0, 0, 0, loc)
 	stop := time.Date(2026, 6, 11, 13, 0, 0, 0, time.UTC)

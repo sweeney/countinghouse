@@ -124,7 +124,7 @@ func (s *Server) planFor(ctx context.Context, from, to time.Time) (tariffPlan, e
 	}
 
 	plan := tariffPlan{
-		standing:       energy.StandingChargeAcross(segments),
+		standing:       energy.StandingChargeAcross(segments, s.loc()),
 		standingSource: standingSourceConfig,
 	}
 
@@ -351,7 +351,7 @@ func (s *Server) archivedStandingCharge(ctx context.Context, code string, from, 
 	var total float64
 	source := standingSourceArchive
 	for _, seg := range segments {
-		charged, regrossed, ok := schedule.ChargeOverAtVAT(seg.Start.UTC(), seg.Stop.UTC(), seg.Tariff.VATRate)
+		charged, regrossed, ok := schedule.ChargeOverAtVAT(seg.Start.UTC(), seg.Stop.UTC(), seg.Tariff.VATRate, s.loc())
 		if !ok {
 			return 0, "", false
 		}

@@ -29,7 +29,7 @@ func vatLoc(t *testing.T) *time.Location {
 }
 
 // A bill spanning 1 October charges the standing charge at 5% up to the boundary
-// and at 0% after it, apportioned by real elapsed days.
+// and at 0% after it, apportioned by calendar days in loc.
 func TestStandingChargeAcrossTheZeroRateBoundary(t *testing.T) {
 	loc := vatLoc(t)
 	boundary := time.Date(2026, 10, 1, 0, 0, 0, 0, loc)
@@ -46,7 +46,7 @@ func TestStandingChargeAcrossTheZeroRateBoundary(t *testing.T) {
 		},
 	}
 
-	got := StandingChargeAcross(segs)
+	got := StandingChargeAcross(segs, loc)
 	want := 2*daily*1.05 + 3*daily*1.00 // 1.239 + 1.77
 	if math.Abs(got-want) > 1e-9 {
 		t.Errorf("standing charge %.6f, want %.6f", got, want)
@@ -68,7 +68,7 @@ func TestZeroRatedStandingChargeIsItsExVATValue(t *testing.T) {
 		Stop:   time.Date(2026, 12, 31, 0, 0, 0, 0, loc),
 		Tariff: config.Tariff{DailyStandingCharge: 0.59, VATRate: 0},
 	}
-	got := StandingChargeAcross([]config.Segment{seg})
+	got := StandingChargeAcross([]config.Segment{seg}, loc)
 	if want := 30 * 0.59; math.Abs(got-want) > 1e-9 {
 		t.Errorf("standing charge %.6f, want %.6f (30 days, no VAT)", got, want)
 	}
@@ -89,7 +89,7 @@ func TestStandingChargeAcrossTheReturnToStandardRate(t *testing.T) {
 			Tariff: config.Tariff{DailyStandingCharge: daily, VATRate: 0.05}},
 	}
 
-	got := StandingChargeAcross(segs)
+	got := StandingChargeAcross(segs, loc)
 	if want := 2*daily*1.00 + 1*daily*1.05; math.Abs(got-want) > 1e-9 {
 		t.Errorf("standing charge %.6f, want %.6f", got, want)
 	}
@@ -118,5 +118,20 @@ func TestZeroRatedNegativePriceIsUnchanged(t *testing.T) {
 	five := config.Tariff{UnitRate: -0.02, VATRate: 0.05}
 	if got := -0.02 * five.Multiplier(); got >= -0.02 {
 		t.Errorf("VAT on a negative rate gave %v; it must become MORE negative", got)
+	}
+}
+
+// A configured-tariff bill for the autumn clock-change day charges one day, not
+// 25/24 of one (issue #56). Zero-rated, so the expectation is exactly the
+// configured daily charge — the figure the supplier bills for that day.
+func TestStandingChargeAcrossTheAutumnClockChangeIsOneDay(t *testing.T) {
+	loc := vatLoc(t)
+	segs := []config.Segment{{
+		Start:  time.Date(2026, 10, 25, 0, 0, 0, 0, loc),
+		Stop:   time.Date(2026, 10, 26, 0, 0, 0, 0, loc),
+		Tariff: config.Tariff{DailyStandingCharge: 0.59, VATRate: 0},
+	}}
+	if got := StandingChargeAcross(segs, loc); math.Abs(got-0.59) > 1e-9 {
+		t.Errorf("standing charge £%.6f, want £0.590000 (one calendar day, not 25/24)", got)
 	}
 }
