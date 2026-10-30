@@ -178,7 +178,7 @@ func (d *floorplanDocument) UnmarshalJSON(b []byte) error {
 		// every record in it with no error and no warning, which is
 		// indistinguishable from a floorplan publishing none — the same silence
 		// the required-namespace and cold-start refusals exist to remove, one layer
-		// further in. Refused, the fetch fails, recordStatus records it, /healthz
+		// further in. Refused, the fetch fails, the tracker records it, /healthz
 		// degrades, and at boot Cold() refuses to start.
 		//
 		// Loud rather than LIBERAL: greenhouse's decoder has the same asymmetry, so

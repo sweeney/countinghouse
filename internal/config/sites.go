@@ -2,8 +2,13 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 )
+
+// namespaceNameRE is the config service's rule for a namespace name, the same one
+// remoteconfig checks before each request.
+var namespaceNameRE = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
 // SiteRecord is one property as described in the shared `sites` namespace.
 //
@@ -118,6 +123,23 @@ func ResolveSiteNamespaces(local SiteConfig, sites Sites) (SiteNamespaces, []str
 				"floor and room reports as an id where a name belongs", local.ID)
 	}
 	// Agreements being empty is legal: it means stay on the legacy tariff document.
+
+	// A name config would refuse is refused here, wherever it came from.
+	// remoteconfig rejects it without sending a request, so left to run it would
+	// surface only as a cold namespace at boot, under a message about fetching
+	// rather than about the name.
+	for _, n := range []struct{ field, name string }{
+		{"devices_namespace", out.Devices},
+		{"floorplan_namespace", out.Floorplan},
+		{"energy_agreements_namespace", out.Agreements},
+	} {
+		if n.name != "" && !namespaceNameRE.MatchString(n.name) {
+			return SiteNamespaces{}, warns, fmt.Errorf(
+				"config: site %q: %s %q is not a name the config service accepts "+
+					"(lowercase letters, digits, _ and -, at most 64), so it could never be fetched",
+				local.ID, n.field, n.name)
+		}
+	}
 	return out, warns, nil
 }
 

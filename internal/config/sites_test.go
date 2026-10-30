@@ -446,3 +446,35 @@ remote_config: { base_url: "" }
 		}
 	})
 }
+
+// A name config would refuse never reaches it: remoteconfig rejects it locally and
+// sends nothing. Resolution is where every name countinghouse reads is settled,
+// from sites or from local config, so it is refused there, by field, before boot.
+func TestResolveSiteNamespacesRefusesANameConfigCannotServe(t *testing.T) {
+	cases := []struct {
+		name  string
+		local SiteConfig
+		sites Sites
+		field string
+	}{
+		{"devices from sites", SiteConfig{ID: "home"},
+			Sites{Sites: []SiteRecord{{ID: "home", DevicesNamespace: "Devices.Home", FloorplanNamespace: "floorplan_home"}}},
+			"devices_namespace"},
+		{"floorplan from local", SiteConfig{ID: "home", FloorplanNamespace: "floor plan"},
+			Sites{Sites: []SiteRecord{{ID: "home", DevicesNamespace: "devices_home"}}},
+			"floorplan_namespace"},
+		{"agreements from local", SiteConfig{ID: "home", EnergyAgreementsNamespace: strings.Repeat("a", 65)},
+			Sites{Sites: []SiteRecord{{ID: "home", DevicesNamespace: "devices_home", FloorplanNamespace: "floorplan_home"}}},
+			"energy_agreements_namespace"},
+	}
+	for _, tc := range cases {
+		_, _, err := ResolveSiteNamespaces(tc.local, tc.sites)
+		if err == nil {
+			t.Errorf("%s: an invalid name must be refused", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.field) {
+			t.Errorf("%s: error must name %q so it is actionable, got: %v", tc.name, tc.field, err)
+		}
+	}
+}

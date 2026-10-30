@@ -47,12 +47,13 @@ func TestFetchErrorIdentifiesTheNamespace(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &Fetcher{BaseURL: srv.URL, Tokens: &staticTokenSource{"token"}, DevicesNamespace: "devices_home"}
-	err := f.fetch(context.Background(), "devices_hme", &map[string]DeviceConfig{})
-	if err == nil {
-		t.Fatal("want an error for a 404")
+	f := &Fetcher{BaseURL: srv.URL, Tokens: &staticTokenSource{"token"}, DevicesNamespace: "devices_hme"}
+	f.Refresh(context.Background())
+	s := f.Statuses()["devices_hme"]
+	if s.OK || s.Error == "" {
+		t.Fatalf("status = %+v, want a recorded 404", s)
 	}
-	if !strings.Contains(err.Error(), "devices_hme") {
-		t.Errorf("fetch error = %q, want it to name the namespace", err)
+	if !strings.Contains(s.Error, "devices_hme") {
+		t.Errorf("status error = %q, want it to name the namespace", s.Error)
 	}
 }

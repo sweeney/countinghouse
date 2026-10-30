@@ -340,6 +340,11 @@ surfaces days later as a chart legend reading `floor1.room-c` to a human. So it 
 declared or the service refuses to start. (This is stricter than greenhouse, which treats
 the same namespace as optional.)
 
+Every namespace name, whether from `sites` or local config, must also be one the config
+service accepts (`^[a-z0-9_-]{1,64}$`), or the service refuses to start, naming the
+field. Such a name is refused without a request, so left to run it would surface only as
+a cold namespace, under a message about fetching rather than about the name.
+
 ### Boot needs truth, running keeps the last truth
 
 Remote-config fetches are **fail-open** — a failure keeps the last-known snapshot — with
