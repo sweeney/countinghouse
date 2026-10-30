@@ -73,8 +73,14 @@ github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+
 github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UVUgZn+9EI=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/sweeney/identity/common v0.6.0 h1:Z4RWlqNm7dNxDXC9mBoPFOQlH6KSEt1j79TRsszRHJs=
-github.com/sweeney/identity/common v0.6.0/go.mod h1:o+vwuSQpHez/+oHzPqaiay36ep1XwmBstwTjKh1vbHo=
+github.com/sweeney/common/backup v0.1.0 h1:AkxvrxvD9c/kDLpc9yJ7PwXHhJtda6b91wSYpFJo79E=
+github.com/sweeney/common/backup v0.1.0/go.mod h1:XeWoblZb/LtkwHSzpZcNs7bEP8qmsPWCWqKlM5Jx6hA=
+github.com/sweeney/common/db v0.1.0 h1:U4HPfqLr4Le1rnW9/D2LbPZga/mzJL3tcYpCbHgJHQw=
+github.com/sweeney/common/db v0.1.0/go.mod h1:S8cus8f3QU2jz/5xyz5PKJGnUY6LbYXYEVLybvNPk4Y=
+github.com/sweeney/common/web v0.2.0 h1:LnlX9fpg/hMpVMDjqcttWMh6lN4uFzVsdk6vu8IQpBI=
+github.com/sweeney/common/web v0.2.0/go.mod h1:Eol05LCMORsBfLsIXh7QX2tRtgGa8NsMHg+8wbPe/HU=
+github.com/sweeney/identity/common v0.7.0 h1:jPHgEtsXFaNWZMWbzdwXATkEPR8YzvgXsC0bg1Tqf0Y=
+github.com/sweeney/identity/common v0.7.0/go.mod h1:SBqRGwkatgvnPY91G4CdFzIqYCMogi7PDySYbGIn7FA=
 go.uber.org/mock v0.6.0 h1:hyF9dfmbgIX5EfOdasqLsWD6xqpNZlXblLB/Dbnwv3Y=
 go.uber.org/mock v0.6.0/go.mod h1:KiVJ4BqZJaMj4svdfmHM0AUx4NJYO8ZNpPnZn1Z+BBU=
 golang.org/x/mod v0.33.0 h1:tHFzIWbBifEmbwtGz65eaWyGiGZatSrT9prnU8DbVL8=

@@ -88,6 +88,11 @@ primary durable state, and the invariant needs amending explicitly rather than q
 
 **Decision: S1 — SQLite through `github.com/sweeney/identity/common/db`.**
 
+> *Since 2026-10:* that package is now `github.com/sweeney/common/db`, moved unchanged
+> out of `identity/common` (which as of v0.7.0 holds only `auth`). References to
+> `common/db` and `common/backup` below mean the `sweeney/common` modules; the
+> version numbers quoted are the `identity/common` versions current when this was written.
+
 An earlier draft of this document recommended append-only JSONL, on two arguments that do
 not survive contact with the shared module:
 

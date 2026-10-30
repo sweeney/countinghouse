@@ -730,7 +730,7 @@ prices:
 ```
 
 Objects land at `{env}/backups/countinghouse/{YYYY}/{MM}/{DD}/countinghouse-{RFC3339}.sqlite3`,
-which is the layout `identity/common/backup` restores from.
+which is the layout `github.com/sweeney/common/backup` restores from.
 
 - **Omit the whole block to disable backups.** Correct for development and for any
   deployment with no archive. **A partial block is refused at startup** — a backup that is
