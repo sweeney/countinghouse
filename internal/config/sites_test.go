@@ -3,11 +3,14 @@ package config
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sweeney/common/remoteconfig"
 )
 
 // ---------------------------------------------------------------------------
@@ -475,6 +478,9 @@ func TestResolveSiteNamespacesRefusesANameConfigCannotServe(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), tc.field) {
 			t.Errorf("%s: error must name %q so it is actionable, got: %v", tc.name, tc.field, err)
+		}
+		if !errors.Is(err, remoteconfig.ErrInvalidName) {
+			t.Errorf("%s: error %q does not wrap remoteconfig.ErrInvalidName", tc.name, err)
 		}
 	}
 }
