@@ -2,13 +2,10 @@ package config
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
-)
 
-// namespaceNameRE is the config service's rule for a namespace name, the same one
-// remoteconfig checks before each request.
-var namespaceNameRE = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
+	"github.com/sweeney/common/remoteconfig"
+)
 
 // SiteRecord is one property as described in the shared `sites` namespace.
 //
@@ -133,11 +130,18 @@ func ResolveSiteNamespaces(local SiteConfig, sites Sites) (SiteNamespaces, []str
 		{"floorplan_namespace", out.Floorplan},
 		{"energy_agreements_namespace", out.Agreements},
 	} {
-		if n.name != "" && !namespaceNameRE.MatchString(n.name) {
+		// Empty is unset, not invalid: agreements may be left unset, and the two
+		// required pointers have their own messages above.
+		if n.name == "" {
+			continue
+		}
+		// remoteconfig.ValidName is the check Get makes before each request, so
+		// resolution and every fetch apply one rule.
+		if err := remoteconfig.ValidName(n.name); err != nil {
 			return SiteNamespaces{}, warns, fmt.Errorf(
 				"config: site %q: %s %q is not a name the config service accepts "+
-					"(lowercase letters, digits, _ and -, at most 64), so it could never be fetched",
-				local.ID, n.field, n.name)
+					"(lowercase letters, digits, _ and -, at most 64), so it could never be fetched: %w",
+				local.ID, n.field, n.name, err)
 		}
 	}
 	return out, warns, nil
