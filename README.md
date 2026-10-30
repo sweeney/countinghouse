@@ -418,6 +418,14 @@ house:   { timezone: "Europe/London" }
   would fall mid-bucket, so energy would be misplaced silently. See
   [Clock changes](#clock-changes).
 
+- **`http.audience_check`** is how an incoming token's `aud` claim is checked against
+  `countinghouse`: `warn` (the default) accepts a token that does not name it and logs
+  `token would be rejected by audience enforcement` with the caller's subject and
+  audience; `enforce` answers it 401; `off` does neither. Without the check, a token
+  minted for any sibling service reads countinghouse. Each warning is a caller that
+  enforcing would lock out (sweeney/countinghouse#59): fix its client's audiences in
+  identity, then make `enforce` the default.
+
 - **Influx** read token must be scoped (read-only) to the bucket statehouse writes.
 - **`identity.client_id`/`client_secret`** are used only to fetch the remote config namespaces
   (the devices namespace named by the `sites` entry, and the tariff namespace) via

@@ -2,11 +2,17 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/sweeney/countinghouse/internal/config"
 	"github.com/sweeney/identity/common/auth"
 )
+
+// Audience is the `aud` a token must carry to read countinghouse, under
+// Server.AudienceCheck.
+const Audience = "countinghouse"
 
 // authMiddleware returns a middleware that validates Bearer JWTs when
 // IdentityURL is set. When IdentityURL is empty it returns a no-op wrapper so
@@ -17,11 +23,24 @@ func (s *Server) authMiddleware() func(http.Handler) http.Handler {
 	if s.IdentityURL == "" {
 		return func(h http.Handler) http.Handler { return h }
 	}
-	verifier, err := auth.NewJWKSVerifier(auth.JWKSVerifierConfig{
+	vc := auth.JWKSVerifierConfig{
 		IssuerURL: s.IdentityURL,
 		Issuer:    s.IdentityURL,
 		Logger:    s.Logger,
-	})
+	}
+	switch s.AudienceCheck {
+	case config.AudienceWarn:
+		// Accepted, and logged with the caller's subject and audience: each
+		// warning is a caller that enforcing would lock out.
+		vc.RequiredAudience, vc.RequiredAudienceWarnOnly = Audience, true
+	case config.AudienceEnforce:
+		vc.RequiredAudience = Audience
+	case config.AudienceOff, "":
+	default:
+		// config.Load refuses any other mode, so this is a wiring mistake.
+		panic(fmt.Sprintf("httpapi: unknown audience check %q", s.AudienceCheck))
+	}
+	verifier, err := auth.NewJWKSVerifier(vc)
 	if err != nil {
 		// Only fails when IssuerURL or Issuer is empty, guarded above.
 		panic(err)
