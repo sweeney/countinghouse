@@ -2,6 +2,15 @@ package config
 
 import "testing"
 
+// normaliseAll applies the shared schema's legacy fold, which the fetcher gets
+// from devices.Decode. These tests pin what countinghouse relies on from it.
+func normaliseAll(m map[string]DeviceConfig) {
+	for id, d := range m {
+		d.Normalise()
+		m[id] = d
+	}
+}
+
 func TestNormaliseDevicesLegacyShorthand(t *testing.T) {
 	devices := map[string]DeviceConfig{
 		"winefridge": {
@@ -10,7 +19,7 @@ func TestNormaliseDevicesLegacyShorthand(t *testing.T) {
 			Class:        "continuous_power_device",
 		},
 	}
-	normaliseDevices(devices)
+	normaliseAll(devices)
 	d := devices["winefridge"]
 	if d.Scheme != "zigbee" {
 		t.Errorf("scheme = %q, want zigbee", d.Scheme)
@@ -33,7 +42,7 @@ func TestNormaliseDevicesDoesNotOverrideCanonical(t *testing.T) {
 			FriendlyName: "Legacy Name",
 		},
 	}
-	normaliseDevices(devices)
+	normaliseAll(devices)
 	d := devices["plug"]
 	if d.Scheme != "tasmota" {
 		t.Errorf("scheme = %q, want tasmota preserved", d.Scheme)
@@ -50,7 +59,7 @@ func TestNormaliseDevicesNoLegacyFields(t *testing.T) {
 	devices := map[string]DeviceConfig{
 		"meter": {Class: "energy_meter"},
 	}
-	normaliseDevices(devices)
+	normaliseAll(devices)
 	d := devices["meter"]
 	if d.Scheme != "" {
 		t.Errorf("scheme = %q, want empty (no legacy fields to imply zigbee)", d.Scheme)
