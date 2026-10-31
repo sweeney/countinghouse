@@ -90,8 +90,8 @@ type RoomConfig struct {
 //
 // The key is AUTHORITATIVE: it is what a device's `floor` property references
 // and what `floors=` matches, so a record whose inner id disagrees with its key
-// would otherwise publish an id nothing can be filtered by. Mirrors
-// normaliseDevices, which treats the device_id key the same way.
+// would otherwise publish an id nothing can be filtered by. (Devices need no
+// such step: a device record has no inner id, only its key.)
 func normaliseFloors(floors map[string]FloorConfig) {
 	for id, f := range floors {
 		f.ID = id

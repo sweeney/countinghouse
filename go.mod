@@ -5,8 +5,9 @@ go 1.25.0
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/influxdata/influxdb-client-go/v2 v2.14.0
-	github.com/sweeney/common/backup v0.1.0
+	github.com/sweeney/common/backup v0.1.1
 	github.com/sweeney/common/db v0.1.0
+	github.com/sweeney/common/devices v0.1.0
 	github.com/sweeney/common/remoteconfig v0.2.0
 	github.com/sweeney/common/web v0.2.0
 	github.com/sweeney/identity/common v0.7.0
