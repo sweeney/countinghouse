@@ -419,12 +419,14 @@ house:   { timezone: "Europe/London" }
   [Clock changes](#clock-changes).
 
 - **`http.audience_check`** is how an incoming token's `aud` claim is checked against
-  `countinghouse`: `warn` (the default) accepts a token that does not name it and logs
-  `token would be rejected by audience enforcement` with the caller's subject and
-  audience; `enforce` answers it 401; `off` does neither. Without the check, a token
-  minted for any sibling service reads countinghouse. Each warning is a caller that
-  enforcing would lock out (sweeney/countinghouse#59): fix its client's audiences in
-  identity, then make `enforce` the default.
+  `countinghouse`: `enforce` (the default) answers a token that does not name it 401;
+  `warn` accepts it and logs `token would be rejected by audience enforcement` with the
+  caller's subject and audience; `off` does neither. Without the check, a token minted
+  for any sibling service reads countinghouse. Warn ran as the default from 30 Oct 2026
+  and logged no caller (sweeney/countinghouse#59). A service caller needs its
+  `client_credentials` client registered for `countinghouse` in identity; if a
+  forgotten one turns up, set `audience_check: warn` in
+  `/etc/countinghouse/config.yaml` and restart, with no rebuild.
 
 - **Influx** read token must be scoped (read-only) to the bucket statehouse writes.
 - **`identity.client_id`/`client_secret`** are used only to fetch the remote config namespaces
