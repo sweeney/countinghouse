@@ -422,8 +422,8 @@ house:   { timezone: "Europe/London" }
   `countinghouse`: `enforce` (the default) answers a token that does not name it 401;
   `warn` accepts it and logs `token would be rejected by audience enforcement` with the
   caller's subject and audience; `off` does neither. Without the check, a token minted
-  for any sibling service reads countinghouse. Warn ran as the default from 30 Oct 2026
-  and logged no caller (sweeney/countinghouse#59). A service caller needs its
+  for any sibling service reads countinghouse. Warn ran in production first and logged
+  no caller (sweeney/countinghouse#59). A service caller needs its
   `client_credentials` client registered for `countinghouse` in identity; if a
   forgotten one turns up, set `audience_check: warn` in
   `/etc/countinghouse/config.yaml` and restart, with no rebuild.

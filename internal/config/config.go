@@ -121,8 +121,8 @@ type HTTPConfig struct {
 	// service (mqttauth, config) reads countinghouse.
 	//
 	// Warn was the default first, so the check could ship before anyone had
-	// read the warnings. It ran in production from 30 Oct 2026 and logged no
-	// caller, so enforce is now the default (#59). Setting warn in the host's
+	// read the warnings. It ran in production first and logged no caller, so
+	// enforce is now the default (#59). Setting warn in the host's
 	// config file is the rollback if a forgotten caller turns up.
 	AudienceCheck string `yaml:"audience_check"`
 }

@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// Unset means enforce: warn ran in production from 30 Oct 2026 and logged no
-// caller that enforcing would lock out (#59). warn and off stay available as
+// Unset means enforce: warn ran in production first and logged no caller that
+// enforcing would lock out (#59). warn and off stay available as
 // an explicit setting, for a rollback without a rebuild.
 func TestLoadDefaultsAudienceCheckToEnforce(t *testing.T) {
 	cfg, err := Load(writeConfig(t, "http:\n  listen: \":8585\"\n"))
