@@ -115,15 +115,15 @@ type HTTPConfig struct {
 	PublicURL string `yaml:"public_url"`
 
 	// AudienceCheck is how incoming tokens' `aud` claim is checked against
-	// "countinghouse": AudienceWarn (the default) accepts a token that does not
-	// name it and logs the caller, AudienceEnforce refuses it with a 401, and
+	// "countinghouse": AudienceEnforce (the default) refuses a token that does
+	// not name it with a 401, AudienceWarn accepts it and logs the caller, and
 	// AudienceOff does neither. Without a check, a token minted for any sibling
 	// service (mqttauth, config) reads countinghouse.
 	//
-	// Warn is the default so the check can ship before anyone has read the
-	// warnings: every one names a caller that enforcing would lock out. Moving
-	// to enforce is then a reviewed change to this default, not an edit of the
-	// host's root-owned config file.
+	// Warn was the default first, so the check could ship before anyone had
+	// read the warnings. It ran in production first and logged no caller, so
+	// enforce is now the default (#59). Setting warn in the host's
+	// config file is the rollback if a forgotten caller turns up.
 	AudienceCheck string `yaml:"audience_check"`
 }
 
@@ -330,7 +330,7 @@ func Load(path string) (Config, error) {
 	}
 	switch cfg.HTTP.AudienceCheck {
 	case "":
-		cfg.HTTP.AudienceCheck = AudienceWarn
+		cfg.HTTP.AudienceCheck = AudienceEnforce
 	case AudienceWarn, AudienceEnforce, AudienceOff:
 	default:
 		// A misspelt mode must not quietly mean "off".

@@ -5,16 +5,16 @@ import (
 	"testing"
 )
 
-// Unset means warn: the check only logs, so it can ship before anyone has read
-// the warnings, and switching to enforce is a reviewed change rather than a
-// root edit of the host's config file.
-func TestLoadDefaultsAudienceCheckToWarn(t *testing.T) {
+// Unset means enforce: warn ran in production first and logged no caller that
+// enforcing would lock out (#59). warn and off stay available as
+// an explicit setting, for a rollback without a rebuild.
+func TestLoadDefaultsAudienceCheckToEnforce(t *testing.T) {
 	cfg, err := Load(writeConfig(t, "http:\n  listen: \":8585\"\n"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.HTTP.AudienceCheck != AudienceWarn {
-		t.Errorf("audience_check = %q, want %q", cfg.HTTP.AudienceCheck, AudienceWarn)
+	if cfg.HTTP.AudienceCheck != AudienceEnforce {
+		t.Errorf("audience_check = %q, want %q", cfg.HTTP.AudienceCheck, AudienceEnforce)
 	}
 }
 
