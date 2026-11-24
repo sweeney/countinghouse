@@ -3183,8 +3183,10 @@ components:
         on:
           type: boolean
           description: >
-            Normalized on/off state derived from the to-label. Omitted when the
-            label is not a known on/off state (a momentary/unknown event).
+            Normalized on/off state derived from the to-label. On-labels:
+            "active", "running" (a cycle_power_device cycle). Off-labels:
+            "idle", "finished_recently". Omitted when the label is not a known
+            on/off state (a momentary/unknown event).
       required: [time, from, to]
 
     Interval:

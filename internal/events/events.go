@@ -39,6 +39,11 @@ import (
 var onStates = map[string]bool{
 	"active": true,
 	"idle":   false,
+	// cycle_power_device vocabulary (officeheater, washer, ...): a cycle runs
+	// idle → running → finished_recently → idle. Only "running" is the ON span;
+	// "finished_recently" is the post-cycle cool-down and draws no power (#65).
+	"running":           true,
+	"finished_recently": false,
 }
 
 // eventClasses are the device classes whose state transitions are exposed as
