@@ -199,6 +199,54 @@ func TestBuildIntervalsCyclePowerDevice(t *testing.T) {
 	}
 }
 
+// TestBuildIntervalsCyclePowerDeviceCarryIn: a cycle already running at the
+// window start opens its span at the start and closes on finished_recently.
+func TestBuildIntervalsCyclePowerDeviceCarryIn(t *testing.T) {
+	start := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
+	stop := start.Add(24 * time.Hour)
+	doneAt := time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC)
+	evs := []Event{{Time: doneAt, From: "running", To: "finished_recently", On: boolPtr(false)}}
+
+	ivs, endState := BuildIntervals(evs, "running", start, stop, time.UTC)
+	if len(ivs) != 1 {
+		t.Fatalf("intervals = %d, want 1", len(ivs))
+	}
+	iv := ivs[0]
+	if !iv.Start.Equal(start) || iv.End == nil || !iv.End.Equal(doneAt) || iv.Open {
+		t.Errorf("interval = %v..%v open=%v, want %v..%v closed", iv.Start, iv.End, iv.Open, start, doneAt)
+	}
+	if iv.State != "running" || iv.DurationS != 7200 {
+		t.Errorf("state/duration = %q/%v, want running/7200", iv.State, iv.DurationS)
+	}
+	if endState != "finished_recently" {
+		t.Errorf("end state = %q, want finished_recently", endState)
+	}
+}
+
+// TestBuildIntervalsCyclePowerDeviceOpenSpan: a cycle still running at the
+// window stop is an open interval measured to stop.
+func TestBuildIntervalsCyclePowerDeviceOpenSpan(t *testing.T) {
+	start := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
+	stop := start.Add(24 * time.Hour)
+	runAt := time.Date(2026, 11, 24, 22, 0, 0, 0, time.UTC)
+	evs := []Event{{Time: runAt, From: "idle", To: "running", On: boolPtr(true)}}
+
+	ivs, endState := BuildIntervals(evs, "idle", start, stop, time.UTC)
+	if len(ivs) != 1 {
+		t.Fatalf("intervals = %d, want 1", len(ivs))
+	}
+	iv := ivs[0]
+	if !iv.Start.Equal(runAt) || iv.End != nil || !iv.Open {
+		t.Errorf("interval = %v..%v open=%v, want %v..nil open", iv.Start, iv.End, iv.Open, runAt)
+	}
+	if iv.State != "running" || iv.DurationS != 7200 {
+		t.Errorf("state/duration = %q/%v, want running/7200", iv.State, iv.DurationS)
+	}
+	if endState != "running" {
+		t.Errorf("end state = %q, want running", endState)
+	}
+}
+
 func TestBuildIntervalsCarryInOn(t *testing.T) {
 	loc := london(t)
 	start := time.Date(2026, 6, 11, 0, 0, 0, 0, loc)
