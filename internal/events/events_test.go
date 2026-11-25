@@ -35,6 +35,9 @@ func TestNormalizeOn(t *testing.T) {
 	}{
 		{"active", boolPtr(true)},
 		{"idle", boolPtr(false)},
+		// cycle_power_device vocabulary (#65).
+		{"running", boolPtr(true)},
+		{"finished_recently", boolPtr(false)},
 		{"ring", nil},
 		{"", nil},
 		{"unknown", nil},
@@ -144,6 +147,103 @@ func TestBuildIntervalsNormalOnOff(t *testing.T) {
 	}
 	if endState != "idle" {
 		t.Errorf("end state = %q, want idle", endState)
+	}
+}
+
+// TestBuildIntervalsCyclePowerDevice reproduces #65: a cycle_power_device
+// (officeheater) emits idle→running→finished_recently→idle. Before the fix
+// neither running nor finished_recently normalized, so the events carried no
+// `on` and /intervals came back empty despite a 5 h cycle.
+func TestBuildIntervalsCyclePowerDevice(t *testing.T) {
+	start := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
+	stop := start.Add(24 * time.Hour)
+	runAt := time.Date(2026, 11, 24, 9, 13, 44, 0, time.UTC)
+	doneAt := time.Date(2026, 11, 24, 14, 16, 59, 0, time.UTC)
+	idleAt := time.Date(2026, 11, 24, 14, 47, 4, 0, time.UTC)
+
+	var rows []influx.Row
+	rows = append(rows, transition("officeheater", runAt, "idle", "running")...)
+	rows = append(rows, transition("officeheater", doneAt, "running", "finished_recently")...)
+	rows = append(rows, transition("officeheater", idleAt, "finished_recently", "idle")...)
+
+	evs := EventsFromRows(rows, time.UTC)
+	if len(evs) != 3 {
+		t.Fatalf("events = %d, want 3", len(evs))
+	}
+	for i, want := range []bool{true, false, false} {
+		if evs[i].On == nil || *evs[i].On != want {
+			t.Errorf("event %d (%s→%s) On = %v, want %v", i, evs[i].From, evs[i].To, evs[i].On, want)
+		}
+	}
+
+	ivs, endState := BuildIntervals(evs, "idle", start, stop, time.UTC)
+	if len(ivs) != 1 {
+		t.Fatalf("intervals = %d, want 1", len(ivs))
+	}
+	iv := ivs[0]
+	if !iv.Start.Equal(runAt) || iv.End == nil || !iv.End.Equal(doneAt) {
+		t.Errorf("interval = %v..%v, want %v..%v", iv.Start, iv.End, runAt, doneAt)
+	}
+	if iv.DurationS != 18195 {
+		t.Errorf("duration = %v, want 18195", iv.DurationS)
+	}
+	if iv.State != "running" {
+		t.Errorf("state = %q, want running", iv.State)
+	}
+	if endState != "idle" {
+		t.Errorf("end state = %q, want idle", endState)
+	}
+	st := ComputeStats(ivs, start, stop)
+	if st.OnCount != 1 || st.TotalOnSeconds != 18195 {
+		t.Errorf("stats = %+v, want on_count 1, total 18195", st)
+	}
+}
+
+// TestBuildIntervalsCyclePowerDeviceCarryIn: a cycle already running at the
+// window start opens its span at the start and closes on finished_recently.
+func TestBuildIntervalsCyclePowerDeviceCarryIn(t *testing.T) {
+	start := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
+	stop := start.Add(24 * time.Hour)
+	doneAt := time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC)
+	evs := []Event{{Time: doneAt, From: "running", To: "finished_recently", On: boolPtr(false)}}
+
+	ivs, endState := BuildIntervals(evs, "running", start, stop, time.UTC)
+	if len(ivs) != 1 {
+		t.Fatalf("intervals = %d, want 1", len(ivs))
+	}
+	iv := ivs[0]
+	if !iv.Start.Equal(start) || iv.End == nil || !iv.End.Equal(doneAt) || iv.Open {
+		t.Errorf("interval = %v..%v open=%v, want %v..%v closed", iv.Start, iv.End, iv.Open, start, doneAt)
+	}
+	if iv.State != "running" || iv.DurationS != 7200 {
+		t.Errorf("state/duration = %q/%v, want running/7200", iv.State, iv.DurationS)
+	}
+	if endState != "finished_recently" {
+		t.Errorf("end state = %q, want finished_recently", endState)
+	}
+}
+
+// TestBuildIntervalsCyclePowerDeviceOpenSpan: a cycle still running at the
+// window stop is an open interval measured to stop.
+func TestBuildIntervalsCyclePowerDeviceOpenSpan(t *testing.T) {
+	start := time.Date(2026, 11, 24, 0, 0, 0, 0, time.UTC)
+	stop := start.Add(24 * time.Hour)
+	runAt := time.Date(2026, 11, 24, 22, 0, 0, 0, time.UTC)
+	evs := []Event{{Time: runAt, From: "idle", To: "running", On: boolPtr(true)}}
+
+	ivs, endState := BuildIntervals(evs, "idle", start, stop, time.UTC)
+	if len(ivs) != 1 {
+		t.Fatalf("intervals = %d, want 1", len(ivs))
+	}
+	iv := ivs[0]
+	if !iv.Start.Equal(runAt) || iv.End != nil || !iv.Open {
+		t.Errorf("interval = %v..%v open=%v, want %v..nil open", iv.Start, iv.End, iv.Open, runAt)
+	}
+	if iv.State != "running" || iv.DurationS != 7200 {
+		t.Errorf("state/duration = %q/%v, want running/7200", iv.State, iv.DurationS)
+	}
+	if endState != "running" {
+		t.Errorf("end state = %q, want running", endState)
 	}
 }
 

@@ -997,7 +997,10 @@ paths:
         Sustained ON spans for one device over the window (shaded bands), with
         the carry-in opening state (state_at_start), per-interval durations, an
         open flag for an in-progress span at the window end, and summary stats
-        (on_count, total_on_seconds, duty).
+        (on_count, total_on_seconds, duty). Served for any device, including
+        cycle_power_device (running = on), even though that class is not an
+        event class and so is absent from the default /events overlay and the
+        /devices events capability.
       operationId: getDeviceIntervals
       tags: [data]
       parameters:
@@ -3183,8 +3186,10 @@ components:
         on:
           type: boolean
           description: >
-            Normalized on/off state derived from the to-label. Omitted when the
-            label is not a known on/off state (a momentary/unknown event).
+            Normalized on/off state derived from the to-label. On-labels:
+            "active", "running" (a cycle_power_device cycle). Off-labels:
+            "idle", "finished_recently". Omitted when the label is not a known
+            on/off state (a momentary/unknown event).
       required: [time, from, to]
 
     Interval:
